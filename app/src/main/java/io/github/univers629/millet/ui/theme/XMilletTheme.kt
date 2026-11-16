@@ -1,0 +1,335 @@
+package io.github.univers629.millet.ui.theme
+
+import android.app.Activity
+import android.content.SharedPreferences
+import android.os.Build
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.navigationevent.NavigationEventDispatcher
+import androidx.navigationevent.NavigationEventDispatcherOwner
+import androidx.navigationevent.OnBackInvokedDefaultInput
+import androidx.navigationevent.OnBackInvokedOverlayInput
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
+import androidx.navigationevent.findViewTreeNavigationEventDispatcherOwner
+import androidx.navigationevent.setViewTreeNavigationEventDispatcherOwner
+import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.PrefsDefaults
+import io.github.univers629.millet.core.PrefsKeys
+import top.yukonga.miuix.kmp.theme.ColorSchemeMode
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeColorSpec
+import top.yukonga.miuix.kmp.theme.ThemeController
+import top.yukonga.miuix.kmp.theme.ThemePaletteStyle
+
+val LocalColorMode = staticCompositionLocalOf { 0 }
+val LocalEnableBlur = compositionLocalOf { true }
+val LocalEnableFloatingBottomBar = compositionLocalOf { true }
+val LocalEnableFloatingBottomBarBlur = compositionLocalOf { true }
+
+@Composable
+@ReadOnlyComposable
+fun isInDarkTheme(): Boolean {
+    return when (LocalColorMode.current) {
+        1, 4 -> false
+        2, 5, 6 -> true
+        else -> isSystemInDarkTheme()
+    }
+}
+
+/**
+ * XMillet 界面主题与视觉特效配置状态（持久化于 SharedPreferences，不污染 20 个核心 Hook 键）。
+ */
+@Stable
+class UiThemeState(private val prefs: SharedPreferences) {
+
+    companion object {
+        private const val KEY_THEME_DARK_MODE = "ui_theme_dark_mode" // 0: 跟随系统, 1: 浅色, 2: 深色
+        private const val KEY_MONET_ENABLED = "ui_monet_enabled"     // 默认 false（不启用莫奈动态取色，沿用品牌蓝）
+        private const val KEY_KEY_COLOR = "ui_key_color"             // 0: 系统壁纸取色, 其余为 ARGB
+        private const val KEY_PALETTE_STYLE = "ui_palette_style"     // ThemePaletteStyle.name
+        private const val KEY_COLOR_SPEC = "ui_color_spec"           // ThemeColorSpec.name
+        private const val KEY_ENABLE_BLUR = "ui_enable_blur"         // 顶栏/底栏毛玻璃
+        private const val KEY_FLOATING_BAR = "ui_floating_bar"       // 悬浮底栏
+        private const val KEY_FLOATING_BAR_BLUR = "ui_floating_bar_blur" // 悬浮底栏液态玻璃折射
+        private const val KEY_SHOW_TOMB_STATS = "ui_show_tomb_stats"   // 底栏显示「墓碑统计」，默认开启
+    }
+
+    /**
+     * 底栏是否显示「墓碑统计」页（与模块配置键 [PrefsKeys.FREEZE_STATS] 保持同步，
+     * 切换时同步通知 system_server 启停统计采集）。
+     */
+    var showTombStatsTab by mutableStateOf(
+        if (prefs.contains(PrefsKeys.FREEZE_STATS)) {
+            PrefReader.readUiBoolean(prefs, PrefsKeys.FREEZE_STATS)
+        } else {
+            prefs.getBoolean(KEY_SHOW_TOMB_STATS, PrefsDefaults.FREEZE_STATS)
+        }
+    )
+        private set
+
+    fun updateShowTombStatsTab(enabled: Boolean) {
+        showTombStatsTab = enabled
+        prefs.edit().putBoolean(KEY_SHOW_TOMB_STATS, enabled).apply()
+        PrefReader.putBooleanAndNotify(prefs, PrefsKeys.FREEZE_STATS, enabled)
+    }
+
+    fun syncTombStatsFromPrefs() {
+        val synced = PrefReader.readUiBoolean(prefs, PrefsKeys.FREEZE_STATS)
+        showTombStatsTab = synced
+        prefs.edit().putBoolean(KEY_SHOW_TOMB_STATS, synced).apply()
+    }
+
+    var darkMode by mutableIntStateOf(prefs.getInt(KEY_THEME_DARK_MODE, 0))
+        private set
+
+    var monetEnabled by mutableStateOf(prefs.getBoolean(KEY_MONET_ENABLED, false))
+        private set
+
+    var keyColor by mutableIntStateOf(prefs.getInt(KEY_KEY_COLOR, 0))
+        private set
+
+    var paletteStyle by mutableStateOf(
+        runCatching {
+            ThemePaletteStyle.valueOf(
+                prefs.getString(KEY_PALETTE_STYLE, ThemePaletteStyle.TonalSpot.name)
+                    ?: ThemePaletteStyle.TonalSpot.name
+            )
+        }.getOrDefault(ThemePaletteStyle.TonalSpot)
+    )
+        private set
+
+    var colorSpec by mutableStateOf(
+        runCatching {
+            ThemeColorSpec.valueOf(
+                prefs.getString(KEY_COLOR_SPEC, ThemeColorSpec.Spec2021.name)
+                    ?: ThemeColorSpec.Spec2021.name
+            )
+        }.getOrDefault(ThemeColorSpec.Spec2021)
+    )
+        private set
+
+    var enableBlur by mutableStateOf(prefs.getBoolean(KEY_ENABLE_BLUR, true))
+        private set
+
+    var enableFloatingBottomBar by mutableStateOf(prefs.getBoolean(KEY_FLOATING_BAR, true))
+        private set
+
+    var enableFloatingBottomBarBlur by mutableStateOf(prefs.getBoolean(KEY_FLOATING_BAR_BLUR, true))
+        private set
+
+    fun updateDarkMode(mode: Int) {
+        darkMode = mode.coerceIn(0, 2)
+        prefs.edit().putInt(KEY_THEME_DARK_MODE, darkMode).apply()
+    }
+
+    fun updateMonetEnabled(enabled: Boolean) {
+        monetEnabled = enabled
+        prefs.edit().putBoolean(KEY_MONET_ENABLED, enabled).apply()
+    }
+
+    fun updateKeyColor(colorArgb: Int) {
+        keyColor = colorArgb
+        prefs.edit().putInt(KEY_KEY_COLOR, colorArgb).apply()
+    }
+
+    fun updatePaletteStyle(style: ThemePaletteStyle) {
+        paletteStyle = style
+        prefs.edit().putString(KEY_PALETTE_STYLE, style.name).apply()
+    }
+
+    fun updateColorSpec(spec: ThemeColorSpec) {
+        colorSpec = spec
+        prefs.edit().putString(KEY_COLOR_SPEC, spec.name).apply()
+    }
+
+    fun updateEnableBlur(enabled: Boolean) {
+        enableBlur = enabled
+        prefs.edit().putBoolean(KEY_ENABLE_BLUR, enabled).apply()
+    }
+
+    fun updateEnableFloatingBottomBar(enabled: Boolean) {
+        enableFloatingBottomBar = enabled
+        prefs.edit().putBoolean(KEY_FLOATING_BAR, enabled).apply()
+    }
+
+    fun updateEnableFloatingBottomBarBlur(enabled: Boolean) {
+        enableFloatingBottomBarBlur = enabled
+        prefs.edit().putBoolean(KEY_FLOATING_BAR_BLUR, enabled).apply()
+    }
+
+    /**
+     * 计算传给 Miuix ThemeController 的 ColorSchemeMode 编码（对齐 KernelSU MiuixTheme）。
+     */
+    val effectiveColorMode: Int
+        get() = if (monetEnabled) {
+            when (darkMode) {
+                1 -> 4 // MonetLight
+                2 -> 5 // MonetDark
+                else -> 3 // MonetSystem
+            }
+        } else {
+            when (darkMode) {
+                1 -> 1 // Light
+                2 -> 2 // Dark
+                else -> 0 // System
+            }
+        }
+}
+
+/**
+ * XMillet 全局 Miuix 主题包装器（复刻 KernelSU MiuixTheme 实现，支持莫奈壁纸取色、15 色种子、PaletteStyle 与 ColorSpec）。
+ */
+@Composable
+fun XMilletMiuixTheme(
+    themeState: UiThemeState,
+    content: @Composable () -> Unit
+) {
+    val context = LocalContext.current
+    val systemDark = isSystemInDarkTheme()
+    val colorMode = themeState.effectiveColorMode
+    val isDark = isInDarkTheme(colorMode, systemDark)
+
+    val dynamicSeedColor: Color? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (themeState.keyColor == 0) {
+            val dynamicScheme = if (isDark) {
+                dynamicDarkColorScheme(context)
+            } else {
+                dynamicLightColorScheme(context)
+            }
+            dynamicScheme.primary
+        } else {
+            Color(themeState.keyColor)
+        }
+    } else if (themeState.keyColor != 0) {
+        Color(themeState.keyColor)
+    } else {
+        Color(0xFF2196F3)
+    }
+
+    val controller = remember(
+        colorMode,
+        dynamicSeedColor,
+        isDark,
+        themeState.paletteStyle,
+        themeState.colorSpec
+    ) {
+        when (colorMode) {
+            1 -> ThemeController(ColorSchemeMode.Light)
+            2 -> ThemeController(ColorSchemeMode.Dark)
+            3 -> ThemeController(
+                ColorSchemeMode.MonetSystem,
+                keyColor = dynamicSeedColor,
+                isDark = isDark,
+                paletteStyle = themeState.paletteStyle,
+                colorSpec = themeState.colorSpec,
+            )
+            4 -> ThemeController(
+                ColorSchemeMode.MonetLight,
+                keyColor = dynamicSeedColor,
+                isDark = false,
+                paletteStyle = themeState.paletteStyle,
+                colorSpec = themeState.colorSpec,
+            )
+            5 -> ThemeController(
+                ColorSchemeMode.MonetDark,
+                keyColor = dynamicSeedColor,
+                isDark = true,
+                paletteStyle = themeState.paletteStyle,
+                colorSpec = themeState.colorSpec,
+            )
+            else -> ThemeController(ColorSchemeMode.System)
+        }
+    }
+
+    MiuixTheme(controller = controller) {
+        LaunchedEffect(isDark) {
+            val activity = context as? ComponentActivity ?: return@LaunchedEffect
+            val statusBarStyle = if (isDark) {
+                SystemBarStyle.dark(Color.Transparent.toArgb())
+            } else {
+                SystemBarStyle.light(Color.Transparent.toArgb(), Color.Transparent.toArgb())
+            }
+            val navigationBarStyle = if (isDark) {
+                SystemBarStyle.dark(Color.Transparent.toArgb())
+            } else {
+                SystemBarStyle.light(Color.Transparent.toArgb(), Color.Transparent.toArgb())
+            }
+            activity.enableEdgeToEdge(
+                statusBarStyle = statusBarStyle,
+                navigationBarStyle = navigationBarStyle,
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                (activity as? Activity)?.window?.isNavigationBarContrastEnforced = false
+            }
+        }
+
+        val view = LocalView.current
+        val activity = context as? ComponentActivity
+        val hostOwner = LocalNavigationEventDispatcherOwner.current
+            ?: remember(view) { view.findViewTreeNavigationEventDispatcherOwner() }
+        val navOwner = hostOwner ?: remember(activity) {
+            val dispatcher = NavigationEventDispatcher()
+            object : NavigationEventDispatcherOwner {
+                override val navigationEventDispatcher: NavigationEventDispatcher = dispatcher
+            }
+        }
+        if (hostOwner == null) {
+            DisposableEffect(navOwner, activity, view) {
+                val targetView = activity?.window?.decorView ?: view
+                if (targetView.findViewTreeNavigationEventDispatcherOwner() == null) {
+                    targetView.setViewTreeNavigationEventDispatcherOwner(navOwner)
+                }
+                val dispatcher = navOwner.navigationEventDispatcher
+                val inputs = if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val onBackInvokedDispatcher = activity.onBackInvokedDispatcher
+                    listOf(
+                        OnBackInvokedDefaultInput(onBackInvokedDispatcher) to NavigationEventDispatcher.PRIORITY_DEFAULT,
+                        OnBackInvokedOverlayInput(onBackInvokedDispatcher) to NavigationEventDispatcher.PRIORITY_OVERLAY,
+                    )
+                } else {
+                    emptyList()
+                }
+                inputs.forEach { (input, priority) -> dispatcher.addInput(input, priority) }
+                onDispose {
+                    inputs.forEach { (input, _) ->
+                        runCatching { dispatcher.removeInput(input) }
+                    }
+                    if (targetView.findViewTreeNavigationEventDispatcherOwner() === navOwner) {
+                        targetView.setViewTreeNavigationEventDispatcherOwner(null)
+                    }
+                }
+            }
+        }
+
+        CompositionLocalProvider(
+            LocalNavigationEventDispatcherOwner provides navOwner,
+            LocalColorMode provides colorMode,
+            LocalEnableBlur provides themeState.enableBlur,
+            LocalEnableFloatingBottomBar provides themeState.enableFloatingBottomBar,
+            LocalEnableFloatingBottomBarBlur provides themeState.enableFloatingBottomBarBlur,
+        ) {
+            content()
+        }
+    }
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        作用域声明：AndroidManifest 的 xposedscope 元数据读取这份数组，
+        内容与 META-INF/xposed/scope.list 保持一致，只覆盖 system_server 与电量与性能。
+    -->
+    <string-array name="xposed_scope">
+        <item>system</item>
+        <item>com.miui.powerkeeper</item>
+    </string-array>
+</resources>

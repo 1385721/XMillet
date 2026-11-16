@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 图标取自 App.svg：纯白超椭圆底衬 + Miuix 蓝（primary / primaryContainer）双层主体 -->
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+    <color name="ic_launcher_foreground_light">#FF5D9BFF</color>
+    <color name="ic_launcher_foreground_dark">#FF3482FF</color>
+</resources>

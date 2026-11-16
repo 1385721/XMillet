@@ -1,0 +1,83 @@
+package io.github.univers629.millet.ui.component
+
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.unit.dp
+
+/**
+ * XMillet 自定义 MIUI 风格矢量图标集合。
+ *
+ * 所有图标统一遵循 Miuix Original 的 24dp 视口光学留白规范（主体落在 [2.6..21.4] 区间，约 18.8dp 高度），
+ * 避免 Material 部分图标（如 Icons.Rounded.Security 占满 1.4..22.9）在底栏与列表里显得过大或过重。
+ */
+object XMilletIcons {
+
+    /** 「应用策略」盾牌图标：圆润实心盾牌 + EvenOdd 镂空勾选（15.4×18.8dp 光学框）。 */
+    val AppPolicy: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "AppPolicy",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply {
+            path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+                // 圆润盾牌外形：X: 4.3..19.7, Y: 2.6..21.4
+                moveTo(11.3f, 2.85f)
+                quadTo(12f, 2.6f, 12.7f, 2.85f)
+                lineTo(18.9f, 5.15f)
+                quadTo(19.7f, 5.45f, 19.7f, 6.3f)
+                lineTo(19.7f, 11.2f)
+                curveTo(19.7f, 15.8f, 16.55f, 19.65f, 12.65f, 21.2f)
+                quadTo(12f, 21.45f, 11.35f, 21.2f)
+                curveTo(7.45f, 19.65f, 4.3f, 15.8f, 4.3f, 11.2f)
+                lineTo(4.3f, 6.3f)
+                quadTo(4.3f, 5.45f, 5.1f, 5.15f)
+                close()
+
+                // 居中镂空圆角勾选
+                moveTo(9.5f, 11.4f)
+                lineTo(11.1f, 13.0f)
+                lineTo(14.7f, 9.4f)
+                quadTo(15.3f, 8.8f, 15.9f, 9.4f)
+                quadTo(16.5f, 10.0f, 15.9f, 10.6f)
+                lineTo(11.7f, 14.8f)
+                quadTo(11.1f, 15.4f, 10.5f, 14.8f)
+                lineTo(8.3f, 12.6f)
+                quadTo(7.7f, 12.0f, 8.3f, 11.4f)
+                quadTo(8.9f, 10.8f, 9.5f, 11.4f)
+                close()
+            }
+        }.build()
+    }
+
+    /** 「进程列表」闪电图标：圆角饱满闪电（X: 6.1..17.9, Y: 2.6..21.4）。 */
+    val ProcessBolt: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "ProcessBolt",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply {
+            path(fill = SolidColor(Color.Black), pathFillType = PathFillType.NonZero) {
+                moveTo(12.6f, 3.2f)
+                quadTo(13.3f, 2.3f, 13.7f, 3.4f)
+                lineTo(12.8f, 10.6f)
+                quadTo(12.7f, 11.1f, 13.2f, 11.1f)
+                lineTo(17.1f, 11.1f)
+                quadTo(18.2f, 11.1f, 17.5f, 12.0f)
+                lineTo(11.1f, 20.8f)
+                quadTo(10.3f, 21.7f, 10.0f, 20.6f)
+                lineTo(11.1f, 13.3f)
+                quadTo(11.2f, 12.8f, 10.7f, 12.8f)
+                lineTo(6.9f, 12.8f)
+                quadTo(5.8f, 12.8f, 6.5f, 11.9f)
+                close()
+            }
+        }.build()
+    }
+}

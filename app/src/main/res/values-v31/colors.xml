@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 默认未取色品牌图标（纯白背景 + Miuix 标准蓝双色雪花，不受系统莫奈影响） -->
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+    <color name="ic_launcher_foreground_light">#FF5D9BFF</color>
+    <color name="ic_launcher_foreground_dark">#FF3482FF</color>
+</resources>

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
+
+    <application
+        android:name=".MilletApplication"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@style/Theme.XMillet">
+
+        <!-- LSPosed / Xposed 模块元数据声明 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="102" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
+        <!-- 模块设置入口：LSPosed 管理器按 MAIN + MODULE_SETTINGS 解析，
+             因此这里必须同时声明 MAIN，否则隐藏桌面图标后管理器里就没有入口 -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.XMillet">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- 桌面启动图标（launcher 别名，可在设置中隐藏） -->
+        <activity-alias
+            android:name=".ui.MainActivityAlias"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_default"
+            android:roundIcon="@mipmap/ic_launcher_default_round"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!--
+            兼容别名，不对外提供任何「取色」能力，图标与默认别名完全相同。
+            旧版本用 MainActivityAlias / MainActivityAliasThemed 两个别名切换桌面图标，
+            并把 enabled/disabled 状态持久化在 PackageManager 里；功能删除后，那些切换过
+            主题别名的设备升级后会没有桌面图标（默认别名仍是 disabled，主题别名已不存在）。
+            这里保留一个清单默认 disabled 的别名：只有旧设备上已被启用过的那批才会显示图标，
+            应用启动后 migrateRemovedThemedIconAlias() 会把状态迁回默认别名。
+        -->
+        <activity-alias
+            android:name=".ui.MainActivityAliasThemed"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_default"
+            android:roundIcon="@mipmap/ic_launcher_default_round"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+    </application>
+
+</manifest>
+

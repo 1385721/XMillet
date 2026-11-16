@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">XMillet</string>
+    <string name="xposed_description">接管小米「电量与性能」冻结与省电策略（XMillet 原生版）</string>
+</resources>

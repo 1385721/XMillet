@@ -1,0 +1,403 @@
+package io.github.univers629.millet.powerkeeper
+
+import android.content.Context
+import io.github.univers629.millet.core.XReflect
+import io.github.univers629.millet.core.Logger
+import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.RomCapabilities
+import java.lang.ref.WeakReference
+
+/**
+ * `com.miui.powerkeeper` 作用域全局状态、反射对象句柄池与 `MilletPolicy` 内部名单改写器。
+ *
+ * 修正缺陷 #3（Union 合并而非全表覆盖）：
+ * 原模块在 `applyMessageAndWhiteLists()` 中使用 `setObjectField` 将 `mUseSystemBlackList`
+ * 直接替换为 `new HashSet(forceFreezeSet)`，将 `mUseDataWhiteList` 直接替换为 `new HashSet(whiteAppSet)`：
+ * - 当 `forceFreezeSet` 为空时，MIUI 构造器预置的 13 项内置黑名单（`mSystemBlackList`）被全部清空；
+ * - 当 `whiteAppSet` 为空时，MIUI 构造器预置的约 40 项内置白名单（`mDataWhiteList + mMiDataWhiteList`）被全部清空。
+ * 本实现首次访问时先快照保存 MIUI 原生内置集合，随后每次更新均在原生内置集合基础上执行 **union（并集）** 与差集运算。
+ */
+object PowerKeeperState {
+
+    private const val CLASS_BRIGHT_SCENARIO_BASE = "com.miui.powerkeeper.millet.bright.BrightScenarioBase"
+
+    /** PowerKeeper 类加载器 */
+    @Volatile
+    var appClassLoader: ClassLoader? = null
+
+    /** P1 捕获的 PowerKeeperApplication Context（弱引用，避免持有 Context 强引用） */
+    @Volatile
+    private var applicationContextRef: WeakReference<Context>? = null
+
+    var applicationContext: Context?
+        get() = applicationContextRef?.get()
+        set(value) {
+            applicationContextRef = if (value != null) WeakReference(value) else null
+        }
+
+    /**
+     * 热重载后重新取回 Context。
+     *
+     * P1 只在开机时捕获一次 Application，热重载后新一代的弱引用是空的；
+     * powerkeeper 进程里的 `ActivityThread.currentApplication()` 任何时候都有效，
+     * 用它补回即可，避免重载后的 Hook 因为拿不到 Context 而静默失效。
+     */
+    fun reacquireApplicationContext(): Context? {
+        if (applicationContext == null) {
+            val ctx = runCatching {
+                Class.forName("android.app.ActivityThread")
+                    .getMethod("currentApplication")
+                    .invoke(null)
+            }.getOrNull() as? Context
+            if (ctx != null) applicationContext = ctx
+        }
+        return applicationContext
+    }
+
+    /** P2 捕获的 com.miui.powerkeeper.millet.MilletPolicy 实例 */
+    @Volatile
+    var milletPolicyInstance: Any? = null
+
+    /** P15 捕获的 com.miui.powerkeeper.millet.BluetoothEvent 实例 */
+    @Volatile
+    var bluetoothEventInstance: Any? = null
+
+    /** P16 捕获的 com.miui.powerkeeper.millet.bright.BrightController 实例 */
+    @Volatile
+    var brightControllerInstance: Any? = null
+
+    /** P17 捕获的 com.miui.powerkeeper.millet.FreezeBinder 实例 */
+    @Volatile
+    var freezeBinderInstance: Any? = null
+
+    /** P18 捕获的 com.miui.powerkeeper.PowerKeeperManager 实例 */
+    @Volatile
+    var powerKeeperManagerInstance: Any? = null
+
+    /** P19 捕获的 com.miui.powerkeeper.utils.ProcessObserver 实例 */
+    @Volatile
+    var processObserverInstance: Any? = null
+
+    /** P20 捕获的 com.miui.powerkeeper.millet.bright.BrightScenarioBase 实例 */
+    @Volatile
+    var brightScenarioInstance: Any? = null
+
+    /** P23 捕获的 com.miui.powerkeeper.controller.FrozenAppController 实例（澎湃 3.0 起替代 MilletPolicy/FreezeBinder） */
+    @Volatile
+    var frozenAppControllerInstance: Any? = null
+
+    /** P28 捕获的 com.miui.powerkeeper.controller.ActiveStateController 实例（澎湃 3.0 起管理 MILLET_NO_RESTRICT_APP） */
+    @Volatile
+    var activeStateControllerInstance: Any? = null
+
+    /**
+     * 解析澎湃 3.0+ 的 FrozenAppController 实例：优先用 P23 已捕获句柄，兜底从 PowerKeeperManager 取。
+     */
+    fun resolveFrozenAppController(): Any? {
+        frozenAppControllerInstance?.let { return it }
+        val mgr = powerKeeperManagerInstance ?: return null
+        val ctrl = runCatching { XReflect.callMethod(mgr, "getFrozenAppController") }.getOrNull()
+            ?: runCatching { XReflect.getObjectField(mgr, "mFrozenAppController") }.getOrNull()
+        if (ctrl != null) frozenAppControllerInstance = ctrl
+        return ctrl
+    }
+
+    /**
+     * 解析澎湃 3.0+ 的 ActiveStateController 实例：优先用 P28 已捕获句柄，兜底从 PowerKeeperManager 取。
+     */
+    fun resolveActiveStateController(): Any? {
+        activeStateControllerInstance?.let { return it }
+        val mgr = powerKeeperManagerInstance ?: return null
+        val ctrl = runCatching { XReflect.callMethod(mgr, "getActiveStateController") }.getOrNull()
+            ?: runCatching { XReflect.getObjectField(mgr, "mActiveStateController") }.getOrNull()
+        if (ctrl != null) activeStateControllerInstance = ctrl
+        return ctrl
+    }
+
+    /** 模块定义的亮屏白名单基础集合（4 项） */
+    private val BASE_BRIGHT_WHITE_APPS: Set<String> = linkedSetOf(
+        "com.xiaomi.smarthome",
+        "com.android.vending",
+        "com.google.android.gms",
+        "com.miui.gallery"
+    )
+
+    /** 模块定义的预加载白名单基础集合（5 项，用于 P20 BrightScenarioBase.preloadWhiteApps） */
+    private val BASE_PRELOAD_WHITE_APPS: List<String> = listOf(
+        "com.miui.newhome",
+        "com.mfashiongallery.emag",
+        "com.miui.mediaeditor",
+        "com.miui.weather2",
+        "com.xiaomi.scanner"
+    )
+
+    /** 从 MIUI 静态 `whiteApps` 中剔除的 2 个系统广告/应用商店包名 */
+    private val REMOVED_STATIC_WHITE_APPS: Set<String> = setOf(
+        "com.miui.systemAdSolution",
+        "com.xiaomi.market"
+    )
+
+    /** 从 MIUI 静态 `mDataWhiteList` 中剔除的 11 个内置阅读器/钱包/企业 IM 包名 */
+    private val REMOVED_DATA_WHITE_APPS: Set<String> = setOf(
+        "com.miui.notes",
+        "com.flyersoft.moonreaderp",
+        "com.sinovoice.voicebook",
+        "com.wyfc.itingtxt2",
+        "com.gedoor.monkeybook",
+        "com.iflytek.vflynote",
+        "com.flyersoft.seekbooks",
+        "com.flyersoft.moonreader",
+        "com.miui.themestore",
+        "com.mipay.wallet",
+        "com.tencent.wework"
+    )
+
+    /** MIUI 原生内置系统黑名单快照（13 项，用于 union 合并） */
+    @Volatile
+    private var miuiBuiltInSystemBlackSet: Set<String>? = null
+
+    /** MIUI 原生内置数据白名单快照（用于 union 合并） */
+    @Volatile
+    private var miuiBuiltInDataWhiteSet: Set<String>? = null
+
+    /**
+     * 清空 `MilletPolicy.musicApp` 静态列表（P2 构造器调用）。
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun clearMusicApps(policy: Any) {
+        try {
+            val musicList = XReflect.getStaticObjectField(policy.javaClass, "musicApp") as? MutableList<String>
+            musicList?.clear()
+        } catch (t: Throwable) {
+            Logger.error("设置音乐应用失败", t)
+        }
+    }
+
+    /**
+     * 将模块配置的 `messageAppSet`、`forceFreezeSet`、`whiteAppSet` 写入 `MilletPolicy` 的 6 张内部表。
+     * 采用 **union 合并策略**保留 MIUI 原生内置表项（修正缺陷 #3）。
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun applyMessageAndWhiteLists() {
+        val policy = milletPolicyInstance ?: return
+        val policyClass = policy.javaClass
+        val prefs = PrefReader.powerKeeperPrefs
+
+        // 1. MESSAGE_APPS（静态 List<String>）：合并用户配置的消息应用集合
+        try {
+            val messageList = XReflect.getStaticObjectField(policyClass, "MESSAGE_APPS") as? MutableList<String>
+            if (messageList != null) {
+                messageList.clear()
+                messageList.addAll(prefs.messageAppSet)
+                if (prefs.isLog) {
+                    Logger.warn("设置消息应用:$messageList")
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("设置消息应用:${t.message}")
+        }
+
+        // 2. BRIGHT_WHITE_APPS（静态 List<String>）：基础 4 项剔除强制冻结应用（同时兼容 MilletPolicy 与 BrightScenarioBase）
+        //    该字段只在 Android 14 / 澎湃 2.0（PowerKeeper 5.x）及以上存在，
+        //    Android 13 / 澎湃 1.0（PowerKeeper 4.2.00）没有它，直接跳过而不是抛异常。
+        try {
+            val mergedBright = LinkedHashSet(BASE_BRIGHT_WHITE_APPS)
+            mergedBright.removeAll(prefs.forceFreezeSet)
+
+            if (RomCapabilities.hasField(policyClass, "BRIGHT_WHITE_APPS")) {
+                val brightList = XReflect.getStaticObjectField(policyClass, "BRIGHT_WHITE_APPS") as? MutableList<String>
+                if (brightList != null) {
+                    brightList.clear()
+                    brightList.addAll(mergedBright)
+                    if (prefs.isLog) {
+                        Logger.warn("系统内置亮屏白名单:$brightList")
+                    }
+                }
+            }
+
+            val loader = appClassLoader ?: policyClass.classLoader
+            val brightScenarioClass = if (loader != null) {
+                XReflect.findClassIfExists(CLASS_BRIGHT_SCENARIO_BASE, loader)
+            } else {
+                null
+            }
+            if (brightScenarioClass != null && RomCapabilities.hasField(brightScenarioClass, "BRIGHT_WHITE_APPS")) {
+                try {
+                    val scenarioBrightList = XReflect.getStaticObjectField(
+                        brightScenarioClass,
+                        "BRIGHT_WHITE_APPS"
+                    ) as? MutableList<String>
+                    if (scenarioBrightList != null) {
+                        scenarioBrightList.clear()
+                        scenarioBrightList.addAll(mergedBright)
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("系统内置亮屏白名单:${t.message}")
+        }
+
+        // 3. whiteApps（静态 List<String>）：只减不整表替换（剔除广告组件与应用商店）
+        try {
+            val whiteApps = XReflect.getStaticObjectField(policyClass, "whiteApps") as? MutableList<String>
+            if (whiteApps != null) {
+                whiteApps.removeAll(REMOVED_STATIC_WHITE_APPS)
+                XReflect.setStaticObjectField(policyClass, "whiteApps", whiteApps)
+                if (prefs.isLog) {
+                    Logger.warn("设置白名单:$whiteApps")
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("设置白名单失败:${t.message}")
+        }
+
+        // 4. mDataWhiteList（静态 List<String>）：剔除 11 项阅读器/钱包/企业微信内置豁免
+        try {
+            val dataWhiteList = XReflect.getStaticObjectField(policyClass, "mDataWhiteList") as? MutableList<String>
+            if (dataWhiteList != null) {
+                dataWhiteList.removeAll(REMOVED_DATA_WHITE_APPS)
+                XReflect.setStaticObjectField(policyClass, "mDataWhiteList", dataWhiteList)
+                if (prefs.isLog) {
+                    Logger.warn("设置白名单:$dataWhiteList")
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("设置用户白名单失败:${t.message}")
+        }
+
+        // 5. mUseSystemBlackList（实例 Set<String>）：MIUI 内置黑名单 ∪ forceFreezeSet \ whiteAppSet（修正缺陷 #3）
+        try {
+            val builtInBlack = captureOrGetBuiltInSystemBlackSet(policy)
+            val unionBlack = LinkedHashSet<String>(builtInBlack)
+            unionBlack.addAll(prefs.forceFreezeSet)
+            unionBlack.removeAll(prefs.whiteAppSet)
+
+            val currentSet = XReflect.getObjectField(policy, "mUseSystemBlackList") as? MutableSet<String>
+            if (currentSet != null) {
+                currentSet.clear()
+                currentSet.addAll(unionBlack)
+            } else {
+                XReflect.setObjectField(policy, "mUseSystemBlackList", unionBlack)
+            }
+            if (prefs.isLog) {
+                Logger.warn("内置黑名单:${XReflect.getObjectField(policy, "mUseSystemBlackList")}")
+            }
+        } catch (t: Throwable) {
+            Logger.error("设置内置黑名单失败:${t.message}")
+        }
+
+        // 6. mUseDataWhiteList（实例 Set<String>）：MIUI 内置数据白名单 ∪ whiteAppSet \ forceFreezeSet（修正缺陷 #3）
+        try {
+            val builtInWhite = captureOrGetBuiltInDataWhiteSet(policy)
+            val unionWhite = LinkedHashSet<String>(builtInWhite)
+            unionWhite.removeAll(REMOVED_DATA_WHITE_APPS)
+            unionWhite.removeAll(prefs.forceFreezeSet)
+            unionWhite.addAll(prefs.whiteAppSet)
+
+            val currentSet = XReflect.getObjectField(policy, "mUseDataWhiteList") as? MutableSet<String>
+            if (currentSet != null) {
+                currentSet.clear()
+                currentSet.addAll(unionWhite)
+            } else {
+                XReflect.setObjectField(policy, "mUseDataWhiteList", unionWhite)
+            }
+            if (prefs.isLog) {
+                Logger.warn("内置用户白名单:${XReflect.getObjectField(policy, "mUseDataWhiteList")}")
+            }
+        } catch (t: Throwable) {
+            Logger.error("设置内置用户白名单失败:${t.message}")
+        }
+    }
+
+    /**
+     * P20：重建 `BrightScenarioBase.preloadWhiteApps`（剔除 `forceFreezeSet`）。
+     */
+    fun applyPreloadWhiteApps() {
+        val loader = appClassLoader ?: brightScenarioInstance?.javaClass?.classLoader ?: return
+        try {
+            val clazz = XReflect.findClassIfExists(CLASS_BRIGHT_SCENARIO_BASE, loader) ?: return
+            val updated = ArrayList(BASE_PRELOAD_WHITE_APPS).apply {
+                removeAll(PrefReader.powerKeeperPrefs.forceFreezeSet)
+            }
+            XReflect.setStaticObjectField(clazz, "preloadWhiteApps", updated)
+        } catch (t: Throwable) {
+            Logger.error("更新 preloadWhiteApps 失败:${t.message}")
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun captureOrGetBuiltInSystemBlackSet(policy: Any): Set<String> {
+        miuiBuiltInSystemBlackSet?.let { return it }
+        val captured = LinkedHashSet<String>()
+        var instanceReady = false
+        try {
+            val existing = XReflect.getObjectField(policy, "mUseSystemBlackList") as? Collection<String>
+            if (existing != null) {
+                captured.addAll(existing)
+                instanceReady = true
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            val staticBlack = XReflect.getStaticObjectField(policy.javaClass, "mSystemBlackList") as? Collection<String>
+            if (staticBlack != null) captured.addAll(staticBlack)
+        } catch (_: Throwable) {
+        }
+        if (instanceReady) {
+            miuiBuiltInSystemBlackSet = captured
+        }
+        return captured
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun captureOrGetBuiltInDataWhiteSet(policy: Any): Set<String> {
+        miuiBuiltInDataWhiteSet?.let { return it }
+        val captured = LinkedHashSet<String>()
+        var instanceReady = false
+        try {
+            val existing = XReflect.getObjectField(policy, "mUseDataWhiteList") as? Collection<String>
+            if (existing != null) {
+                captured.addAll(existing)
+                instanceReady = true
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            val staticData = XReflect.getStaticObjectField(policy.javaClass, "mDataWhiteList") as? Collection<String>
+            if (staticData != null) captured.addAll(staticData)
+        } catch (_: Throwable) {
+        }
+        try {
+            val staticMiData = XReflect.getStaticObjectField(policy.javaClass, "mMiDataWhiteList") as? Collection<String>
+            if (staticMiData != null) captured.addAll(staticMiData)
+        } catch (_: Throwable) {
+        }
+        if (instanceReady) {
+            miuiBuiltInDataWhiteSet = captured
+        }
+        return captured
+    }
+
+    // ==================== UID / 包名查询辅助方法 ====================
+
+    fun getPackageNameForUid(uid: Int): String? {
+        if (uid <= 0) return null
+        val ctx = applicationContext ?: return null
+        return try {
+            ctx.packageManager.getPackagesForUid(uid)?.firstOrNull()
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun getPackageUid(context: Context?, packageName: String): Int {
+        val ctx = context ?: applicationContext ?: return 0
+        return try {
+            @Suppress("DEPRECATION")
+            ctx.packageManager.getApplicationInfo(packageName, 0).uid
+        } catch (_: Throwable) {
+            0
+        }
+    }
+}

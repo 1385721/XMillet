@@ -73,11 +73,11 @@
 | 设备 | 代号 | 系统版本 | Android | 内核 | Root | LSPosed | Hook 实装（系统侧 + 电量侧） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 23/30 + 25/28 |
-| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf…` | Magisk | v2.2.1-log (7939) | 25/30 + 25/27 |
-| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8…` | KernelSU | v2.2.1 (7940) | 26/30 + 16/27 |
-| Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8…` | KernelSU | v2.2.1 (7939) | 29/30 + 14/28 |
+| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf-gb57830672689` | Magisk | v2.2.1-log (7939) | 25/30 + 25/28 |
+| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8-gc44b714366cc-abogki519650608-4k` | KernelSU | v2.2.1 (7940) | 26/30 + 17/28 |
+| Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k` | KernelSU | v2.2.1 (7939) | 29/30 + 14/28 |
 
-> 默认配置下关闭「简化日志 (`simplifyLog`)」，开启该开关后前三台设备的系统侧 Hook 实装数可分别升至 `29/30`、`28/30`、`26/30`；`dada` 一行采集于开启 `simplifyLog` 状态。另 `dagu` 与 `miro` 数据记录于早先电量侧 27 点位阶段（现电量侧总点位已扩展至 28）。
+> 默认配置下关闭「简化日志 (`simplifyLog`)」，开启该开关后前三台设备的系统侧 Hook 实装数可分别升至 `29/30`、`28/30`、`26/30`；`dada` 一行采集于开启 `simplifyLog` 状态。
 
 ## 使用与构建
 

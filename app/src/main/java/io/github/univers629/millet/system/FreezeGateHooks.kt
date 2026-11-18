@@ -202,7 +202,7 @@ object FreezeGateHooks {
             val reason = (param.args.getOrNull(3) as? String) ?: "unknown"
 
             if (needStats) {
-                val actuallyFrozenUids = resolveActuallyFrozenUids(param.result, param.method, argUids)
+                val actuallyFrozenUids = resolveEffectiveIds(param.result, param.method, argUids)
                 if (actuallyFrozenUids.isNotEmpty()) {
                     FreezeStatsRecorder.recordFreezeBatch(actuallyFrozenUids, reason)
                 }
@@ -235,25 +235,39 @@ object FreezeGateHooks {
         }
     )
 
-    private fun resolveActuallyFrozenUids(
+    private fun resolveEffectiveIds(
         result: Any?,
         method: Member?,
-        argUids: IntArray,
+        argIds: IntArray,
     ): List<Int> {
         return when (result) {
             is Collection<*> -> result.mapNotNull { it as? Int }
             is IntArray -> result.toList()
-            is Boolean -> if (result) argUids.toList() else emptyList()
+            is Boolean -> if (result) argIds.toList() else emptyList()
             null -> {
                 val returnsVoid = (method as? java.lang.reflect.Method)?.returnType == Void.TYPE
-                if (returnsVoid) argUids.toList() else emptyList()
+                if (returnsVoid) argIds.toList() else emptyList()
             }
             else -> emptyList()
         }
     }
 
+    /** 按目标方法实际返回类型生成拦截默认值，避免向 List / void 方法返回 Boolean。 */
+    private fun blockedReturnValue(method: Member?): Any? {
+        val returnType = (method as? java.lang.reflect.Method)?.returnType ?: return false
+        return when {
+            returnType == Void.TYPE -> null
+            List::class.java.isAssignableFrom(returnType) || Collection::class.java.isAssignableFrom(returnType) -> emptyList<Int>()
+            returnType.isArray -> IntArray(0)
+            returnType == Boolean::class.javaPrimitiveType || returnType == Boolean::class.javaObjectType -> false
+            else -> null
+        }
+    }
+
     /**
-     * S7（PA(4)）：GreezeManagerService#freezeAction(int uid, int fromWho, String reason, boolean isLocked)
+     * S7（PA(4)）：GreezeManagerService#freezeAction
+     * - OS1~OS3：(int uid, int fromWho, String reason, boolean isLocked)
+     * - OS4：(int uid, int fromWho, String reason, boolean isNeedCompact, boolean checkAudioGps)
      * 【冻结总闸】：
      * 1. `!isGreezeReady` -> 放行
      * 2. 包名命中 `whiteAppSet` -> 阻断冻结（返回 false）
@@ -271,6 +285,19 @@ object FreezeGateHooks {
             String::class.java,
             Boolean::class.javaPrimitiveType!!
         ),
+        paramResolver = { _, clazz ->
+            val candidates = clazz.declaredMethods.filter { m ->
+                m.name == "freezeAction" &&
+                    m.parameterCount >= 4 &&
+                    m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    m.parameterTypes[1] == Int::class.javaPrimitiveType &&
+                    m.parameterTypes[2] == String::class.java &&
+                    m.parameterTypes[3] == Boolean::class.javaPrimitiveType
+            }
+            (candidates.firstOrNull { it.parameterCount == 4 } ?: candidates.firstOrNull())
+                ?.parameterTypes
+                ?.toList()
+        },
         mode = HookMode.BEFORE_AND_AFTER,
         before = { param ->
             if (!SystemState.isGreezeReady) return@HookSpec
@@ -294,8 +321,8 @@ object FreezeGateHooks {
                 return@HookSpec
             }
 
-            // 2. LAUNCH_MODE 与前台服务（FGS）保护分支
-            if (reason == "LAUNCH_MODE" || pkg in prefs.notFreezeWhenHasFgsSet) {
+            // 2. LAUNCH_MODE 与前台服务（FGS）保护分支（强制冻结名单剥夺 FGS 豁免）
+            if ((reason == "LAUNCH_MODE" || pkg in prefs.notFreezeWhenHasFgsSet) && pkg !in prefs.forceFreezeSet) {
                 if (pkg in prefs.notFreezeWhenHasFgsSet) {
                     // 使用独立的 aurogonService 句柄调用 checkAppFgService（修正缺陷 #1）
                     val hasFgs = SystemState.checkAppFgService(uid)
@@ -680,7 +707,7 @@ object FreezeGateHooks {
             }
             if (!blocked) return@HookSpec
             if (kept.isEmpty()) {
-                param.result = false
+                param.result = blockedReturnValue(param.method)
             } else {
                 param.args[0] = kept.toIntArray()
             }
@@ -750,7 +777,9 @@ object FreezeGateHooks {
                 val pkg = if (uid > 0) SystemState.getPackageNameForUid(uid) else null
                 val exempt = pkg != null && (
                     pkg in prefs.whiteAppSet ||
-                        (pkg in prefs.notFreezeWhenHasFgsSet && SystemState.checkAppFgService(uid))
+                        (pkg !in prefs.forceFreezeSet &&
+                            pkg in prefs.notFreezeWhenHasFgsSet &&
+                            SystemState.checkAppFgService(uid))
                     )
                 if (exempt) {
                     blocked = true
@@ -772,7 +801,7 @@ object FreezeGateHooks {
 
             if (!blocked) return@HookSpec
             if (kept.isEmpty()) {
-                param.result = false
+                param.result = blockedReturnValue(param.method)
             } else {
                 param.args[0] = kept.toIntArray()
             }
@@ -782,14 +811,14 @@ object FreezeGateHooks {
             if (!SystemState.isGreezeReady) return@HookSpec
             val prefs = PrefReader.systemPrefs
             if (!prefs.freezeStats) return@HookSpec
-            if ((param.result as? Boolean) == false) return@HookSpec
-            val pids = (param.args.getOrNull(0) as? IntArray)?.takeIf { it.isNotEmpty() } ?: return@HookSpec
-            val pidsCopy = pids.copyOf()
+            val argPids = (param.args.getOrNull(0) as? IntArray)?.takeIf { it.isNotEmpty() } ?: return@HookSpec
+            val frozenPids = resolveEffectiveIds(param.result, param.method, argPids)
+            if (frozenPids.isEmpty()) return@HookSpec
             val reason = param.args.filterIsInstance<String>()
                 .firstOrNull { it.isNotBlank() } ?: "freezePids"
             Logger.postIoTask {
                 val seenUids = HashSet<Int>()
-                for (pid in pidsCopy) {
+                for (pid in frozenPids) {
                     val uid = uidForPid(pid)
                     if (uid >= 10000 && seenUids.add(uid)) {
                         FreezeStatsRecorder.recordFreeze(uid, reason, onlyIfNotFrozen = true)
@@ -890,8 +919,10 @@ object FreezeGateHooks {
                 ?: SystemState.getPackageNameForUid(calleeUid)
                 ?: return@HookSpec param.invokeOriginal()
             val exempt = calleePkg in prefs.whiteAppSet ||
-                calleePkg in prefs.messageAppSet ||
-                (calleePkg in prefs.notFreezeWhenHasFgsSet && SystemState.checkAppFgService(calleeUid))
+                (calleePkg in prefs.messageAppSet && calleePkg !in prefs.ignoreNetworkWakeSet) ||
+                (calleePkg !in prefs.forceFreezeSet &&
+                    calleePkg in prefs.notFreezeWhenHasFgsSet &&
+                    SystemState.checkAppFgService(calleeUid))
             if (!exempt) {
                 return@HookSpec param.invokeOriginal()
             }
@@ -929,7 +960,7 @@ object FreezeGateHooks {
                 return@HookSpec param.invokeOriginal()
             }
             val prefs = PrefReader.systemPrefs
-            val targets = prefs.messageAppSet + prefs.whiteAppSet
+            val targets = (prefs.messageAppSet - prefs.ignoreNetworkWakeSet) + prefs.whiteAppSet
             if (targets.isEmpty()) {
                 return@HookSpec param.invokeOriginal()
             }
@@ -981,7 +1012,7 @@ object FreezeGateHooks {
             }
             val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
             Logger.warn("--系统[解冻uid]:$label(async),拒绝[$reason]解冻[${pkg ?: "uid$uid"}]")
-            param.result = false
+            param.result = null
         }
     )
 
@@ -1018,7 +1049,7 @@ object FreezeGateHooks {
             }
             val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
             Logger.warn("--系统[解冻uid]:$label(thawAll),拒绝[$reason]全量解冻")
-            param.result = false
+            param.result = blockedReturnValue(param.method)
         }
     )
 
@@ -1033,7 +1064,11 @@ object FreezeGateHooks {
         methodName = "kill",
         paramTypes = emptyList(),
         paramResolver = { _, clazz ->
-            clazz.declaredMethods.firstOrNull { it.name == "kill" }?.parameterTypes?.toList()
+            val killMethods = clazz.declaredMethods.filter { it.name == "kill" }
+            val configMethod = killMethods.firstOrNull {
+                it.parameterCount == 1 && it.parameterTypes[0].name == "miui.process.ProcessConfig"
+            }
+            (configMethod ?: killMethods.firstOrNull())?.parameterTypes?.toList()
         },
         mode = HookMode.BEFORE,
         before = { param ->

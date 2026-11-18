@@ -1370,7 +1370,10 @@ object FreezeStatsRecorder {
             Logger.alwaysInfo("墓碑统计已从 $STATS_FILE_PATH 恢复")
         }
         startPeriodicFlush()
-        SystemState.systemContext?.let { registerScreenReceiver(it) }
+        // 冷启动初期 AMS 尚未发布时由 S2_Gate 延迟挂载；仅在热重载（服务已就绪）时立即注册
+        if (SystemState.isGreezeReady) {
+            SystemState.systemContext?.let { registerScreenReceiver(it) }
+        }
     }
 
     /**

@@ -77,7 +77,12 @@ object ForceFreezeBridge {
 
         var frozen = 0
         var skipped = 0
+        val whiteApps = PrefReader.systemPrefs.whiteAppSet
         for (pkg in target) {
+            if (pkg in whiteApps) {
+                skipped++
+                continue
+            }
             val uid = SystemState.getPackageUid(pkg)
             if (uid <= 10000 || SystemState.isUidFrozen(uid)) {
                 skipped++

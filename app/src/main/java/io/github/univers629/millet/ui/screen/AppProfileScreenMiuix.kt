@@ -750,18 +750,23 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "设为消息应用",
-                            summary = "允许收到网络推送包后短暂解冻处理消息，与免冻结白名单互斥",
+                            summary = "允许收到网络推送包后短暂解冻处理消息（与免冻结白名单、忽略网络唤醒互斥）",
                             checked = inMessage,
                             onCheckedChange = { checked ->
                                 inMessage = checked
-                                if (checked && inWhite) {
-                                    inWhite = false
-                                    updateMemberships(
-                                        PrefsKeys.MESSAGE_APP_SET to true,
-                                        PrefsKeys.WHITE_APP_SET to false
-                                    )
+                                if (checked) {
+                                    val changes = mutableListOf(PrefsKeys.MESSAGE_APP_SET to true)
+                                    if (inWhite) {
+                                        inWhite = false
+                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
+                                    }
+                                    if (inIgnoreNetworkWake) {
+                                        inIgnoreNetworkWake = false
+                                        changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
+                                    }
+                                    updateMemberships(*changes.toTypedArray())
                                 } else {
-                                    updateMembership(PrefsKeys.MESSAGE_APP_SET, checked)
+                                    updateMembership(PrefsKeys.MESSAGE_APP_SET, false)
                                 }
                             }
                         )
@@ -777,18 +782,29 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "存在前台服务时不冻结",
-                            summary = "当 Aurogon 检测到活跃 ForegroundService 时阻止冻结",
+                            summary = "当 Aurogon 检测到活跃 ForegroundService 时阻止冻结（与免冻结白名单、强制冻结互斥）",
                             checked = inNotFreezeFgs,
                             onCheckedChange = { checked ->
                                 inNotFreezeFgs = checked
-                                if (checked && inWhite) {
-                                    inWhite = false
-                                    updateMemberships(
-                                        PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to true,
-                                        PrefsKeys.WHITE_APP_SET to false
-                                    )
+                                if (checked) {
+                                    val changes = mutableListOf(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to true)
+                                    if (inWhite) {
+                                        inWhite = false
+                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
+                                    }
+                                    if (inForceFreeze) {
+                                        inForceFreeze = false
+                                        inBlockThaw = false
+                                        inForbidSync = false
+                                        inIgnoreNetworkWake = false
+                                        changes.add(PrefsKeys.FORCE_FREEZE_SET to false)
+                                        changes.add(PrefsKeys.BLOCK_THAW_SET to false)
+                                        changes.add(PrefsKeys.FORBID_SYNC_BINDER_SET to false)
+                                        changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
+                                    }
+                                    updateMemberships(*changes.toTypedArray())
                                 } else {
-                                    updateMembership(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET, checked)
+                                    updateMembership(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET, false)
                                 }
                             }
                         )
@@ -814,20 +830,21 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "强制冻结",
-                            summary = "剥夺系统黑名单、无限制名单与后台豁免，退后台即纳入冻结",
+                            summary = "剥夺系统黑名单、无限制名单与后台豁免，退后台即纳入冻结（与免冻结白名单、前台服务不冻结互斥）",
                             checked = inForceFreeze,
                             onCheckedChange = { checked ->
                                 inForceFreeze = checked
                                 if (checked) {
+                                    val changes = mutableListOf(PrefsKeys.FORCE_FREEZE_SET to true)
                                     if (inWhite) {
                                         inWhite = false
-                                        updateMemberships(
-                                            PrefsKeys.FORCE_FREEZE_SET to true,
-                                            PrefsKeys.WHITE_APP_SET to false
-                                        )
-                                    } else {
-                                        updateMembership(PrefsKeys.FORCE_FREEZE_SET, true)
+                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
                                     }
+                                    if (inNotFreezeFgs) {
+                                        inNotFreezeFgs = false
+                                        changes.add(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false)
+                                    }
+                                    updateMemberships(*changes.toTypedArray())
                                 } else {
                                     inBlockThaw = false
                                     inForbidSync = false
@@ -897,11 +914,19 @@ fun AppProfileScreenMiuix(
                                         )
                                     },
                                     title = "忽略网络唤醒",
-                                    summary = "不再因推送、网络变化唤醒该应用，冻结会一直保持到手动打开；代价是消息延迟送达",
+                                    summary = "不再因推送、网络变化唤醒该应用，冻结会一直保持到手动打开（与设为消息应用互斥；代价是消息延迟送达）",
                                     checked = inIgnoreNetworkWake,
                                     onCheckedChange = { checked ->
                                         inIgnoreNetworkWake = checked
-                                        updateMembership(PrefsKeys.IGNORE_NETWORK_WAKE_SET, checked)
+                                        if (checked && inMessage) {
+                                            inMessage = false
+                                            updateMemberships(
+                                                PrefsKeys.IGNORE_NETWORK_WAKE_SET to true,
+                                                PrefsKeys.MESSAGE_APP_SET to false
+                                            )
+                                        } else {
+                                            updateMembership(PrefsKeys.IGNORE_NETWORK_WAKE_SET, checked)
+                                        }
                                     }
                                 )
                             }

@@ -545,7 +545,11 @@ object PowerKeeperHooks {
         methodName = "kill",
         paramTypes = listOf(CLASS_PROCESS_CONFIG),
         paramResolver = { _, clazz ->
-            clazz.declaredMethods.firstOrNull { it.name == "kill" }?.parameterTypes?.toList()
+            val killMethods = clazz.declaredMethods.filter { it.name == "kill" }
+            val configMethod = killMethods.firstOrNull {
+                it.parameterCount == 1 && it.parameterTypes[0].name == CLASS_PROCESS_CONFIG
+            }
+            (configMethod ?: killMethods.firstOrNull())?.parameterTypes?.toList()
         },
         mode = HookMode.BEFORE,
         before = { param ->

@@ -5,6 +5,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import io.github.univers629.millet.core.FreezeReasonClassifier
@@ -1360,6 +1362,11 @@ object FreezeStatsRecorder {
     @Volatile
     private var registeredScreenContext: Context? = null
 
+    private const val MAX_SCREEN_RECEIVER_RETRY = 3
+    private const val BASE_SCREEN_RECEIVER_RETRY_DELAY_MS = 1_000L
+    private var screenReceiverRetryAttempt = 0
+    private var screenRetryHandler: Handler? = null
+
     /**
      * 启动 / 热重载后初始化统计引擎：恢复本地持久化、启动 30 分钟定时落盘并尽量挂上亮灭屏监听。
      */
@@ -1480,14 +1487,36 @@ object FreezeStatsRecorder {
                 targetCtx.registerReceiver(receiver, filter)
                 screenReceiver = receiver
                 registeredScreenContext = targetCtx
+                cancelScreenReceiverRetryLocked()
             }.onFailure {
                 Logger.error("FreezeStatsRecorder registerScreenReceiver failed", it)
+                scheduleScreenReceiverRetryLocked(targetCtx)
             }
         }
     }
 
+    private fun scheduleScreenReceiverRetryLocked(context: Context) {
+        if (screenReceiver != null || screenReceiverRetryAttempt >= MAX_SCREEN_RECEIVER_RETRY) {
+            return
+        }
+        val attempt = ++screenReceiverRetryAttempt
+        val delayMs = BASE_SCREEN_RECEIVER_RETRY_DELAY_MS shl (attempt - 1)
+        val handler = screenRetryHandler ?: Handler(Looper.getMainLooper()).also { screenRetryHandler = it }
+        Logger.alwaysWarn("FreezeStatsRecorder 亮灭屏广播注册失败，${delayMs}ms 后补挂（第 $attempt/$MAX_SCREEN_RECEIVER_RETRY 次）")
+        handler.postDelayed({
+            registerScreenReceiver(context)
+        }, delayMs)
+    }
+
+    private fun cancelScreenReceiverRetryLocked() {
+        screenReceiverRetryAttempt = 0
+        screenRetryHandler?.removeCallbacksAndMessages(null)
+        screenRetryHandler = null
+    }
+
     private fun unregisterScreenReceiver() {
         synchronized(lifecycleLock) {
+            cancelScreenReceiverRetryLocked()
             val receiver = screenReceiver ?: return
             val ctx = registeredScreenContext
             screenReceiver = null

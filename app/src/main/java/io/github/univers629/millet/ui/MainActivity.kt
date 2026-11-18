@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -82,8 +83,10 @@ import io.github.univers629.millet.ui.theme.XMilletMiuixTheme
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.pager.PagerDefaults.flingBehavior
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
@@ -475,14 +478,14 @@ class MainActivity : ComponentActivity() {
         }
 
         // 云名单由 PowerKeeper 通过官方接口上报，开机后可能比首屏列表晚到；
-        // 到齐后重建一次列表让三个云标签出现。这里不再等待 root 授权——
-        // 云名单已经不走 root，等待授权只会在没有 root 的机器上白等 20 秒。
+        // 到齐后重建一次列表让三个云标签出现。这里用 snapshotFlow 事件等待，
+        // 避免固定间隔轮询唤醒；同时不依赖 root 授权（云名单已改走跨进程接口）。
         LaunchedEffect(isProvisioned) {
             if (!isProvisioned) return@LaunchedEffect
-            var waited = 0L
-            while (waited < 20_000L && runtimeStatus.cloudLists == null) {
-                delay(400L)
-                waited += 400L
+            if (runtimeStatus.cloudLists == null) {
+                withTimeoutOrNull(20_000L) {
+                    snapshotFlow { runtimeStatus.cloudLists }.first { it != null }
+                }
             }
             if (runtimeStatus.cloudLists != null && !cloudConfigApplied) {
                 loadInstalledApps()

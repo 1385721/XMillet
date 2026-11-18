@@ -553,8 +553,7 @@ object PowerKeeperHooks {
         },
         mode = HookMode.BEFORE,
         before = { param ->
-            if (PrefReader.powerKeeperPrefs.disableKill) {
-                param.result = false
+            if (PrefReader.powerKeeperPrefs.disableKill && param.blockSafely()) {
                 Logger.warn("阻止 PowerKeeper 执行 ProcessManager.kill 杀后台")
             }
         }
@@ -580,8 +579,7 @@ object PowerKeeperHooks {
             val pkg = PowerKeeperState.getPackageNameForUid(uid)
             val hit = prefs.disableKill || (pkg != null && pkg in prefs.whiteAppSet)
             if (!hit) return@HookSpec
-            param.result = false
-            if (prefs.isLog) {
+            if (param.blockSafely() && prefs.isLog) {
                 Logger.warn("阻止电量与性能查杀 ${pkg ?: uid} (UID=$uid)")
             }
         }
@@ -610,8 +608,7 @@ object PowerKeeperHooks {
             val pkg = PowerKeeperState.getPackageNameForUid(uid) ?: return@HookSpec
             if (pkg in prefs.forceFreezeSet) return@HookSpec
             if (pkg !in prefs.whiteAppSet) return@HookSpec
-            param.result = false
-            if (prefs.isLog) {
+            if (param.blockSafely() && prefs.isLog) {
                 Logger.warn("阻止冻结白名单应用 $pkg (UID=$uid)")
             }
         }
@@ -688,8 +685,7 @@ object PowerKeeperHooks {
         val prefs = PrefReader.powerKeeperPrefs
         val pkg = PowerKeeperState.getPackageNameForUid(uid)
         if (!prefs.disableKill && (pkg == null || pkg !in prefs.whiteAppSet)) return
-        param.result = false
-        if (prefs.isLog) {
+        if (param.blockSafely() && prefs.isLog) {
             Logger.warn("阻止${scene} ${pkg ?: uid} (UID=$uid)")
         }
     }

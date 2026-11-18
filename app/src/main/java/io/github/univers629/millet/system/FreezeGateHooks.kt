@@ -252,18 +252,6 @@ object FreezeGateHooks {
         }
     }
 
-    /** 按目标方法实际返回类型生成拦截默认值，避免向 List / void 方法返回 Boolean。 */
-    private fun blockedReturnValue(method: Member?): Any? {
-        val returnType = (method as? java.lang.reflect.Method)?.returnType ?: return false
-        return when {
-            returnType == Void.TYPE -> null
-            List::class.java.isAssignableFrom(returnType) || Collection::class.java.isAssignableFrom(returnType) -> emptyList<Int>()
-            returnType.isArray -> IntArray(0)
-            returnType == Boolean::class.javaPrimitiveType || returnType == Boolean::class.javaObjectType -> false
-            else -> null
-        }
-    }
-
     /**
      * S7（PA(4)）：GreezeManagerService#freezeAction
      * - OS1~OS3：(int uid, int fromWho, String reason, boolean isLocked)
@@ -317,7 +305,7 @@ object FreezeGateHooks {
                 }
                 Logger.info("FAH判断:${pkg}在白名单，因此无法被冻结")
                 Logger.logEvent(Logger.Level.INFO, "FAH判断白名单阻断冻结", pkg, uid, reason)
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -332,7 +320,7 @@ object FreezeGateHooks {
                         }
                         Logger.info("FAH判断:${pkg}具有前台服务,禁止冻结")
                         Logger.logEvent(Logger.Level.INFO, "FAH判断具有前台服务阻断冻结", pkg, uid, reason)
-                        param.result = false
+                        param.blockSafely()
                     }
                 }
             }
@@ -384,7 +372,7 @@ object FreezeGateHooks {
                         FreezeStatsRecorder.recordProtect(uid, "checkAppStatusForFreeze", pkg)
                     }
                 }
-                param.result = false
+                param.blockSafely()
             }
         }
     )
@@ -558,7 +546,7 @@ object FreezeGateHooks {
                 if (prefs.freezeStats && uid >= 10000) {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.HARD_RULE, reason, pkg)
                 }
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -568,7 +556,7 @@ object FreezeGateHooks {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.FORBID_SYNC_BINDER, reason, pkg)
                 }
                 Logger.warn("--系统[解冻uid]:禁止[$reason]解冻[$pkg]uid:$uid")
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -579,7 +567,7 @@ object FreezeGateHooks {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.IGNORE_NETWORK, reason, pkg)
                 }
                 Logger.warn("--系统[解冻uid]:忽略网络唤醒,禁止[$reason]解冻[$pkg]uid:$uid")
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -592,7 +580,7 @@ object FreezeGateHooks {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_CHARGE_THAW, reason, pkg)
                 }
                 Logger.warn("--系统[解冻uid]:禁止插电解冻,拒绝[$reason]解冻[$pkg]uid:$uid")
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -603,7 +591,7 @@ object FreezeGateHooks {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_SCREEN_ON_THAW, reason, pkg)
                 }
                 Logger.warn("--系统[解冻uid]:禁止亮屏解冻,拒绝[$reason]解冻[$pkg]uid:$uid")
-                param.result = false
+                param.blockSafely()
                 return@HookSpec
             }
 
@@ -620,7 +608,7 @@ object FreezeGateHooks {
                 FreezeStatsRecorder.recordIntercept(uid, InterceptRule.BLOCK_THAW, reason, pkg)
             }
             Logger.warn("--系统[解冻uid]:强力压制,禁止[$reason]解冻[$pkg]uid:$uid")
-            param.result = false
+            param.blockSafely()
         }
     )
 
@@ -707,7 +695,7 @@ object FreezeGateHooks {
             }
             if (!blocked) return@HookSpec
             if (kept.isEmpty()) {
-                param.result = blockedReturnValue(param.method)
+                param.blockSafely()
             } else {
                 param.args[0] = kept.toIntArray()
             }
@@ -801,7 +789,7 @@ object FreezeGateHooks {
 
             if (!blocked) return@HookSpec
             if (kept.isEmpty()) {
-                param.result = blockedReturnValue(param.method)
+                param.blockSafely()
             } else {
                 param.args[0] = kept.toIntArray()
             }
@@ -1049,7 +1037,7 @@ object FreezeGateHooks {
             }
             val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
             Logger.warn("--系统[解冻uid]:$label(thawAll),拒绝[$reason]全量解冻")
-            param.result = blockedReturnValue(param.method)
+            param.blockSafely()
         }
     )
 
@@ -1084,8 +1072,7 @@ object FreezeGateHooks {
                 if (PrefReader.systemPrefs.freezeStats) {
                     FreezeStatsRecorder.recordKillBlocked(uid, "ProcessManager#kill")
                 }
-                param.result = false
-                if (PrefReader.systemPrefs.isLog) {
+                if (param.blockSafely() && PrefReader.systemPrefs.isLog) {
                     Logger.warn("阻止系统杀戮处于墓碑状态的应用: UID=$uid")
                 }
             }

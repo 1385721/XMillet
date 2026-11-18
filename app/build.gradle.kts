@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.univers629.millet"
         minSdk = 33
         targetSdk = 34
-        versionCode = 1010
-        versionName = "1.0.1"
+        versionCode = 1100
+        versionName = "1.1.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -11,7 +11,7 @@
 ![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-UI-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)
 ![JDK](https://img.shields.io/badge/JDK-21-437291?style=flat-square&logo=openjdk&logoColor=white)
 ![Gradle](https://img.shields.io/badge/Gradle-9.3.1-02303A?style=flat-square&logo=gradle&logoColor=white)
-![HyperOS](https://img.shields.io/badge/HyperOS-OS1.0%20~%20OS3.0-FF6900?style=flat-square&logo=xiaomi&logoColor=white)
+![HyperOS](https://img.shields.io/badge/HyperOS-OS1.0%20~%20OS4.0-FF6900?style=flat-square&logo=xiaomi&logoColor=white)
 
 [<img src="https://github.com/LSPosed.png" height="20" alt="LSPosed">](https://github.com/LSPosed)
 ![LSPosed](https://img.shields.io/badge/LSPosed-API%20102-FF4088?style=flat-square)
@@ -26,7 +26,7 @@
 
 **XMillet** 是针对小米澎湃 OS 官方墓碑机制（**Millet**，系统底层由 `GreezeManagerService` 与 `PowerKeeper` 协同调度与执行）构建的 Xposed 模块，基于 `libxposed` API 102 与 Miuix Compose UI 实现。它**不替换系统原有冻结机制**，而是接管系统侧与电量侧的关键冻结/解冻闸门，提供状态观测、分应用策略与唤醒拦截统计面板。
 
-- **支持范围**：Android 13+（minSdk 33），实机适配 HyperOS 1.0 / 2.0 / 3.0（Android 13 ~ 16）
+- **支持范围**：Android 13+（minSdk 33），实机适配 HyperOS 1.0 / 2.0 / 3.0 / 4.0（Android 13 ~ 17）
 - **LSPosed 作用域**：仅需勾选「系统框架 (`system`)」与「电量与性能 (`com.miui.powerkeeper`)」
 - **交互设计**：基于 [Miuix](https://github.com/compose-miuix-ui/miuix)（`0.9.4`）构建，支持液态玻璃悬浮底栏、实时毛玻璃模糊、动态取色（Monet）、首次引导（OOBE）与桌面图标隐藏
 
@@ -64,19 +64,20 @@
 
 ## 版本适配与 Hook 探测
 
-模块在注入前会对目标类与方法逐一探测：系统侧共 **30 个**点位、电量侧共 **27 个**点位。当 HyperOS 3.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
+模块在注入前会对目标类与方法逐一探测：系统侧共 **30 个**点位、电量侧共 **28 个**点位。当 HyperOS 3.0 / 4.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
 
 ## 实机核验
 
-三台不同代际设备使用同一份 APK，在默认配置下开机实测的 Hook 实装情况如下：
+四台不同代际设备的实机核验 Hook 实装情况如下：
 
 | 设备 | 代号 | 系统版本 | Android | 内核 | Root | LSPosed | Hook 实装（系统侧 + 电量侧） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0 | 13 (SDK 33) | `4.14.186` | Magisk | v2.2.1-log (7940) | 23/30 + 25/27 |
+| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 23/30 + 25/28 |
 | Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf…` | Magisk | v2.2.1-log (7939) | 25/30 + 25/27 |
 | REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8…` | KernelSU | v2.2.1 (7940) | 26/30 + 16/27 |
+| Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8…` | KernelSU | v2.2.1 (7939) | 29/30 + 14/28 |
 
-> 开启「简化日志 (`simplifyLog`)」相关点位后，以上三台设备的系统侧 Hook 实装数分别升至 `29/30`、`28/30`、`26/30`。
+> 默认配置下关闭「简化日志 (`simplifyLog`)」，开启该开关后前三台设备的系统侧 Hook 实装数可分别升至 `29/30`、`28/30`、`26/30`；`dada` 一行采集于开启 `simplifyLog` 状态。另 `dagu` 与 `miro` 数据记录于早先电量侧 27 点位阶段（现电量侧总点位已扩展至 28）。
 
 ## 使用与构建
 

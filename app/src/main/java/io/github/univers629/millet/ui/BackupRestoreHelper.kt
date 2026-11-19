@@ -31,7 +31,8 @@ object BackupRestoreHelper {
         PrefsKeys.ENABLE_DOZE,
         PrefsKeys.SKIP_STATE_CHECK,
         PrefsKeys.DISABLE_MOTION_LISTENER,
-        PrefsKeys.FREEZE_STATS
+        PrefsKeys.FREEZE_STATS,
+        PrefsKeys.FREEZE_DUAL_APP
     )
 
     private val STRING_SET_KEYS: List<String> = listOf(

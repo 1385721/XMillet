@@ -33,6 +33,7 @@ object PrefsKeys {
     const val SKIP_STATE_CHECK = "skipStateCheck"
     const val DISABLE_MOTION_LISTENER = "disableMotionListener"
     const val FREEZE_STATS = "freezeStats"
+    const val FREEZE_DUAL_APP = "freezeDualApp"
 
     // 2. 八个 Set<String> 应用包名集合
     const val WHITE_APP_SET = "whiteAppSet"
@@ -70,6 +71,7 @@ object PrefsKeys {
         SKIP_STATE_CHECK,
         DISABLE_MOTION_LISTENER,
         FREEZE_STATS,
+        FREEZE_DUAL_APP,
         WHITE_APP_SET,
         MESSAGE_APP_SET,
         FORCE_FREEZE_SET,
@@ -91,7 +93,7 @@ object PrefsDefaults {
     const val SIMPLIFY_LOG = false
     const val DISABLE_KILL = true
     const val DISABLE_CHARGE = true
-    const val DISABLE_SCREEN_ON_THAW = false
+    const val DISABLE_SCREEN_ON_THAW = true
     const val BLOCK_ADD_POWER_SAVE_WHITELIST_APPS = true
     const val BATTERY_CHANGE_OBSERVE = false
     const val LOG_TO_LOCAL = false
@@ -100,6 +102,7 @@ object PrefsDefaults {
     const val SKIP_STATE_CHECK = true
     const val DISABLE_MOTION_LISTENER = true
     const val FREEZE_STATS = true
+    const val FREEZE_DUAL_APP = true
 
     // Set<String> 默认值（保持 LinkedHashSet 顺序语义）
     val WHITE_APP_SET: Set<String> = emptySet()
@@ -131,6 +134,7 @@ object PrefsDefaults {
         PrefsKeys.SKIP_STATE_CHECK -> SKIP_STATE_CHECK
         PrefsKeys.DISABLE_MOTION_LISTENER -> DISABLE_MOTION_LISTENER
         PrefsKeys.FREEZE_STATS -> FREEZE_STATS
+        PrefsKeys.FREEZE_DUAL_APP -> FREEZE_DUAL_APP
         else -> false
     }
 
@@ -158,7 +162,8 @@ enum class PrefGroup(val keys: Set<String>) {
             PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
             PrefsKeys.BATTERY_CHANGE_OBSERVE,
             PrefsKeys.LOG_TO_LOCAL,
-            PrefsKeys.FREEZE_STATS
+            PrefsKeys.FREEZE_STATS,
+            PrefsKeys.FREEZE_DUAL_APP
         )
     ),
     DOZE_FLAGS(
@@ -208,6 +213,7 @@ data class PrefsSnapshot(
     val batteryChangeObserve: Boolean = PrefsDefaults.BATTERY_CHANGE_OBSERVE,
     val logToLocal: Boolean = PrefsDefaults.LOG_TO_LOCAL,
     val freezeStats: Boolean = PrefsDefaults.FREEZE_STATS,
+    val freezeDualApp: Boolean = PrefsDefaults.FREEZE_DUAL_APP,
 
     // 4 个 Doze 布尔开关
     val dozeLog: Boolean = PrefsDefaults.DOZE_LOG,

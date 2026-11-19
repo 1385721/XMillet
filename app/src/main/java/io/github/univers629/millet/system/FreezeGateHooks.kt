@@ -2,6 +2,7 @@ package io.github.univers629.millet.system
 
 import android.app.ActivityManager
 import android.content.Context
+import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
@@ -10,6 +11,7 @@ import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.NoRestrictSync
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsKeys
+import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.VersionGate
 import io.github.univers629.millet.core.XReflect
@@ -172,12 +174,47 @@ object FreezeGateHooks {
                 SystemState.aurogonService = param.thisObject
             }
             SystemState.syncMessageAppsToAurogon()
+            SystemState.syncDualAppSupportToAurogon(PrefReader.systemPrefs.freezeDualApp)
         }
     )
 
+    private enum class FreezeExemption {
+        NONE,
+        WHITE_LIST,
+        DEFAULT_IME,
+        FOREGROUND_SERVICE
+    }
+
+    private fun evaluateFreezeExemption(
+        uid: Int,
+        pkg: String?,
+        prefs: PrefsSnapshot,
+        checkFgs: Boolean,
+    ): FreezeExemption {
+        if (pkg.isNullOrEmpty()) return FreezeExemption.NONE
+        if (pkg in prefs.whiteAppSet) return FreezeExemption.WHITE_LIST
+        if (ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, prefs)) {
+            return FreezeExemption.DEFAULT_IME
+        }
+        if (checkFgs &&
+            pkg !in prefs.forceFreezeSet &&
+            pkg in prefs.notFreezeWhenHasFgsSet &&
+            SystemState.checkAppFgService(uid)
+        ) {
+            return FreezeExemption.FOREGROUND_SERVICE
+        }
+        return FreezeExemption.NONE
+    }
+
+    private fun isImeThawProtected(pkg: String?, prefs: PrefsSnapshot): Boolean =
+        pkg != null &&
+            pkg !in prefs.blockThawSet &&
+            pkg !in prefs.ignoreNetworkWakeSet &&
+            ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, prefs)
+
     /**
      * S6（PA(5)）：GreezeManagerService#freezeUids(int[], long, int, String, boolean)
-     * 仅做冻结记账与日志输出，不篡改返回值。
+     * before 拦截受保护 UID（白名单、当前默认输入法、FGS 免冻），after 做冻结记账与日志输出。
      */
     fun buildS6FreezeUidsHook(): HookSpec = HookSpec(
         id = "S6",
@@ -191,7 +228,35 @@ object FreezeGateHooks {
             String::class.java,
             Boolean::class.javaPrimitiveType!!
         ),
-        mode = HookMode.AFTER,
+        mode = HookMode.BEFORE_AND_AFTER,
+        before = { param ->
+            if (!SystemState.isGreezeReady) return@HookSpec
+            val uids = param.args.getOrNull(0) as? IntArray ?: return@HookSpec
+            if (uids.isEmpty()) return@HookSpec
+            val prefs = PrefReader.systemPrefs
+            val reason = (param.args.getOrNull(3) as? String) ?: "unknown"
+            var blocked = false
+            val kept = ArrayList<Int>(uids.size)
+            for (uid in uids) {
+                val pkg = if (uid >= 10000) SystemState.getPackageNameForUid(uid) else null
+                val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
+                if (exemption != FreezeExemption.NONE) {
+                    blocked = true
+                    if (prefs.freezeStats && uid >= 10000 && exemption != FreezeExemption.DEFAULT_IME) {
+                        FreezeStatsRecorder.recordProtect(uid, reason, pkg)
+                    }
+                    Logger.info("freezeUids 跳过受保护应用[$exemption]: $pkg uid=$uid reason=$reason")
+                } else {
+                    kept.add(uid)
+                }
+            }
+            if (!blocked) return@HookSpec
+            if (kept.isEmpty()) {
+                param.blockSafely()
+            } else {
+                param.args[0] = kept.toIntArray()
+            }
+        },
         after = { param ->
             val prefs = PrefReader.systemPrefs
             val needLog = prefs.isLog || prefs.simplifyLog
@@ -298,31 +363,29 @@ object FreezeGateHooks {
                 FreezeStatsRecorder.cachePackageHint(uid, pkg)
             }
 
-            // 1. 白名单应用永不冻结（无论触发原因是什么）
-            if (pkg in prefs.whiteAppSet) {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordProtect(uid, reason, pkg)
-                }
-                Logger.info("FAH判断:${pkg}在白名单，因此无法被冻结")
-                Logger.logEvent(Logger.Level.INFO, "FAH判断白名单阻断冻结", pkg, uid, reason)
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 2. LAUNCH_MODE 与前台服务（FGS）保护分支（强制冻结名单剥夺 FGS 豁免）
-            if ((reason == "LAUNCH_MODE" || pkg in prefs.notFreezeWhenHasFgsSet) && pkg !in prefs.forceFreezeSet) {
-                if (pkg in prefs.notFreezeWhenHasFgsSet) {
-                    // 使用独立的 aurogonService 句柄调用 checkAppFgService（修正缺陷 #1）
-                    val hasFgs = SystemState.checkAppFgService(uid)
-                    if (hasFgs) {
-                        if (prefs.freezeStats && uid >= 10000) {
-                            FreezeStatsRecorder.recordProtect(uid, reason, pkg)
-                        }
-                        Logger.info("FAH判断:${pkg}具有前台服务,禁止冻结")
-                        Logger.logEvent(Logger.Level.INFO, "FAH判断具有前台服务阻断冻结", pkg, uid, reason)
-                        param.blockSafely()
+            // 1. 白名单、当前默认输入法与 FGS 豁免判定
+            when (evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)) {
+                FreezeExemption.WHITE_LIST -> {
+                    if (prefs.freezeStats && uid >= 10000) {
+                        FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
+                    Logger.info("FAH判断:${pkg}在白名单，因此无法被冻结")
+                    Logger.logEvent(Logger.Level.INFO, "FAH判断白名单阻断冻结", pkg, uid, reason)
+                    param.blockSafely()
                 }
+                FreezeExemption.DEFAULT_IME -> {
+                    Logger.info("FAH判断:${pkg}为当前默认输入法，免予冻结")
+                    param.blockSafely()
+                }
+                FreezeExemption.FOREGROUND_SERVICE -> {
+                    if (prefs.freezeStats && uid >= 10000) {
+                        FreezeStatsRecorder.recordProtect(uid, reason, pkg)
+                    }
+                    Logger.info("FAH判断:${pkg}具有前台服务,禁止冻结")
+                    Logger.logEvent(Logger.Level.INFO, "FAH判断具有前台服务阻断冻结", pkg, uid, reason)
+                    param.blockSafely()
+                }
+                FreezeExemption.NONE -> Unit
             }
         },
         after = { param ->
@@ -365,13 +428,16 @@ object FreezeGateHooks {
             } ?: return@HookSpec
 
             val prefs = PrefReader.systemPrefs
-            if (pkg in prefs.whiteAppSet) {
+            val exemption = evaluateFreezeExemption(0, pkg, prefs, checkFgs = false)
+            if (exemption == FreezeExemption.WHITE_LIST) {
                 if (prefs.freezeStats) {
                     val uid = resolveAurogonAppUidZeroPm(appInfoObj, pkg)
                     if (uid >= 10000) {
                         FreezeStatsRecorder.recordProtect(uid, "checkAppStatusForFreeze", pkg)
                     }
                 }
+                param.blockSafely()
+            } else if (exemption == FreezeExemption.DEFAULT_IME) {
                 param.blockSafely()
             }
         }
@@ -575,7 +641,7 @@ object FreezeGateHooks {
             // 插充电器这条路径在 OS1/OS2 上并不是 powerkeeper 的 MilletBrightHandler what=16，
             // 而是 Greezer 自己逐个 uid 调 thawUid(reason="battery charging")，所以只挂 P10 拦不住，
             // 必须在闸门这里一并拒掉，否则「禁止插电时全量解冻」在旧版本上等于没开。
-            if (prefs.disableCharge && isChargeThawReason(reason)) {
+            if (prefs.disableCharge && isChargeThawReason(reason) && !isImeThawProtected(pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000) {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_CHARGE_THAW, reason, pkg)
                 }
@@ -585,8 +651,8 @@ object FreezeGateHooks {
             }
 
             // 规则 2.7：可选「亮屏时保持冻结」——只拦 screen on，
-            // 前台拉起（activity start / toFront）等其余合法理由照常放行。
-            if (prefs.disableScreenOnThaw && isScreenOnThawReason(reason)) {
+            // 前台拉起（activity start / toFront）等其余合法理由及默认输入法照常放行。
+            if (prefs.disableScreenOnThaw && isScreenOnThawReason(reason) && !isImeThawProtected(pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000) {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_SCREEN_ON_THAW, reason, pkg)
                 }
@@ -595,8 +661,8 @@ object FreezeGateHooks {
                 return@HookSpec
             }
 
-            // 规则 3：未勾选「强力压制」(blockThawSet)，或者解冻理由命中合法解冻理由白名单 -> 放行
-            if (pkg !in prefs.blockThawSet || isAllowedThawReason(reason)) {
+            // 规则 3：未勾选「强力压制」(blockThawSet)，或者默认输入法/合法解冻理由白名单 -> 放行
+            if (pkg !in prefs.blockThawSet || isAllowedThawReason(reason) || isImeThawProtected(pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000 && !FreezeStatsRecorder.isDispatchThawEventActive) {
                     FreezeStatsRecorder.recordThaw(uid, reason, pkg)
                 }
@@ -670,7 +736,8 @@ object FreezeGateHooks {
             val kept = ArrayList<Int>(uids.size)
             for (uid in uids) {
                 val pkg = SystemState.getPackageNameForUid(uid)
-                val interceptRule: InterceptRule? = if (pkg != null) {
+                val imeProtected = isImeThawProtected(pkg, prefs)
+                val interceptRule: InterceptRule? = if (pkg != null && !imeProtected) {
                     when {
                         chargeThaw -> InterceptRule.NO_CHARGE_THAW
                         screenOnThaw && pkg != SystemState.lastToFrontPackage -> InterceptRule.NO_SCREEN_ON_THAW
@@ -754,7 +821,6 @@ object FreezeGateHooks {
             if (pidArray.isEmpty()) return@HookSpec
 
             val prefs = PrefReader.systemPrefs
-            if (prefs.whiteAppSet.isEmpty() && prefs.notFreezeWhenHasFgsSet.isEmpty()) return@HookSpec
 
             var blocked = false
             val kept = ArrayList<Int>(pidArray.size)
@@ -763,15 +829,10 @@ object FreezeGateHooks {
             for (pid in pidArray) {
                 val uid = uidForPid(pid)
                 val pkg = if (uid > 0) SystemState.getPackageNameForUid(uid) else null
-                val exempt = pkg != null && (
-                    pkg in prefs.whiteAppSet ||
-                        (pkg !in prefs.forceFreezeSet &&
-                            pkg in prefs.notFreezeWhenHasFgsSet &&
-                            SystemState.checkAppFgService(uid))
-                    )
-                if (exempt) {
+                val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
+                if (exemption != FreezeExemption.NONE) {
                     blocked = true
-                    if (prefs.freezeStats && uid >= 10000) {
+                    if (prefs.freezeStats && uid >= 10000 && exemption != FreezeExemption.DEFAULT_IME) {
                         val seen = protectedUids ?: HashSet<Int>().also { protectedUids = it }
                         if (seen.add(uid)) {
                             val r = protectReason ?: (
@@ -781,7 +842,7 @@ object FreezeGateHooks {
                             FreezeStatsRecorder.recordProtect(uid, r, pkg)
                         }
                     }
-                    Logger.info("freezePids 跳过免冻结应用进程: $pkg pid=$pid")
+                    Logger.info("freezePids 跳过受保护应用进程[$exemption]: $pkg pid=$pid")
                 } else {
                     kept.add(pid)
                 }
@@ -994,6 +1055,7 @@ object FreezeGateHooks {
             val uid = param.args.filterIsInstance<Int>()
                 .firstOrNull { it >= 10000 } ?: -1
             val pkg = if (uid >= 0) SystemState.getPackageNameForUid(uid) else null
+            if (isImeThawProtected(pkg, prefs)) return@HookSpec
             if (prefs.freezeStats && uid >= 10000) {
                 val rule = if (chargeThaw) InterceptRule.NO_CHARGE_THAW else InterceptRule.NO_SCREEN_ON_THAW
                 FreezeStatsRecorder.recordIntercept(uid, rule, reason, pkg)
@@ -1076,6 +1138,108 @@ object FreezeGateHooks {
                     Logger.warn("阻止系统杀戮处于墓碑状态的应用: UID=$uid")
                 }
             }
+        }
+    )
+
+    /**
+     * S28（OS2-OS4）：AurogonImmobulusMode#isUidValid(int)
+     * 绕过 OS2 机型白名单 `ENABLE_DOUBLE_APP` 与 OS3/OS4 云控总开关 `mDoubleAppCtrlCloud`，
+     * 并遵循模块 `freezeDualApp` 开关控制双开（userId == 999）准入。
+     */
+    fun buildS28DoubleAppUidValidHook(): HookSpec = HookSpec(
+        id = "S28",
+        name = "AurogonImmobulusMode#isUidValid",
+        targetClass = CLASS_AUROGON_MODE,
+        methodName = "isUidValid",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            param.result = PrefReader.systemPrefs.freezeDualApp
+        }
+    )
+
+    /**
+     * S29（OS2-OS4）：GreezeManagerService#checkStateForScrOff(int)
+     * 官方至今在此方法保留 `uid <= 19999`，导致双开应用走息屏检查路径被拒。
+     */
+    fun buildS29ScrOffStateHook(): HookSpec = HookSpec(
+        id = "S29",
+        name = "GreezeManagerService#checkStateForScrOff",
+        targetClass = CLASS_GREEZE_SERVICE,
+        methodName = "checkStateForScrOff",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            if (!PrefReader.systemPrefs.freezeDualApp) {
+                param.result = false
+                return@HookSpec
+            }
+            val self = param.thisObject ?: return@HookSpec
+            val scrOff = SystemState.isGreezeScreenOff(self) ?: return@HookSpec
+            param.result = scrOff
+        }
+    )
+
+    /**
+     * S30（OS1/OS2）：GreezeManagerService#notifyExcuteServices(int)
+     * OS1/OS2 单参重载直接拒掉 `uid > 19999`，导致后台启服务时双开冻结不会被解冻。
+     * OS3/OS4 改为 3 参且已自带 `userId == 999` 放行，通过 gate 自动跳过。
+     */
+    fun buildS30NotifyExecuteServicesHook(classLoader: ClassLoader): HookSpec = HookSpec(
+        id = "S30",
+        name = "GreezeManagerService#notifyExcuteServices",
+        targetClass = CLASS_GREEZE_SERVICE,
+        methodName = "notifyExcuteServices",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        gate = {
+            val clazz = io.github.univers629.millet.core.XReflect.findClassIfExists(CLASS_GREEZE_SERVICE, classLoader)
+            clazz?.declaredMethods?.any {
+                it.name == "notifyExcuteServices" &&
+                    it.parameterCount == 1 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType
+            } == true
+        },
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            if (!PrefReader.systemPrefs.freezeDualApp) return@HookSpec
+            val self = param.thisObject ?: return@HookSpec
+            SystemState.handleNotifyExecuteServiceForDualUid(self, uid)
+            param.result = null
+        }
+    )
+
+    /**
+     * S31（仅 OS1）：AurogonImmobulusMode#updateTargetList(int)
+     * OS1 无 `isUidValid` 方法，在此写死 `uid > 19999` 直接 return；放行后双开 UID 可纳入
+     * Aurogon `mImmobulusTargetList` 并参与 LaunchMode / 亮屏自动冻结。
+     */
+    fun buildS31AurogonUpdateTargetListHook(classLoader: ClassLoader): HookSpec = HookSpec(
+        id = "S31",
+        name = "AurogonImmobulusMode#updateTargetList",
+        targetClass = CLASS_AUROGON_MODE,
+        methodName = "updateTargetList",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        gate = {
+            !io.github.univers629.millet.core.RomCapabilities.hasMethod(
+                CLASS_AUROGON_MODE,
+                "isUidValid",
+                classLoader
+            )
+        },
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            if (!PrefReader.systemPrefs.freezeDualApp) return@HookSpec
+            val self = param.thisObject ?: return@HookSpec
+            SystemState.addDualAppToAurogonTargetList(self, uid)
+            param.result = null
         }
     )
 

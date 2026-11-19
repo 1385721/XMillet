@@ -113,21 +113,21 @@ object Logger {
     }
 
     /**
-     * Doze 专属日志（受 `dozeLog` 或 `isLog` 门控，若开启 `logToLocal` 则同步落盘）。
+     * Doze 专属日志（受 `dozeLog` 或 `isLog` 门控）。
      */
     fun doze(level: Level, message: String) {
         val prefs = currentSnapshot()
         if (!prefs.dozeLog && !prefs.isLog) return
-        emit(level, message, prefs, forceLocalIfEnabled = true)
+        emit(level, message, prefs)
     }
 
     /**
-     * 电量观测专属日志（受 `batteryChangeObserve` 或 `isLog` 门控，若开启 `logToLocal` 则同步落盘）。
+     * 电量观测专属日志（受 `batteryChangeObserve` 或 `isLog` 门控）。
      */
     fun battery(level: Level, message: String) {
         val prefs = currentSnapshot()
         if (!prefs.batteryChangeObserve && !prefs.isLog) return
-        emit(level, message, prefs, forceLocalIfEnabled = true)
+        emit(level, message, prefs)
     }
 
     /**
@@ -157,21 +157,21 @@ object Logger {
     }
 
     /**
-     * 装配期/无条件 Info 日志（不受 `isLog` 限制，用于安装成功回执等）。
+     * 装配期/无条件 Info 日志（不受 `isLog` 限制，用于安装成功回执等，始终尝试落盘）。
      */
     fun alwaysInfo(message: String) {
-        emit(Level.INFO, message, currentSnapshot())
+        emit(Level.INFO, message, currentSnapshot(), forceLocal = true)
     }
 
     /**
-     * 装配期/无条件 Warn 日志（用于 `开始XMillet Hook`、`共屏蔽N处应用无响应`、每个成功项等）。
+     * 装配期/无条件 Warn 日志（用于 `开始XMillet Hook`、`共屏蔽N处应用无响应`、每个成功项等，始终尝试落盘）。
      */
     fun alwaysWarn(message: String) {
-        emit(Level.WARN, message, currentSnapshot())
+        emit(Level.WARN, message, currentSnapshot(), forceLocal = true)
     }
 
     /**
-     * 错误日志（无条件输出，附带异常摘要）。
+     * 错误日志（无条件输出，附带异常摘要，始终尝试落盘）。
      */
     fun error(message: String, throwable: Throwable? = null) {
         val fullMsg = if (throwable != null) {
@@ -179,7 +179,7 @@ object Logger {
         } else {
             message
         }
-        emit(Level.ERROR, fullMsg, currentSnapshot())
+        emit(Level.ERROR, fullMsg, currentSnapshot(), forceLocal = true)
     }
 
     /**
@@ -202,7 +202,7 @@ object Logger {
         level: Level,
         body: String,
         prefs: PrefsSnapshot,
-        forceLocalIfEnabled: Boolean = false
+        forceLocal: Boolean = false
     ) {
         val minLevel = Level.fromConfig(prefs.logLevel)
         if (level.priority < minLevel.priority && level != Level.ERROR) {
@@ -239,7 +239,7 @@ object Logger {
         }
 
         // 2. 如需写入本地文件，统一投递到单线程 IO Handler
-        if (prefs.logToLocal || prefs.logType == "file" || (forceLocalIfEnabled && prefs.logToLocal)) {
+        if (prefs.isLog || prefs.logToLocal || prefs.logType == "file" || forceLocal) {
             postIoTask {
                 appendLineToLocalFile(level, body)
             }

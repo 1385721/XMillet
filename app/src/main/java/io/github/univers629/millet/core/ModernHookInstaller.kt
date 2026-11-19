@@ -204,9 +204,10 @@ object ModernHookInstaller {
                     }
 
                     HookMode.BEFORE -> {
+                        val origArgs = chain.args.toTypedArray()
                         val param = UnifiedHookParamImpl(
                             thisObject = chain.thisObject,
-                            args = chain.args.toTypedArray(),
+                            args = origArgs.copyOf(),
                             method = chain.executable,
                             originalInvoker = { chain.proceed() }
                         )
@@ -218,7 +219,11 @@ object ModernHookInstaller {
                         if (param.isSkipped) {
                             return param.result
                         }
-                        return chain.proceed()
+                        return if (!param.args.contentEquals(origArgs)) {
+                            chain.proceed(param.args)
+                        } else {
+                            chain.proceed()
+                        }
                     }
 
                     HookMode.AFTER -> {
@@ -239,9 +244,10 @@ object ModernHookInstaller {
                     }
 
                     HookMode.BEFORE_AND_AFTER -> {
+                        val origArgs = chain.args.toTypedArray()
                         val param = UnifiedHookParamImpl(
                             thisObject = chain.thisObject,
-                            args = chain.args.toTypedArray(),
+                            args = origArgs.copyOf(),
                             method = chain.executable,
                             originalInvoker = { chain.proceed() }
                         )
@@ -253,7 +259,11 @@ object ModernHookInstaller {
                         if (param.isSkipped) {
                             return param.result
                         }
-                        val result = chain.proceed()
+                        val result = if (!param.args.contentEquals(origArgs)) {
+                            chain.proceed(param.args)
+                        } else {
+                            chain.proceed()
+                        }
                         param.setResultInternal(result)
                         try {
                             spec.after?.invoke(param)

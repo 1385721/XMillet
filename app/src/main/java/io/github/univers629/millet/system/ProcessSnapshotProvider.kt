@@ -6,6 +6,7 @@ import android.os.Binder
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
 import java.io.File
 
@@ -19,7 +20,8 @@ import java.io.File
  * 数据来源与判据：
  * - 进程集合：`/proc/<pid>/status` 的 `Uid:` 落在 10000–19999（应用进程）；
  * - 进程名：`/proc/<pid>/cmdline`（被截断的 `Name:` 只作兜底），包名取冒号前部分；
- * - 内存：`/proc/<pid>/statm`（size/resident 页数 × 页大小）；
+ * - 内存：优先读取 `/proc/<pid>/smaps_rollup` 的 `Pss:`（按比例分摊共享页的真实物理内存，
+ *   避免多进程对同一份系统/框架/APK 映射页重复计算造成数倍虚高），读不到时退回 `/proc/<pid>/statm`；
  * - 运行时长：`/proc/<pid>/stat` 第 22 字段 starttime（100Hz）与 `/proc/uptime` 之差；
  * - 冻结：优先读 cgroup 真值（v2 `cgroup.freeze`、v1 `freezer.state=FROZEN`），
  *   读不到时退回 wchan 判据；
@@ -88,7 +90,7 @@ object ProcessSnapshotProvider {
             if (pid <= 0) continue
             val status = readText("/proc/$pid/status") ?: continue
             val uid = parseUid(status) ?: continue
-            if (uid < MIN_APP_UID || uid > MAX_APP_UID) continue
+            if (!AppUidUtils.isManagedAppUid(uid, includeDualApp = true)) continue
 
             val stat = readText("/proc/$pid/stat") ?: continue
             val processName = readCmdline(pid).ifEmpty { parseName(status) }
@@ -99,14 +101,15 @@ object ProcessSnapshotProvider {
             } else {
                 0L
             }
-            val (vszKb, rssKb) = parseStatm(readText("/proc/$pid/statm").orEmpty(), pageSizeKb)
+            val (vszKb, statmRssKb) = parseStatm(readText("/proc/$pid/statm").orEmpty(), pageSizeKb)
+            val memKb = readPssKb(pid) ?: statmRssKb
             val wchan = readText("/proc/$pid/wchan")?.trim().orEmpty()
             val freezerType = readFrozenType(pid).ifEmpty { freezerTypeFromWchan(wchan) }
             val services = servicesByPid[pid].orEmpty()
 
             builder.append(pid).append('|')
                 .append(uid).append('|')
-                .append(rssKb).append('|')
+                .append(memKb).append('|')
                 .append(vszKb).append('|')
                 .append(sanitize(wchan)).append('|')
                 .append(elapsedSec).append('|')
@@ -226,6 +229,19 @@ object ProcessSnapshotProvider {
         val residentPages = parts.getOrNull(1)?.toLongOrNull() ?: 0L
         return (sizePages * pageSizeKb) to (residentPages * pageSizeKb)
     }
+
+    /** 读取内核 `/proc/<pid>/smaps_rollup` 的 `Pss:`（真实按比例分摊物理内存，KB）。 */
+    internal fun parsePssKb(smapsRollup: String?): Long? {
+        if (smapsRollup.isNullOrEmpty()) return null
+        for (line in smapsRollup.lineSequence()) {
+            if (!line.startsWith("Pss:")) continue
+            val valueStr = line.substringAfter("Pss:").trim().substringBefore(' ')
+            return valueStr.toLongOrNull()
+        }
+        return null
+    }
+
+    private fun readPssKb(pid: Int): Long? = parsePssKb(readText("/proc/$pid/smaps_rollup"))
 
     /**
      * 读 cgroup 冻结真值：v2 看 `cgroup.freeze` 是否为 1，v1 看 `freezer.state` 是否为 FROZEN。

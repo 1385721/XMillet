@@ -108,6 +108,9 @@ data class InstalledAppUiModel(
     val inCloudFrozenWhite: Boolean = false,
     val inCloudLaunchAllow: Boolean = false,
 ) {
+    val isDualApp: Boolean
+        get() = io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)
+
     val hasAnyConfig: Boolean
         get() = inWhiteSet || inMessageSet || inForceFreezeSet || inBlockThawSet ||
             inForbidSyncSet || inNotFreezeFgsSet || inBatteryWhiteSet
@@ -446,7 +449,7 @@ private fun AppItemCardMiuix(
                     maxLines = 1
                 )
                 Text(
-                    text = app.packageName,
+                    text = if (app.isDualApp) "${app.packageName} · UID: ${app.uid}" else app.packageName,
                     fontSize = 12.sp,
                     color = colorScheme.onSurfaceVariantSummary,
                     maxLines = 1
@@ -456,6 +459,13 @@ private fun AppItemCardMiuix(
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (app.isDualApp) {
+                        StatusTagMiuix(
+                            label = "双开",
+                            backgroundColor = colorScheme.tertiaryContainer,
+                            contentColor = colorScheme.onTertiaryContainer
+                        )
+                    }
                     // 标签分两段：强调类（实心底、饱和色）在前，普通胶囊（浅底色）在后。
                     // 电池白名单/黑名单代表系统级省电状态，排在第一位；SYSTEM 紧随其后，
                     // 再是免冻白名单 / 消息应用 / 强制冻结；依附性的 FGS免冻、禁止解冻、

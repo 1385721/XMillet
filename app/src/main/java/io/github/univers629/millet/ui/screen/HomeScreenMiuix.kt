@@ -115,6 +115,7 @@ data class RunningProcessUiModel(
     val formattedMemSize: String = "",
     /** greeze 记账里是否把这个 uid 标成冻结；与 [isFrozen]（内核实际状态）可能不一致 */
     val bookkeepingFrozen: Boolean = false,
+    val isDualApp: Boolean = false,
     val applicationInfo: android.content.pm.ApplicationInfo? = null
 )
 
@@ -131,7 +132,7 @@ fun HomeScreenMiuix(
         onNavigateToTab(io.github.univers629.millet.ui.component.BottomBarDestination.Processes)
     },
     onOpenAbout: () -> Unit = {},
-    onOpenAppProfile: (packageName: String, appName: String) -> Unit = { _, _ -> },
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit = { _, _ -> },
     onQueryUnfrozenReason: (packageName: String) -> Unit = {},
 ) {
     val scrollBehavior = MiuixScrollBehavior()

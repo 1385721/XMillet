@@ -543,6 +543,51 @@ object PowerKeeperBinderClient {
         }
     }
 
+    data class DualAppEntry(
+        val packageName: String,
+        val uid: Int,
+        val flags: Int,
+    )
+
+    /**
+     * 查询双开空间（user 999）已安装的受管应用列表（事务码 19）。
+     *
+     * @return null 表示系统服务未连接或旧版本模块不支持该事务码
+     */
+    fun queryDualApps(): List<DualAppEntry>? {
+        val binder = remoteSystemBinder ?: return null
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
+            val transacted = binder.transact(MilletIpcContract.TX_GET_DUAL_APPS, data, reply, 0)
+            if (!transacted) return null
+            reply.readException()
+            val payload = reply.readString() ?: return null
+            if (payload.isEmpty()) return emptyList()
+            payload.lineSequence()
+                .mapNotNull { line ->
+                    val parts = line.split('|')
+                    if (parts.size < 3) return@mapNotNull null
+                    val pkg = parts[0].trim()
+                    val uid = parts[1].toIntOrNull() ?: return@mapNotNull null
+                    val flags = parts[2].toIntOrNull() ?: 0
+                    if (pkg.isEmpty() || !io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) {
+                        null
+                    } else {
+                        DualAppEntry(packageName = pkg, uid = uid, flags = flags)
+                    }
+                }
+                .toList()
+        } catch (t: Throwable) {
+            Logger.error("queryDualApps failed", t)
+            null
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     /**
      * 读取 system_server 实时运行状态与当前冻结 UID 列表（事务码 10）。
      */

@@ -1,15 +1,18 @@
 package io.github.univers629.millet.ui.screen
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.widget.Toast
 import io.github.univers629.millet.BuildConfig
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -24,29 +27,38 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.BatteryAlert
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.ColorLens
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.automirrored.rounded.DirectionsWalk
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.LightMode
-import androidx.compose.material.icons.automirrored.rounded.Notes
-import androidx.compose.material.icons.rounded.SaveAlt
+import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
@@ -57,33 +69,38 @@ import io.github.univers629.millet.ui.component.XMilletIcons
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.util.BlurredBar
+import io.github.univers629.millet.ui.util.BugreportHelper
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Backup
-import top.yukonga.miuix.kmp.icon.extended.Copy
 import top.yukonga.miuix.kmp.icon.extended.Import
 import top.yukonga.miuix.kmp.icon.extended.Info
-import top.yukonga.miuix.kmp.icon.extended.Paste
 import top.yukonga.miuix.kmp.icon.extended.Reset
 import top.yukonga.miuix.kmp.icon.extended.Show
 import top.yukonga.miuix.kmp.icon.extended.Tasks
 import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import top.yukonga.miuix.kmp.window.WindowDialog
 
 @Composable
 fun SettingsScreenMiuix(
@@ -115,14 +132,11 @@ fun SettingsScreenMiuix(
     var blockPowerSaveWhitelist by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS))
     }
-    var batteryObserve by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.BATTERY_CHANGE_OBSERVE))
+    var freezeDualApp by remember(configVersion) {
+        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.FREEZE_DUAL_APP))
     }
     var isLog by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.IS_LOG))
-    }
-    var logToLocal by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.LOG_TO_LOCAL))
     }
     var simplifyLog by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SIMPLIFY_LOG))
@@ -137,21 +151,6 @@ fun SettingsScreenMiuix(
     var disableMotionListener by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_MOTION_LISTENER))
     }
-    var dozeLog by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DOZE_LOG))
-    }
-
-    val logLevels = listOf("debug", "info", "warn", "error")
-    val logLevelLabels = listOf("Debug (调试)", "Info (信息)", "Warn (警告)", "Error (错误)")
-    var currentLogLevel by remember(configVersion) {
-        mutableStateOf(sp.getString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL) ?: PrefsDefaults.LOG_LEVEL)
-    }
-
-    val logTypes = listOf("xposed", "file")
-    val logTypeLabels = listOf("LSPosed 框架日志 + Logcat", "仅写入本地日志文件")
-    var currentLogType by remember(configVersion) {
-        mutableStateOf(sp.getString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE) ?: PrefsDefaults.LOG_TYPE)
-    }
 
     var showRebootNotice by remember { mutableStateOf(false) }
 
@@ -164,23 +163,9 @@ fun SettingsScreenMiuix(
     }
 
     var showResetConfirmDialog by remember { mutableStateOf(false) }
-    var exportedJsonPreview by remember { mutableStateOf<String?>(null) }
-
-    val exportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                val json = BackupRestoreHelper.exportToJson(context)
-                context.contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(json.toByteArray(Charsets.UTF_8))
-                }
-                Toast.makeText(context, "JSON 备份导出成功", Toast.LENGTH_SHORT).show()
-            }.onFailure { e ->
-                Toast.makeText(context, "导出失败：${e.message}", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
+    var showSendLogDialog by remember { mutableStateOf(false) }
+    var showBackupDialog by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -230,22 +215,7 @@ fun SettingsScreenMiuix(
         )
     }
 
-    if (exportedJsonPreview != null) {
-        MiuixConfirmDialog(
-            show = true,
-            title = "当前配置 JSON",
-            message = exportedJsonPreview ?: "",
-            confirmText = "复制到剪贴板",
-            dismissText = "关闭",
-            onConfirm = {
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                cm?.setPrimaryClip(ClipData.newPlainText("XMillet_Config", exportedJsonPreview))
-                Toast.makeText(context, "已复制 JSON 到剪贴板", Toast.LENGTH_SHORT).show()
-                exportedJsonPreview = null
-            },
-            onDismiss = { exportedJsonPreview = null }
-        )
-    }
+    LoadingDialogMiuix(show = isLoading)
 
     Scaffold(
         topBar = {
@@ -257,6 +227,7 @@ fun SettingsScreenMiuix(
                 )
             }
         },
+        popupHost = { },
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
@@ -445,6 +416,29 @@ fun SettingsScreenMiuix(
                                 )
                             }
                         )
+                        SwitchPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.ContentCopy,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "控制双开应用冻结",
+                            summary = "绕过系统对双开空间 (UID 999xxxx) 的冻结限制，复用主应用策略",
+                            checked = freezeDualApp,
+                            onCheckedChange = {
+                                freezeDualApp = it
+                                PrefReader.putBooleanAndNotify(
+                                    sp,
+                                    PrefsKeys.FREEZE_DUAL_APP,
+                                    it
+                                )
+                            }
+                        )
                     }
 
                     SmallTitle(text = "Doze 深度睡眠策略")
@@ -511,25 +505,6 @@ fun SettingsScreenMiuix(
                                 PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_MOTION_LISTENER, it)
                             }
                         )
-                        SwitchPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.Notes,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "开启 Doze 状态转换日志",
-                            summary = "记录亮灭屏电量及 Doze 状态机切换详情",
-                            checked = dozeLog,
-                            onCheckedChange = {
-                                dozeLog = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DOZE_LOG, it)
-                            }
-                        )
                     }
 
                     SmallTitle(text = "日志与电量诊断")
@@ -551,49 +526,18 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "开启详细运行日志",
-                            summary = "输出冻结、解冻压制、广播拦截与 ANR 吞噬日志",
+                            summary = "记录运行拦截、电量统计与 Doze 日志并写入本地目录",
                             checked = isLog,
-                            onCheckedChange = {
-                                isLog = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.IS_LOG, it)
-                            }
-                        )
-                        SwitchPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = Icons.Rounded.BatteryAlert,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "开启电量变化消耗记录",
-                            summary = "监听电池百分比变化并统计每 1% 电量消耗耗时",
-                            checked = batteryObserve,
-                            onCheckedChange = {
-                                batteryObserve = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.BATTERY_CHANGE_OBSERVE, it)
-                            }
-                        )
-                        SwitchPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = Icons.Rounded.SaveAlt,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "保存日志到本地文件",
-                            summary = "异步追加写入 /data/system/XMillet/log",
-                            checked = logToLocal,
-                            onCheckedChange = {
-                                logToLocal = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.LOG_TO_LOCAL, it)
+                            onCheckedChange = { enabled ->
+                                isLog = enabled
+                                PrefReader.editAllAndNotify(sp) {
+                                    putBoolean(PrefsKeys.IS_LOG, enabled)
+                                    putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
+                                    putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
+                                    putBoolean(PrefsKeys.DOZE_LOG, enabled)
+                                    putString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL)
+                                    putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
+                                }
                             }
                         )
                         SwitchPreference(
@@ -616,25 +560,20 @@ fun SettingsScreenMiuix(
                                 showRebootNotice = true
                             }
                         )
-                        OverlayDropdownPreference(
-                            title = "最低日志级别",
-                            items = logLevelLabels,
-                            selectedIndex = logLevels.indexOf(currentLogLevel.lowercase()).coerceAtLeast(0),
-                            onSelectedIndexChange = { idx ->
-                                val newLevel = logLevels.getOrElse(idx) { PrefsDefaults.LOG_LEVEL }
-                                currentLogLevel = newLevel
-                                PrefReader.putStringAndNotify(sp, PrefsKeys.LOG_LEVEL, newLevel)
-                            }
-                        )
-                        OverlayDropdownPreference(
-                            title = "日志输出方式",
-                            items = logTypeLabels,
-                            selectedIndex = logTypes.indexOf(currentLogType.lowercase()).coerceAtLeast(0),
-                            onSelectedIndexChange = { idx ->
-                                val newType = logTypes.getOrElse(idx) { PrefsDefaults.LOG_TYPE }
-                                currentLogType = newType
-                                PrefReader.putStringAndNotify(sp, PrefsKeys.LOG_TYPE, newType)
-                            }
+                        ArrowPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Share,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "发送日志",
+                            summary = "打包诊断日志与运行状态，支持保存或分享",
+                            onClick = { showSendLogDialog = true }
                         )
                     }
 
@@ -656,12 +595,9 @@ fun SettingsScreenMiuix(
                                     tint = colorScheme.onBackground
                                 )
                             },
-                            title = "导出 JSON 备份文件",
-                            summary = "将全部 ${PrefsKeys.ALL_KEYS.size} 项配置与名单保存为本地 JSON 文件",
-                            onClick = {
-                                val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.CHINA).format(Date())
-                                exportLauncher.launch("XMillet_Backup_$dateStr.json")
-                            }
+                            title = "备份配置",
+                            summary = "将全部 ${PrefsKeys.ALL_KEYS.size} 项配置与名单导出或分享为 JSON",
+                            onClick = { showBackupDialog = true }
                         )
 
                         ArrowPreference(
@@ -675,58 +611,10 @@ fun SettingsScreenMiuix(
                                     tint = colorScheme.onBackground
                                 )
                             },
-                            title = "从 JSON 文件导入备份",
+                            title = "恢复配置",
                             summary = "选择已保存的 JSON 文件恢复策略并实时通知系统生效",
                             onClick = {
                                 importLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
-                            }
-                        )
-
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Copy,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "预览并复制配置 JSON",
-                            summary = "查看当前 ${PrefsKeys.ALL_KEYS.size} 个配置键的 JSON 文本并复制到剪贴板",
-                            onClick = {
-                                exportedJsonPreview = BackupRestoreHelper.exportToJson(context)
-                            }
-                        )
-
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Paste,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "从剪贴板导入配置 JSON",
-                            summary = "直接读取剪贴板中的 JSON 备份文本并应用",
-                            onClick = {
-                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
-                                if (clipText.isEmpty()) {
-                                    Toast.makeText(context, "剪贴板为空", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    runCatching {
-                                        BackupRestoreHelper.importFromJson(context, clipText)
-                                        onConfigImportedOrReset()
-                                        Toast.makeText(context, "已从剪贴板恢复配置", Toast.LENGTH_SHORT).show()
-                                    }.onFailure { e ->
-                                        Toast.makeText(context, "剪贴板 JSON 解析失败：${e.message}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
                             }
                         )
 
@@ -789,6 +677,227 @@ fun SettingsScreenMiuix(
                     Spacer(Modifier.height(bottomInnerPadding))
                 }
             }
+
+            SendLogDialog(
+                show = showSendLogDialog,
+                onDismissRequest = { showSendLogDialog = false },
+                onSetLoading = { isLoading = it }
+            )
+            BackupConfigDialog(
+                show = showBackupDialog,
+                onDismissRequest = { showBackupDialog = false },
+                onSetLoading = { isLoading = it }
+            )
         }
     }
+}
+
+@Composable
+private fun LoadingDialogMiuix(show: Boolean) {
+    WindowDialog(
+        show = show,
+        content = {
+            val navEventState = rememberNavigationEventState(NavigationEventInfo.None)
+            NavigationBackHandler(
+                state = navEventState,
+                isBackEnabled = true,
+                onBackCompleted = { },
+            )
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Start,
+                ) {
+                    InfiniteProgressIndicator(
+                        color = colorScheme.onBackground
+                    )
+                    Text(
+                        modifier = Modifier.padding(start = 12.dp),
+                        text = "正在处理…",
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun SendLogDialog(
+    show: Boolean,
+    onDismissRequest: () -> Unit,
+    onSetLoading: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    SaveShareActionDialog(
+        show = show,
+        title = "发送日志",
+        saveTitle = "保存日志",
+        shareTitle = "发送日志",
+        shareChooserTitle = "发送日志",
+        mimeType = "application/gzip",
+        defaultFileName = { BugreportHelper.buildBugreportFileName() },
+        saveSuccessToast = "日志已保存",
+        onDismissRequest = onDismissRequest,
+        onSetLoading = onSetLoading,
+        onSaveToUri = { uri ->
+            val bugreport = BugreportHelper.getBugreportFile(context)
+            context.contentResolver.openOutputStream(uri)?.use { output ->
+                bugreport.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+            } ?: error("无法写入目标文件")
+        },
+        onCreateShareFile = { BugreportHelper.getBugreportFile(context) }
+    )
+}
+
+@Composable
+private fun BackupConfigDialog(
+    show: Boolean,
+    onDismissRequest: () -> Unit,
+    onSetLoading: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    SaveShareActionDialog(
+        show = show,
+        title = "备份配置",
+        saveTitle = "保存备份",
+        shareTitle = "分享备份",
+        shareChooserTitle = "分享配置备份",
+        mimeType = "application/json",
+        defaultFileName = { BugreportHelper.buildBackupFileName() },
+        saveSuccessToast = "配置备份已保存",
+        onDismissRequest = onDismissRequest,
+        onSetLoading = onSetLoading,
+        onSaveToUri = { uri ->
+            val json = BackupRestoreHelper.exportToJson(context)
+            context.contentResolver.openOutputStream(uri)?.use { output ->
+                output.write(json.toByteArray(Charsets.UTF_8))
+            } ?: error("无法写入目标文件")
+        },
+        onCreateShareFile = { BugreportHelper.createBackupCacheFile(context) }
+    )
+}
+
+@Composable
+private fun SaveShareActionDialog(
+    show: Boolean,
+    title: String,
+    saveTitle: String,
+    shareTitle: String,
+    shareChooserTitle: String,
+    mimeType: String,
+    defaultFileName: () -> String,
+    saveSuccessToast: String,
+    onDismissRequest: () -> Unit,
+    onSetLoading: (Boolean) -> Unit,
+    onSaveToUri: suspend (Uri) -> Unit,
+    onCreateShareFile: suspend () -> java.io.File,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(mimeType)
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            onSetLoading(true)
+            try {
+                withContext(Dispatchers.IO) {
+                    onSaveToUri(uri)
+                }
+                Toast.makeText(context, saveSuccessToast, Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Toast.makeText(context, "保存失败：${t.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                onSetLoading(false)
+            }
+        }
+    }
+
+    OverlayDialog(
+        show = show,
+        onDismissRequest = onDismissRequest,
+        insideMargin = DpSize(0.dp, 0.dp),
+        content = {
+            Text(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 24.dp, bottom = 12.dp),
+                text = title,
+                fontSize = MiuixTheme.textStyles.title4.fontSize,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center,
+                color = colorScheme.onSurface
+            )
+            ArrowPreference(
+                title = saveTitle,
+                startAction = {
+                    Icon(
+                        imageVector = Icons.Rounded.Save,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 16.dp),
+                        tint = colorScheme.onSurface
+                    )
+                },
+                onClick = {
+                    createDocumentLauncher.launch(defaultFileName())
+                    onDismissRequest()
+                },
+                insideMargin = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
+            )
+            ArrowPreference(
+                title = shareTitle,
+                startAction = {
+                    Icon(
+                        imageVector = Icons.Rounded.Share,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 16.dp),
+                        tint = colorScheme.onSurface
+                    )
+                },
+                onClick = {
+                    scope.launch {
+                        onDismissRequest()
+                        onSetLoading(true)
+                        try {
+                            val file = withContext(Dispatchers.IO) {
+                                onCreateShareFile()
+                            }
+                            val uri: Uri = FileProvider.getUriForFile(
+                                context,
+                                "${BuildConfig.APPLICATION_ID}.fileprovider",
+                                file
+                            )
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                setDataAndType(uri, mimeType)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(
+                                Intent.createChooser(shareIntent, shareChooserTitle)
+                            )
+                        } catch (t: Throwable) {
+                            Toast.makeText(context, "分享失败：${t.message}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            onSetLoading(false)
+                        }
+                    }
+                },
+                insideMargin = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
+            )
+            TextButton(
+                text = "取消",
+                onClick = onDismissRequest,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp, bottom = 24.dp)
+                    .padding(horizontal = 24.dp)
+            )
+        }
+    )
 }

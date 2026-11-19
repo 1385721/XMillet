@@ -9,6 +9,7 @@ import io.github.univers629.millet.BuildConfig
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.displayCutout
@@ -30,10 +32,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Code
@@ -77,6 +83,7 @@ import io.github.univers629.millet.ui.util.AboutPhoneUtils
 import io.github.univers629.millet.ui.util.milletMiuixBlurEffect
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
@@ -86,6 +93,7 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurBlendMode
 import top.yukonga.miuix.kmp.blur.BlurColors
@@ -95,11 +103,13 @@ import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+import top.yukonga.miuix.kmp.window.WindowDialog
 
 /**
  * 关于主界面（对齐 InstallerX-Revived / HyperCeiler / HyperOS 规范）：
@@ -681,6 +691,10 @@ fun AboutRepoScreenMiuix(
     val context = LocalContext.current
     val topAppBarScrollBehavior = MiuixScrollBehavior()
     val repoUrl = "https://github.com/univers629/XMillet"
+    val donateQrResIds = remember {
+        listOf(R.drawable.qr_donate_alipay, R.drawable.qr_donate_wechat)
+    }
+    var previewDonateResId by remember { mutableStateOf<Int?>(null) }
 
     Scaffold(
         topBar = {
@@ -764,8 +778,79 @@ fun AboutRepoScreenMiuix(
                     )
                 }
             }
+
+            item {
+                SmallTitle(text = "支持")
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 12.dp),
+                    insideMargin = PaddingValues(16.dp)
+                ) {
+                    Text(
+                        text = "如果 XMillet 对你有所帮助，欢迎请作者喝杯咖啡",
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        color = colorScheme.onSurfaceVariantSummary
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        for (resId in donateQrResIds) {
+                            Image(
+                                painter = painterResource(resId),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(CardDefaults.CornerRadius))
+                                    .clickable { previewDonateResId = resId }
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
+
+    val activeResId = previewDonateResId
+    WindowDialog(
+        show = activeResId != null,
+        modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
+        title = "感谢支持",
+        onDismissRequest = { previewDonateResId = null },
+        content = {
+            val dismissState = LocalDismissState.current
+            if (activeResId != null) {
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        painter = painterResource(activeResId),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.size(260.dp)
+                    )
+                }
+                TextButton(
+                    text = "关闭",
+                    onClick = {
+                        previewDonateResId = null
+                        dismissState?.invoke()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp),
+                    colors = ButtonDefaults.textButtonColorsPrimary()
+                )
+            }
+        }
+    )
 }
 
 /**

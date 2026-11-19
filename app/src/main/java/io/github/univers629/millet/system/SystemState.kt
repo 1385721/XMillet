@@ -562,7 +562,210 @@ object SystemState {
             deviceIdleController = resolveSystemService("deviceidle")
                 ?: resolveSystemService("device_idle")
         }
+        aurogonService?.let { aurogon ->
+            hasAurogonIsUidValid = io.github.univers629.millet.core.RomCapabilities.hasMethod(
+                CLASS_AUROGON_MODE,
+                "isUidValid",
+                aurogon.javaClass.classLoader
+            )
+            syncDualAppSupportToAurogon(io.github.univers629.millet.core.PrefReader.systemPrefs.freezeDualApp)
+        }
         return true
+    }
+
+    @Volatile
+    var hasAurogonIsUidValid: Boolean = false
+
+    fun getDualPackageUid(packageName: String): Int {
+        val ctx = systemContext ?: return 0
+        val primaryUid = getPackageUid(packageName)
+        val dualUid = io.github.univers629.millet.core.AppUidUtils.dualUidOf(primaryUid)
+        if (dualUid <= 0) return 0
+        return try {
+            val pkgs = ctx.packageManager.getPackagesForUid(dualUid)
+            if (pkgs != null && packageName in pkgs) dualUid else 0
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    /**
+     * 免 Root 枚举双开空间（userId = 999）已安装的受管应用清单，编码为 `packageName|uid|flags` 行文本。
+     */
+    @Suppress("UNCHECKED_CAST", "DEPRECATION")
+    fun queryDualAppsSnapshot(): String {
+        val ctx = systemContext ?: return ""
+        val token = android.os.Binder.clearCallingIdentity()
+        return try {
+            val pm = ctx.packageManager
+            val dualApps: List<ApplicationInfo> = runCatching {
+                XReflect.callMethod(
+                    pm,
+                    "getInstalledApplicationsAsUser",
+                    0,
+                    io.github.univers629.millet.core.AppUidUtils.DUAL_APP_USER_ID
+                ) as? List<ApplicationInfo>
+            }.getOrNull() ?: run {
+                val primaryList = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
+                primaryList.filter { info ->
+                    val pkg = info.packageName ?: return@filter false
+                    val dualUid = io.github.univers629.millet.core.AppUidUtils.dualUidOf(info.uid)
+                    if (dualUid <= 0) return@filter false
+                    val pkgs = runCatching { pm.getPackagesForUid(dualUid) }.getOrNull()
+                    pkgs != null && pkg in pkgs
+                }
+            }
+            val lines = ArrayList<String>(dualApps.size)
+            for (info in dualApps) {
+                val pkg = info.packageName?.takeIf { it.isNotEmpty() } ?: continue
+                val dualUid = if (io.github.univers629.millet.core.AppUidUtils.isDualAppUid(info.uid)) {
+                    info.uid
+                } else {
+                    io.github.univers629.millet.core.AppUidUtils.dualUidOf(info.uid)
+                }
+                if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(dualUid)) continue
+                lines.add("$pkg|$dualUid|${info.flags}")
+            }
+            lines.joinToString("\n")
+        } catch (t: Throwable) {
+            Logger.warn("queryDualAppsSnapshot failed: ${t.javaClass.simpleName}: ${t.message}")
+            ""
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    fun syncDualAppSupportToAurogon(enabled: Boolean) {
+        val aurogon = aurogonService ?: return
+        val clazz = aurogon.javaClass
+        val loader = clazz.classLoader
+        if (io.github.univers629.millet.core.RomCapabilities.hasField(clazz, "mDoubleEnable")) {
+            runCatching { XReflect.findField(clazz, "mDoubleEnable").setBoolean(null, enabled) }
+        }
+        if (io.github.univers629.millet.core.RomCapabilities.hasField(clazz, "mDoubleAppCtrlCloud")) {
+            runCatching {
+                val field = clazz.getDeclaredField("mDoubleAppCtrlCloud").apply { isAccessible = true }
+                if (java.lang.reflect.Modifier.isStatic(field.modifiers)) {
+                    field.setBoolean(null, enabled)
+                } else {
+                    field.setBoolean(aurogon, enabled)
+                }
+            }
+        }
+        if (enabled && io.github.univers629.millet.core.RomCapabilities.hasField(clazz, "ENABLE_DOUBLE_APP")) {
+            runCatching {
+                val raw = XReflect.getStaticObjectField(clazz, "ENABLE_DOUBLE_APP") as? Collection<*>
+                val device = android.os.Build.DEVICE
+                if (raw != null && device !in raw) {
+                    val updated = ArrayList<String>(raw.size + 1).apply {
+                        for (item in raw) {
+                            if (item is String) add(item)
+                        }
+                        add(device)
+                    }
+                    XReflect.setStaticObjectField(clazz, "ENABLE_DOUBLE_APP", updated)
+                }
+            }
+        }
+        if (!hasAurogonIsUidValid) {
+            hasAurogonIsUidValid = io.github.univers629.millet.core.RomCapabilities.hasMethod(
+                CLASS_AUROGON_MODE,
+                "isUidValid",
+                loader
+            )
+        }
+    }
+
+    fun isGreezeScreenOff(greezeObj: Any): Boolean? {
+        val clazz = greezeObj.javaClass
+        return when {
+            io.github.univers629.millet.core.RomCapabilities.hasField(clazz, "mScreenOnOff") ->
+                runCatching { !XReflect.findField(clazz, "mScreenOnOff").getBoolean(greezeObj) }.getOrNull()
+            io.github.univers629.millet.core.RomCapabilities.hasField(clazz, "mScreenOn") ->
+                runCatching { !XReflect.findField(clazz, "mScreenOn").getBoolean(greezeObj) }.getOrNull()
+            else -> null
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun handleNotifyExecuteServiceForDualUid(greezeObj: Any, uid: Int) {
+        try {
+            val excuteList = XReflect.getObjectField(greezeObj, "mExcuteServiceList") as? MutableList<Int>
+            if (excuteList != null) {
+                synchronized(excuteList) {
+                    val inFg = (runCatching { XReflect.callMethod(greezeObj, "isAppRunningInFg", uid) as? Boolean }.getOrNull()) ?: false
+                    if (uid !in excuteList && !inFg) {
+                        excuteList.add(uid)
+                    }
+                }
+            }
+            val handler = XReflect.getObjectField(greezeObj, "mHandler") as? android.os.Handler ?: return
+            handler.post {
+                try {
+                    val aurogon = aurogonService ?: runCatching {
+                        XReflect.getObjectField(greezeObj, "mImmobulusMode")
+                    }.getOrNull()
+                    val runningLaunch = (aurogon?.let {
+                        runCatching { XReflect.callMethod(it, "isRunningLaunchMode") as? Boolean }.getOrNull()
+                    }) ?: false
+                    if (!runningLaunch) {
+                        XReflect.callMethod(greezeObj, "thawUid", uid, 1000, "Excute Service")
+                    }
+                } catch (t: Throwable) {
+                    Logger.error("handleNotifyExecuteServiceForDualUid post failed($uid)", t)
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("handleNotifyExecuteServiceForDualUid failed($uid)", t)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun addDualAppToAurogonTargetList(aurogon: Any, uid: Int) {
+        try {
+            val targetList = XReflect.getObjectField(aurogon, "mImmobulusTargetList") as? MutableList<Any?> ?: return
+            synchronized(targetList) {
+                for (existing in targetList) {
+                    if (existing != null && runCatching { XReflect.getIntField(existing, "mUid") }.getOrNull() == uid) {
+                        return
+                    }
+                }
+                val rawPkg = runCatching {
+                    XReflect.callMethod(aurogon, "getPackageNameFromUid", uid) as? String
+                }.getOrNull() ?: getPackageNameForUid(uid) ?: return
+                val pkg = rawPkg.substringBefore(':')
+                if (pkg.contains(".qualcomm") || pkg.contains("com.qti")) return
+
+                val isCts = runCatching { XReflect.callMethod(aurogon, "isCtsApp", pkg) as? Boolean }.getOrNull() ?: false
+                if (isCts && !pkg.contains("ctsshim")) {
+                    runCatching { XReflect.callMethod(aurogon, "QuitLaunchModeAction", false) }
+                    runCatching { XReflect.setBooleanField(aurogon, "mLaunchModeEnabled", false) }
+                }
+
+                val appInfoClass = Class.forName(
+                    "com.miui.server.greeze.AurogonAppInfo",
+                    false,
+                    aurogon.javaClass.classLoader
+                )
+                val ctor = appInfoClass.getDeclaredConstructor(Int::class.javaPrimitiveType!!, String::class.java).apply {
+                    isAccessible = true
+                }
+                val appInfo = ctor.newInstance(uid, pkg)
+                val hasIcon = runCatching { XReflect.callMethod(aurogon, "isAppHasIcon", pkg) as? Boolean }.getOrNull() ?: false
+                if (hasIcon) {
+                    runCatching { XReflect.setBooleanField(appInfo, "hasIcon", true) }
+                }
+                val isImportant = runCatching {
+                    XReflect.callMethod(aurogon, "isSystemOrMiuiImportantApp", pkg) as? Boolean
+                }.getOrNull() ?: false
+                if (isImportant) {
+                    runCatching { XReflect.setBooleanField(appInfo, "isSystemApp", true) }
+                }
+                targetList.add(appInfo)
+            }
+        } catch (t: Throwable) {
+            Logger.error("addDualAppToAurogonTargetList failed($uid)", t)
+        }
     }
 
     private const val CLASS_AUROGON_MODE = "com.miui.server.greeze.AurogonImmobulusMode"

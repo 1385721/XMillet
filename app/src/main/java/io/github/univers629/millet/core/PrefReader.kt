@@ -96,6 +96,11 @@ object PrefReader {
             ) {
                 dispatchSystemReloadCallback(PrefsKeys.SIMPLIFY_LOG, PrefGroup.MILLET_FLAGS, updated)
             }
+            if (changedKey == PrefsKeys.IS_LOG ||
+                prev.isLog != updated.isLog
+            ) {
+                dispatchSystemReloadCallback(PrefsKeys.IS_LOG, PrefGroup.MILLET_FLAGS, updated)
+            }
             if (changedKey == PrefsKeys.BATTERY_CHANGE_OBSERVE ||
                 prev.batteryChangeObserve != updated.batteryChangeObserve
             ) {
@@ -105,6 +110,11 @@ object PrefReader {
                 prev.freezeStats != updated.freezeStats
             ) {
                 dispatchSystemReloadCallback(PrefsKeys.FREEZE_STATS, PrefGroup.MILLET_FLAGS, updated)
+            }
+            if (changedKey == PrefsKeys.FREEZE_DUAL_APP ||
+                prev.freezeDualApp != updated.freezeDualApp
+            ) {
+                dispatchSystemReloadCallback(PrefsKeys.FREEZE_DUAL_APP, PrefGroup.MILLET_FLAGS, updated)
             }
         }
         if (group == null || group == PrefGroup.APP_SETS) {
@@ -154,6 +164,16 @@ object PrefReader {
                 Logger.error("onPowerKeeperGroupReloaded [$changedKey] failed", t)
             }
         }
+        val dualAppChanged = prev.freezeDualApp != updated.freezeDualApp
+        if ((group == PrefGroup.MILLET_FLAGS && changedKey == PrefsKeys.FREEZE_DUAL_APP) ||
+            (group == null && dualAppChanged)
+        ) {
+            try {
+                onPowerKeeperGroupReloaded?.invoke(PrefsKeys.FREEZE_DUAL_APP, PrefGroup.MILLET_FLAGS, updated)
+            } catch (t: Throwable) {
+                Logger.error("onPowerKeeperGroupReloaded [${PrefsKeys.FREEZE_DUAL_APP}] failed", t)
+            }
+        }
     }
 
     /**
@@ -166,7 +186,7 @@ object PrefReader {
             "配置快照[$scene][$tag]: isLog=${snapshot.isLog}, simplifyLog=${snapshot.simplifyLog}, " +
                 "disableKill=${snapshot.disableKill}, disableCharge=${snapshot.disableCharge}, " +
                 "disableScreenOnThaw=${snapshot.disableScreenOnThaw}, " +
-                "freezeStats=${snapshot.freezeStats}, " +
+                "freezeStats=${snapshot.freezeStats}, freezeDualApp=${snapshot.freezeDualApp}, " +
                 "enableDoze=${snapshot.enableDoze}, whiteAppSet=${snapshot.whiteAppSet.size}, " +
                 "messageAppSet=${snapshot.messageAppSet.size}, ignoreNetworkWake=${snapshot.ignoreNetworkWakeSet.size}"
         )
@@ -218,7 +238,8 @@ object PrefReader {
                 ),
                 batteryChangeObserve = getBooleanOrDefault(raw, PrefsKeys.BATTERY_CHANGE_OBSERVE),
                 logToLocal = getBooleanOrDefault(raw, PrefsKeys.LOG_TO_LOCAL),
-                freezeStats = getBooleanOrDefault(raw, PrefsKeys.FREEZE_STATS)
+                freezeStats = getBooleanOrDefault(raw, PrefsKeys.FREEZE_STATS),
+                freezeDualApp = getBooleanOrDefault(raw, PrefsKeys.FREEZE_DUAL_APP)
             )
 
             PrefGroup.DOZE_FLAGS -> base.copy(

@@ -130,9 +130,26 @@ object BatteryPolicyApplier {
     private fun applyAppOps(packageName: String, noRestrict: Boolean): Boolean {
         val context = SystemState.systemContext ?: return false
         val manager = context.getSystemService(AppOpsManager::class.java) ?: return false
-        val uid = SystemState.getPackageUid(packageName)
-        if (uid <= 0) return false
+        val primaryUid = SystemState.getPackageUid(packageName)
+        val dualUid = SystemState.getDualPackageUid(packageName)
+        val targetUids = listOf(primaryUid, dualUid).filter { it > 0 }.distinct()
+        if (targetUids.isEmpty()) return false
         val mode = if (noRestrict) AppOpsManager.MODE_ALLOWED else AppOpsManager.MODE_DEFAULT
+        var anySuccess = false
+        for (uid in targetUids) {
+            if (applyAppOpsForUid(manager, uid, packageName, mode)) {
+                anySuccess = true
+            }
+        }
+        return anySuccess
+    }
+
+    private fun applyAppOpsForUid(
+        manager: AppOpsManager,
+        uid: Int,
+        packageName: String,
+        mode: Int
+    ): Boolean {
         // 入口在版本间挪过位置：Android 14 的 framework.jar 里已经没有 setModeInternal，
         // 只剩 public 的 setMode(op, uid, pkg, mode) 与带 attributionTag 的重载，
         // 所以逐条尝试，命中即返回。
@@ -148,7 +165,7 @@ object BatteryPolicyApplier {
                     true
                 }.getOrDefault(false)
                 if (ok) {
-                    Logger.debug("AppOps $name 命中[$packageName] args=${args.size}")
+                    Logger.debug("AppOps $name 命中[$packageName($uid)] args=${args.size}")
                     return true
                 }
             }
@@ -168,22 +185,37 @@ object BatteryPolicyApplier {
         val uri = Uri.parse(PK_USER_TABLE_URI)
         val target = if (noRestrict) BG_NO_RESTRICT else BG_DEFAULT
         val values = ContentValues().apply { put(COL_BG_CONTROL, target) }
-        val result = runCatching {
-            val updated = context.contentResolver.update(
-                uri,
-                values,
-                "$COL_PKG_NAME=?",
-                arrayOf(packageName)
-            )
-            if (updated > 0) return@runCatching true
-            // 库里还没有这个包的行：只补「无限制」这一种，恢复默认时不该凭空造行
-            if (!noRestrict) return@runCatching false
-            val row = ContentValues().apply {
-                put(COL_USER_ID, 0)
-                put(COL_PKG_NAME, packageName)
-                put(COL_BG_CONTROL, target)
+        val userIds = buildList {
+            add(0)
+            if (SystemState.getDualPackageUid(packageName) > 0) {
+                add(io.github.univers629.millet.core.AppUidUtils.DUAL_APP_USER_ID)
             }
-            context.contentResolver.insert(uri, row) != null
+        }
+        val result = runCatching {
+            var applied = false
+            for (userId in userIds) {
+                val updated = context.contentResolver.update(
+                    uri,
+                    values,
+                    "$COL_PKG_NAME=? AND $COL_USER_ID=?",
+                    arrayOf(packageName, userId.toString())
+                )
+                if (updated > 0) {
+                    applied = true
+                    continue
+                }
+                // 库中没有该包的行：仅补充「无限制」一种，恢复默认时不创建新行
+                if (!noRestrict) continue
+                val row = ContentValues().apply {
+                    put(COL_USER_ID, userId)
+                    put(COL_PKG_NAME, packageName)
+                    put(COL_BG_CONTROL, target)
+                }
+                if (context.contentResolver.insert(uri, row) != null) {
+                    applied = true
+                }
+            }
+            applied
         }
         return result.getOrElse {
             Logger.warn(

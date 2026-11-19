@@ -30,7 +30,7 @@ object MilletIpcContract {
     /** 客户端（powerkeeper / App）回调 AIDL 接口描述符 */
     const val DESCRIPTOR_CLIENT_CALLBACK = "io.github.univers629.millet.ISystemCallback"
 
-    // ==================== SystemBinderService 18 个事务码 ====================
+    // ==================== SystemBinderService 19 个事务码 ====================
     const val TX_REGISTER_CLIENT = 1          // 注册客户端回调 Binder（+ 可选：本进程 Hook 覆盖串、能力位串）
     const val TX_UNREGISTER_CLIENT = 2        // 注销客户端回调 Binder
     const val TX_PING_ALIVE = 3               // 存活探测 -> boolean(1)
@@ -49,6 +49,7 @@ object MilletIpcContract {
     const val TX_GET_KERNEL_FREEZER = 16      // 内核冻结器类型 -> String("V2"/"V1"/"NONE"/"UNKNOWN")，system_server 探测，免 root
     const val TX_GET_FREEZE_STATS = 17        // 查询墓碑统计快照(windowName) -> String (FreezeStatsCodec v1)
     const val TX_RESET_FREEZE_STATS = 18      // 重置墓碑统计计数与持久文件 -> int(1=成功)
+    const val TX_GET_DUAL_APPS = 19           // 查询双开空间 (user 999) 已安装应用清单 -> String (`pkg|uid|flags`)
 
     // ==================== 尾部扩展字段（向下兼容约定） ====================
     /*

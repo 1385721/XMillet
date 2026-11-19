@@ -55,11 +55,17 @@ object SystemHooks {
                     if (changedKey == PrefsKeys.SIMPLIFY_LOG && !snapshot.simplifyLog) {
                         SystemState.clearAllPidFreezeRecords()
                     }
-                    if (changedKey == PrefsKeys.BATTERY_CHANGE_OBSERVE) {
-                        BroadcastAndDozeHooks.updateBatteryObservation(snapshot.batteryChangeObserve)
+                    if (changedKey == PrefsKeys.IS_LOG || changedKey == PrefsKeys.BATTERY_CHANGE_OBSERVE) {
+                        BroadcastAndDozeHooks.updateBatteryObservation(snapshot.isLog || snapshot.batteryChangeObserve)
                     }
                     if (changedKey == PrefsKeys.FREEZE_STATS) {
                         FreezeStatsRecorder.onEnabledChanged(snapshot.freezeStats)
+                    }
+                    if (changedKey == PrefsKeys.FREEZE_DUAL_APP) {
+                        SystemState.syncDualAppSupportToAurogon(snapshot.freezeDualApp)
+                        if (snapshot.freezeDualApp) {
+                            ForceFreezeBridge.applyAsync(force = true)
+                        }
                     }
                 }
 
@@ -98,7 +104,7 @@ object SystemHooks {
         FreezeGateHooks.buildS18ThawProcessHook()
     )
 
-    private fun buildPostAnrSpecs(): List<HookSpec> = listOf(
+    private fun buildPostAnrSpecs(classLoader: ClassLoader): List<HookSpec> = listOf(
         AnrAndProcessHooks.buildS5ProcessErrorAnrHook(),
         FreezeGateHooks.buildS6FreezeUidsHook(),
         FreezeGateHooks.buildS23FreezePidsHook(),
@@ -107,6 +113,10 @@ object SystemHooks {
         FreezeGateHooks.buildS22DispatchThawProbeHook(),
         FreezeGateHooks.buildS7FreezeActionHook(),
         FreezeGateHooks.buildS8CheckAppStatusForFreezeHook(),
+        FreezeGateHooks.buildS28DoubleAppUidValidHook(),
+        FreezeGateHooks.buildS29ScrOffStateHook(),
+        FreezeGateHooks.buildS30NotifyExecuteServicesHook(classLoader),
+        FreezeGateHooks.buildS31AurogonUpdateTargetListHook(classLoader),
         BroadcastAndDozeHooks.buildS9BroadcastSkipPolicyHook(),
         BroadcastAndDozeHooks.buildS10BroadcastQueueDeliverHook(),
         FreezeGateHooks.buildS24AllowBroadcastHook(),
@@ -126,6 +136,11 @@ object SystemHooks {
      * 在 system_server 中通过 Modern LibXposed (API 102) 安装全部系统侧 Hook。
      */
     fun installAllModern(xposed: XposedInterface, classLoader: ClassLoader) {
+        SystemState.hasAurogonIsUidValid = RomCapabilities.hasMethod(
+            "com.miui.server.greeze.AurogonImmobulusMode",
+            "isUidValid",
+            classLoader
+        )
         registerPrefReloadCallback()
 
         // 1. 安装 S1..S4, S15, S16..S18
@@ -138,11 +153,11 @@ object SystemHooks {
         // 2. 安装 S19
         AnrAndProcessHooks.installS19AnrHelperHooksModern(xposed, classLoader)
 
-        // 3. 安装 S5..S14, S20, 以及 S2_Gate
+        // 3. 安装 S5..S14, S20, S28..S31, 以及 S2_Gate
         ModernHookInstaller.installAll(
             xposed,
             classLoader,
-            RomCapabilities.filterInstallable(buildPostAnrSpecs(), classLoader, "系统侧")
+            RomCapabilities.filterInstallable(buildPostAnrSpecs(classLoader), classLoader, "系统侧")
         )
 
         val s22Installed = HookInstallRegistry.snapshot()

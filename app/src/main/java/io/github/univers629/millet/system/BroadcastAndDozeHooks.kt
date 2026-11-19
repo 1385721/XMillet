@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.os.SystemClock
+import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
@@ -68,6 +69,18 @@ object BroadcastAndDozeHooks {
         val thread = HandlerThread("XMillet-Screen", Process.THREAD_PRIORITY_FOREGROUND)
         thread.start()
         Handler(thread.looper)
+    }
+
+    private val dualScreenOffFreezeListener = AlarmManager.OnAlarmListener {
+        if (!SystemState.hasAurogonIsUidValid && PrefReader.systemPrefs.freezeDualApp) {
+            ForceFreezeBridge.freezeDualAppsOnScreenOffAsync()
+        }
+    }
+
+    private val dualScreenOffPostRunnable = Runnable {
+        if (!SystemState.hasAurogonIsUidValid && PrefReader.systemPrefs.freezeDualApp) {
+            ForceFreezeBridge.freezeDualAppsOnScreenOffAsync()
+        }
     }
 
     private val deepDozeAlarmListener = AlarmManager.OnAlarmListener {
@@ -420,7 +433,36 @@ object BroadcastAndDozeHooks {
         val prefs = PrefReader.systemPrefs
         when (action) {
             Intent.ACTION_SCREEN_OFF -> {
-                if (prefs.dozeLog) {
+                if (!SystemState.hasAurogonIsUidValid && prefs.freezeDualApp) {
+                    screenDozeHandler.removeCallbacks(dualScreenOffPostRunnable)
+                    val ctx = SystemState.systemContext
+                    var alarmScheduled = false
+                    if (ctx != null) {
+                        try {
+                            val am = ctx.getSystemService(AlarmManager::class.java)
+                            am?.cancel(dualScreenOffFreezeListener)
+                            // Android 派发 ACTION_SCREEN_OFF 时部分后台进程短暂抬升到 adj=0 约 3s，使用 wakeup 闹钟避开瞬态窗口
+                            am?.setExact(
+                                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                                SystemClock.elapsedRealtime() + 4_500L,
+                                "XMillet.DualScrOff",
+                                dualScreenOffFreezeListener,
+                                screenDozeHandler
+                            )
+                            alarmScheduled = am != null
+                        } catch (t: Throwable) {
+                            Logger.warn("dualScrOff setExact 回退 postDelayed: ${t.javaClass.simpleName}:${t.message}")
+                        }
+                    }
+                    if (!alarmScheduled) {
+                        screenDozeHandler.postDelayed(dualScreenOffPostRunnable, 4_500L)
+                    }
+                } else {
+                    Logger.info(
+                        "dualScrOff 未触发: hasUidValid=${SystemState.hasAurogonIsUidValid}, freezeDual=${prefs.freezeDualApp}"
+                    )
+                }
+                if (prefs.isLog || prefs.dozeLog) {
                     val batteryPct = queryCurrentBatteryPercent()
                     Logger.doze(Logger.Level.WARN, "========[屏幕关闭,电量$batteryPct%]========")
                 } else if (prefs.batteryChangeObserve && prefs.logToLocal) {
@@ -442,6 +484,13 @@ object BroadcastAndDozeHooks {
             }
 
             Intent.ACTION_SCREEN_ON -> {
+                screenDozeHandler.removeCallbacks(dualScreenOffPostRunnable)
+                SystemState.systemContext?.let { ctx ->
+                    try {
+                        ctx.getSystemService(AlarmManager::class.java)?.cancel(dualScreenOffFreezeListener)
+                    } catch (_: Throwable) {
+                    }
+                }
                 if (isInDeepIdle) {
                     val ctx = SystemState.systemContext
                     if (ctx != null) {
@@ -457,7 +506,24 @@ object BroadcastAndDozeHooks {
                         }
                     }
                 }
-                if (prefs.dozeLog) {
+                if (prefs.disableScreenOnThaw) {
+                    val imePkg = ActiveImeTracker.resolveDefaultImePackage(SystemState.systemContext)
+                    if (imePkg != null &&
+                        imePkg !in prefs.blockThawSet &&
+                        imePkg !in prefs.ignoreNetworkWakeSet &&
+                        ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, imePkg, prefs)
+                    ) {
+                        val imeUid = SystemState.getPackageUid(imePkg)
+                        if (imeUid > 0 && SystemState.isUidFrozen(imeUid)) {
+                            screenDozeHandler.post {
+                                SystemState.greezeService?.let { greeze ->
+                                    runCatching { XReflect.callMethod(greeze, "thawUid", imeUid, 1000, "screen on") }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (prefs.isLog || prefs.dozeLog) {
                     val batteryPct = queryCurrentBatteryPercent()
                     Logger.doze(Logger.Level.WARN, "========[屏幕开启,电量$batteryPct%]========")
                 } else if (prefs.batteryChangeObserve && prefs.logToLocal) {
@@ -496,8 +562,9 @@ object BroadcastAndDozeHooks {
      */
     fun applyStartupSync() {
         if (!SystemState.isGreezeReady) return
+        SystemState.systemContext?.let { registerScreenStatusReceiver(it) }
         SystemState.syncMessageAppsToAurogon()
-        if (PrefReader.systemPrefs.batteryChangeObserve) {
+        if (PrefReader.systemPrefs.isLog || PrefReader.systemPrefs.batteryChangeObserve) {
             updateBatteryObservation(true)
         }
     }

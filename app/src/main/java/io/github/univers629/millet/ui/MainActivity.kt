@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.OobeManager
 import io.github.univers629.millet.core.BatteryPolicyHelper
@@ -274,6 +275,7 @@ class MainActivity : ComponentActivity() {
         // 云名单是否已经真正读到：模块侧上报的云名单可能晚于首屏到达，
         // 首屏读云库会读到空，需要在模块上报后补读一次。
         var cloudConfigApplied by remember { mutableStateOf(false) }
+        var dualAppsSyncedFromBinder by remember { mutableStateOf(false) }
     // 是否已经成功问过一次系统服务；用于区分「还没问」和「问了但没有模块」
     var systemServiceProbed by remember { mutableStateOf(false) }
         var showSystemApps by rememberSaveable { mutableStateOf(false) }
@@ -316,27 +318,29 @@ class MainActivity : ComponentActivity() {
 
                 val procs = withContext(Dispatchers.IO) {
                     val pm = packageManager
-                    val byPkg = LinkedHashMap<String, MutableList<RootHelper.ProcessRawEntry>>()
-                    val uidMap = HashMap<String, Int>()
+                    val byPkgUid = LinkedHashMap<String, MutableList<RootHelper.ProcessRawEntry>>()
 
                     // 进程快照只取 system_server 侧：它本来就有权限读 /proc，App 不需要 root。
                     // 模块未激活时列表留空，不在后台拉起 su 触发授权弹窗。
                     val snapshot = PowerKeeperBinderClient.queryProcessSnapshot()
                     if (!snapshot.isNullOrEmpty()) {
                         for (raw in snapshot) {
-                            byPkg.getOrPut(raw.packageName) { ArrayList() }.add(raw)
-                            uidMap[raw.packageName] = raw.uid
+                            byPkgUid.getOrPut("${raw.packageName}:${raw.uid}") { ArrayList() }.add(raw)
                         }
                     }
 
-                    if (byPkg.isNotEmpty()) {
-                        byPkg.mapNotNull { (pkg, rawEntries) ->
+                    if (byPkgUid.isNotEmpty()) {
+                        byPkgUid.values.mapNotNull { rawEntries ->
+                            val first = rawEntries.firstOrNull() ?: return@mapNotNull null
+                            val pkg = first.packageName
+                            val uid = first.uid
                             if (pkg == packageName) return@mapNotNull null
+                            if (!AppUidUtils.isManagedAppUid(uid, includeDualApp = true)) {
+                                return@mapNotNull null
+                            }
                             val appInfo = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull() ?: return@mapNotNull null
-                            if (appInfo.uid < 10000) return@mapNotNull null
 
                             val label = pm.getApplicationLabel(appInfo).toString().trim().ifEmpty { pkg }
-                            val uid = rawEntries.firstOrNull()?.uid ?: appInfo.uid
                             val pids = rawEntries.map { it.pid }
                             val totalMemKb = rawEntries.sumOf { it.rssKb }
                             val fTypes = rawEntries.map { it.freezerType }.filter { it != RootHelper.FreezerType.UNKNOWN }.toSet()
@@ -360,6 +364,7 @@ class MainActivity : ComponentActivity() {
                                 memSizeKb = totalMemKb,
                                 formattedMemSize = RootHelper.formatMemSize(totalMemKb),
                                 bookkeepingFrozen = bookkeepingFrozen,
+                                isDualApp = AppUidUtils.isDualAppUid(uid),
                                 applicationInfo = appInfo
                             )
                         }.sortedWith(
@@ -379,7 +384,7 @@ class MainActivity : ComponentActivity() {
         val loadInstalledApps = {
             isAppsRefreshing = true
             coroutineScope.launch {
-                val (apps, cloudLoaded) = withContext(Dispatchers.IO) {
+                val (apps, cloudLoaded, dualLoaded) = withContext(Dispatchers.IO) {
                     val sp = PrefReader.openUiPrefs(this@MainActivity)
                     val whiteSet = PrefReader.readUiStringSet(sp, PrefsKeys.WHITE_APP_SET)
                     val msgSet = PrefReader.readUiStringSet(sp, PrefsKeys.MESSAGE_APP_SET)
@@ -432,48 +437,92 @@ class MainActivity : ComponentActivity() {
                         ?: HashSet()
 
                     val result = ArrayList<InstalledAppUiModel>(installedList.size)
-                    for (info in installedList) {
-                        val pkg = info.packageName ?: continue
-                        val label = runCatching { pm.getApplicationLabel(info).toString() }.getOrDefault(pkg)
-                        val isSys = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                        val pInfo = runCatching { pm.getPackageInfo(pkg, 0) }.getOrNull()
+                    val primaryInfoByPkg = HashMap<String, ApplicationInfo>(installedList.size)
+                    val seenKeys = HashSet<String>(installedList.size)
 
-                        result.add(
-                            InstalledAppUiModel(
-                                appName = label,
-                                packageName = pkg,
-                                uid = info.uid,
-                                versionName = pInfo?.versionName.orEmpty(),
-                                versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                                    pInfo?.longVersionCode ?: 0L
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    (pInfo?.versionCode ?: 0).toLong()
-                                },
-                                isSystem = isSys,
-                                applicationInfo = info,
-                                inWhiteSet = pkg in whiteSet,
-                                inMessageSet = pkg in msgSet,
-                                inForceFreezeSet = pkg in forceSet,
-                                inBlockThawSet = pkg in blockThawSet,
-                                inForbidSyncSet = pkg in forbidSyncSet,
-                                inNotFreezeFgsSet = pkg in fgsSet,
-                                inBatteryWhiteSet = pkg in systemUnrestricted,
-                                inCloudDozeWhite = pkg in cloudConfig.dozeWhiteList,
-                                inCloudFrozenWhite = pkg in cloudConfig.frozenNewWhiteList,
-                                inCloudLaunchAllow = pkg in cloudConfig.launchRestrict
-                            )
+                    fun buildAppModel(
+                        pkg: String,
+                        uid: Int,
+                        info: ApplicationInfo?,
+                        isSys: Boolean,
+                    ): InstalledAppUiModel {
+                        val label = info?.let { runCatching { pm.getApplicationLabel(it).toString() }.getOrNull() } ?: pkg
+                        val pInfo = runCatching { pm.getPackageInfo(pkg, 0) }.getOrNull()
+                        val verCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                            pInfo?.longVersionCode ?: 0L
+                        } else {
+                            @Suppress("DEPRECATION")
+                            (pInfo?.versionCode ?: 0).toLong()
+                        }
+                        return InstalledAppUiModel(
+                            appName = label,
+                            packageName = pkg,
+                            uid = uid,
+                            versionName = pInfo?.versionName.orEmpty(),
+                            versionCode = verCode,
+                            isSystem = isSys,
+                            applicationInfo = info,
+                            inWhiteSet = pkg in whiteSet,
+                            inMessageSet = pkg in msgSet,
+                            inForceFreezeSet = pkg in forceSet,
+                            inBlockThawSet = pkg in blockThawSet,
+                            inForbidSyncSet = pkg in forbidSyncSet,
+                            inNotFreezeFgsSet = pkg in fgsSet,
+                            inBatteryWhiteSet = pkg in systemUnrestricted,
+                            inCloudDozeWhite = pkg in cloudConfig.dozeWhiteList,
+                            inCloudFrozenWhite = pkg in cloudConfig.frozenNewWhiteList,
+                            inCloudLaunchAllow = pkg in cloudConfig.launchRestrict
                         )
                     }
+
+                    for (info in installedList) {
+                        val pkg = info.packageName ?: continue
+                        primaryInfoByPkg[pkg] = info
+                        if (!seenKeys.add("$pkg:${info.uid}")) continue
+                        val isSys = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                        result.add(buildAppModel(pkg, info.uid, info, isSys))
+                    }
+
+                    // 单独列出双开空间 (user 999) 应用，与主应用分开展示与查看进程
+                    val dualEntries = PowerKeeperBinderClient.queryDualApps()
+                    val dualLoaded = dualEntries != null
+                    if (dualEntries != null) {
+                        for (entry in dualEntries) {
+                            if (!seenKeys.add("${entry.packageName}:${entry.uid}")) continue
+                            val info = primaryInfoByPkg[entry.packageName]
+                                ?: runCatching { pm.getApplicationInfo(entry.packageName, 0) }.getOrNull()
+                            val isSys = (entry.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+                                ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
+                            result.add(buildAppModel(entry.packageName, entry.uid, info, isSys))
+                        }
+                    }
+                    // 兜底补充运行中进程已观察到的双开 UID（例如模块刚热加载前未连上新事务）
+                    for (proc in runningProcesses) {
+                        if (!proc.isDualApp) continue
+                        if (!seenKeys.add("${proc.packageName}:${proc.uid}")) continue
+                        val info = primaryInfoByPkg[proc.packageName] ?: proc.applicationInfo
+                        val isSys = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
+                        result.add(buildAppModel(proc.packageName, proc.uid, info, isSys))
+                    }
+
                     result.sortWith(
                         compareByDescending<InstalledAppUiModel> { it.hasAnyConfig }
                             .thenBy { it.appName.lowercase() }
+                            .thenBy { it.packageName }
+                            .thenBy { it.isDualApp }
                     )
-                    result to !cloudConfig.isEmpty
+                    Triple(result, !cloudConfig.isEmpty, dualLoaded)
                 }
                 installedApps = apps
                 cloudConfigApplied = cloudLoaded
+                if (dualLoaded) dualAppsSyncedFromBinder = true
                 isAppsRefreshing = false
+            }
+        }
+
+        LaunchedEffect(isProvisioned, runtimeStatus.binderAlive) {
+            if (isProvisioned && runtimeStatus.binderAlive && !dualAppsSyncedFromBinder) {
+                loadInstalledApps()
             }
         }
 
@@ -492,9 +541,11 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 按包名打开应用策略页：优先用已加载的列表，否则临时构造（与进程列表页逻辑一致）
-        val openProfileByPackage: (String) -> Unit = { pkg ->
-            val target = installedApps.find { it.packageName == pkg }
+        // 按包名与 UID 打开应用策略页：优先用已加载的列表精确匹配 UID，否则按传入 UID 临时构造
+        val openProfileByTarget: (String, Int) -> Unit = { pkg, targetUid ->
+            val target = installedApps.find {
+                it.packageName == pkg && (targetUid <= 0 || it.uid == targetUid)
+            }
             if (target != null) {
                 navigator.push(Route.AppProfile(target))
             } else {
@@ -507,7 +558,7 @@ class MainActivity : ComponentActivity() {
                         InstalledAppUiModel(
                             appName = label,
                             packageName = pkg,
-                            uid = appInfo?.uid ?: 0,
+                            uid = if (targetUid > 0) targetUid else (appInfo?.uid ?: 0),
                             versionName = "",
                             versionCode = 0,
                             isSystem = (appInfo?.flags?.and(ApplicationInfo.FLAG_SYSTEM)) != 0,
@@ -697,7 +748,11 @@ class MainActivity : ComponentActivity() {
                                     when (destinations.getOrNull(page)) {
                                         BottomBarDestination.Home -> HomeScreenMiuix(
                                             runtimeStatus = runtimeStatus,
-                                            configuredRuleCount = installedApps.count { it.hasAnyConfig },
+                                            configuredRuleCount = installedApps.asSequence()
+                                                .filter { it.hasAnyConfig }
+                                                .map { it.packageName }
+                                                .distinct()
+                                                .count(),
                                             runningProcesses = runningProcesses,
                                             bottomInnerPadding = bottomNavPadding,
                                             onRefresh = {
@@ -719,7 +774,7 @@ class MainActivity : ComponentActivity() {
                                                 refreshStatusAndRunningProcs()
                                             },
                                             onOpenAbout = { navigator.push(Route.About) },
-                                            onOpenAppProfile = { pkg, _ -> openProfileByPackage(pkg) },
+                                            onOpenAppProfile = { pkg, uid -> openProfileByTarget(pkg, uid) },
                                             onQueryUnfrozenReason = handleQueryUnfrozenReason
                                         )
 
@@ -739,7 +794,7 @@ class MainActivity : ComponentActivity() {
                                                     refreshStatusAndRunningProcs()
                                                 }
                                             },
-                                            onOpenAppProfile = { pkg, _ -> openProfileByPackage(pkg) },
+                                            onOpenAppProfile = { pkg, uid -> openProfileByTarget(pkg, uid) },
                                             onQueryUnfrozenReason = handleQueryUnfrozenReason
                                         )
 
@@ -749,7 +804,7 @@ class MainActivity : ComponentActivity() {
                                             statsEnabled = themeState.showTombStatsTab,
                                             bottomInnerPadding = bottomNavPadding,
                                             onEnableStats = { themeState.updateShowTombStatsTab(true) },
-                                            onOpenAppProfile = { pkg, _ -> openProfileByPackage(pkg) }
+                                            onOpenAppProfile = { pkg, _ -> openProfileByTarget(pkg, 0) }
                                         )
 
                                         BottomBarDestination.Apps -> AppsScreenMiuix(

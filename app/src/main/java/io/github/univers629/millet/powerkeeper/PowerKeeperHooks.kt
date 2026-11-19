@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Message
 import android.provider.Settings
 import io.github.libxposed.api.XposedInterface
+import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.ModernHookInstaller
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookInstallRegistry
@@ -69,6 +70,8 @@ object PowerKeeperHooks {
     private const val CLASS_ACTIVE_STATE_CONTROLLER = "com.miui.powerkeeper.controller.ActiveStateController"
     private const val CLASS_AUDIO_DISGUISE_CONTROLLER = "com.miui.powerkeeper.controller.AudioDisguiseController"
     private const val CLASS_GLOBAL_FEATURE_HELPER = "com.miui.powerkeeper.provider.GlobalFeatureConfigureHelper"
+    private const val CLASS_MILLET_UTILS = "com.miui.powerkeeper.millet.MilletUtils"
+    private const val CLASS_MILLET_CONFIG = "com.miui.powerkeeper.millet.MilletConfig"
 
     /**
      * 云端名单里需要「只拦不改」的键。
@@ -92,10 +95,18 @@ object PowerKeeperHooks {
      * 在 `com.miui.powerkeeper` 进程按原规格顺序安装全部 P1–P20 Hook，并注册热更新回调。
      */
     private fun registerPrefReloadCallback() {
-        PrefReader.onPowerKeeperGroupReloaded = { _, group, _ ->
-            if (group == PrefGroup.APP_SETS) {
-                PowerKeeperState.applyMessageAndWhiteLists()
-                PowerKeeperState.applyPreloadWhiteApps()
+        PrefReader.onPowerKeeperGroupReloaded = { changedKey, group, snapshot ->
+            when (group) {
+                PrefGroup.APP_SETS -> {
+                    PowerKeeperState.applyMessageAndWhiteLists()
+                    PowerKeeperState.applyPreloadWhiteApps()
+                }
+                PrefGroup.MILLET_FLAGS -> {
+                    if (changedKey == io.github.univers629.millet.core.PrefsKeys.FREEZE_DUAL_APP) {
+                        PowerKeeperState.syncDualAppSupport(snapshot.freezeDualApp)
+                    }
+                }
+                else -> Unit
             }
         }
     }
@@ -129,7 +140,8 @@ object PowerKeeperHooks {
             buildP20BrightScenarioBaseInitHook(),
             buildP17FreezeBinderInitHook(),
             buildP18PowerKeeperManagerInitHook(),
-            buildP16BrightControllerInitHook()
+            buildP16BrightControllerInitHook(),
+            buildP29MilletAppUidHook(classLoader)
         )
         // 按当前 ROM 版本的能力过滤点位：目标类/方法在本版本不存在时跳过，
         // 既不会让安装器抛 ClassNotFound/NoSuchMethod，也不会把「本版本没有的功能」误报成 Hook 失败。
@@ -221,6 +233,7 @@ object PowerKeeperHooks {
             }
             PowerKeeperState.clearMusicApps(policy)
             PowerKeeperState.applyMessageAndWhiteLists()
+            PowerKeeperState.syncDualAppSupport(PrefReader.powerKeeperPrefs.freezeDualApp)
         },
         after = { param ->
             val policy = param.thisObject ?: return@HookSpec
@@ -229,6 +242,7 @@ object PowerKeeperHooks {
             }
             PowerKeeperState.clearMusicApps(policy)
             PowerKeeperState.applyMessageAndWhiteLists()
+            PowerKeeperState.syncDualAppSupport(PrefReader.powerKeeperPrefs.freezeDualApp)
         }
     )
 
@@ -559,11 +573,17 @@ object PowerKeeperHooks {
         }
     )
 
+    private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot): Boolean {
+        if (pkg == null) return false
+        return pkg in prefs.whiteAppSet ||
+            ActiveImeTracker.isProtectedDefaultIme(PowerKeeperState.applicationContext, pkg, prefs)
+    }
+
     /**
      * P22（澎湃 3.0 / Android 16 起）：KillProcessController#shouldKillByCheckerPolicy(int uid)
      * 澎湃 3.0 删掉了 `com.miui.powerkeeper.millet.*` 整套查杀链路，查杀决策改由控制器承担：
      * 返回 true 才会真正下发 kill，因此在这里拦成 false 即可保住受保护的应用。
-     * 命中条件：`disableKill` 总开关打开，或该 uid 的包名在 `whiteAppSet` 里。
+     * 命中条件：`disableKill` 总开关打开，或该 uid 的包名在 `whiteAppSet` / 当前默认输入法里。
      */
     private fun buildP22KillPolicyHook(): HookSpec = HookSpec(
         id = "P22_KILL_POLICY",
@@ -577,7 +597,7 @@ object PowerKeeperHooks {
             if (uid < 10000) return@HookSpec
             val prefs = PrefReader.powerKeeperPrefs
             val pkg = PowerKeeperState.getPackageNameForUid(uid)
-            val hit = prefs.disableKill || (pkg != null && pkg in prefs.whiteAppSet)
+            val hit = prefs.disableKill || isFreezeOrKillExemptPkg(pkg, prefs)
             if (!hit) return@HookSpec
             if (param.blockSafely() && prefs.isLog) {
                 Logger.warn("阻止电量与性能查杀 ${pkg ?: uid} (UID=$uid)")
@@ -588,7 +608,7 @@ object PowerKeeperHooks {
     /**
      * P23（澎湃 3.0 / Android 16 起）：FrozenAppController#appIsAllowToFrozen(int uid)
      * 冻结资格判定：返回 true 才允许 Greeze 冻结该 uid。
-     * 白名单内的包在此直接返回 false，避免「白名单应用仍被冻结」。
+     * 白名单或当前默认输入法内的包在此直接返回 false，避免被误冻结。
      * 强制冻结名单（`forceFreezeSet`）不受影响，保持原样放行。
      */
     private fun buildP23FrozenDecisionHook(): HookSpec = HookSpec(
@@ -607,9 +627,9 @@ object PowerKeeperHooks {
             val prefs = PrefReader.powerKeeperPrefs
             val pkg = PowerKeeperState.getPackageNameForUid(uid) ?: return@HookSpec
             if (pkg in prefs.forceFreezeSet) return@HookSpec
-            if (pkg !in prefs.whiteAppSet) return@HookSpec
+            if (!isFreezeOrKillExemptPkg(pkg, prefs)) return@HookSpec
             if (param.blockSafely() && prefs.isLog) {
-                Logger.warn("阻止冻结白名单应用 $pkg (UID=$uid)")
+                Logger.warn("阻止冻结受保护应用 $pkg (UID=$uid)")
             }
         }
     )
@@ -684,7 +704,7 @@ object PowerKeeperHooks {
         if (uid < 10000) return
         val prefs = PrefReader.powerKeeperPrefs
         val pkg = PowerKeeperState.getPackageNameForUid(uid)
-        if (!prefs.disableKill && (pkg == null || pkg !in prefs.whiteAppSet)) return
+        if (!prefs.disableKill && !isFreezeOrKillExemptPkg(pkg, prefs)) return
         if (param.blockSafely() && prefs.isLog) {
             Logger.warn("阻止${scene} ${pkg ?: uid} (UID=$uid)")
         }
@@ -765,6 +785,7 @@ object PowerKeeperHooks {
             if (PowerKeeperState.powerKeeperManagerInstance == null && param.thisObject != null) {
                 PowerKeeperState.powerKeeperManagerInstance = param.thisObject
             }
+            PowerKeeperState.syncDualAppSupport(PrefReader.powerKeeperPrefs.freezeDualApp)
         }
     )
 
@@ -836,6 +857,25 @@ object PowerKeeperHooks {
                     }
                 }
             }
+        }
+    )
+
+    /**
+     * P29（OS2）：MilletUtils#isAppUid(int)
+     * OS2 仅对 4 款机型白名单开放双开 UID；此处绕过机型与云控限制，使所有 OS2 设备均识别双开应用。
+     */
+    private fun buildP29MilletAppUidHook(classLoader: ClassLoader): HookSpec = HookSpec(
+        id = "P29",
+        name = "MilletUtils#isAppUid",
+        targetClass = CLASS_MILLET_UTILS,
+        methodName = "isAppUid",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        gate = { RomCapabilities.hasField(CLASS_MILLET_CONFIG, "ENABLE_DOUBLE_APP", classLoader) },
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            param.result = PrefReader.powerKeeperPrefs.freezeDualApp
         }
     )
 }

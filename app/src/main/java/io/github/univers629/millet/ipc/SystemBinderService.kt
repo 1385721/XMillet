@@ -158,18 +158,23 @@ class SystemBinderService : Binder() {
 
                 MilletIpcContract.TX_QUERY_UNFROZEN_REASON -> {
                     data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-                    val pkg = data.readString()
-                    if (!pkg.isNullOrEmpty()) {
-                        val uid = SystemState.getPackageUid(pkg)
+                    val target = data.readString()
+                    if (!target.isNullOrEmpty()) {
+                        val (pkg, userId) = io.github.univers629.millet.core.AppUidUtils.decodeQueryTarget(target)
+                        val uid = if (userId == io.github.univers629.millet.core.AppUidUtils.DUAL_APP_USER_ID) {
+                            SystemState.getDualPackageUid(pkg)
+                        } else {
+                            SystemState.getPackageUid(pkg)
+                        }
                         if (uid > 0 && SystemState.isUidFrozen(uid)) {
                             sendToClient(
                                 MilletIpcContract.CLIENT_XMILLET_APP,
-                                MilletIpcContract.encodeUnfrozenResponse(pkg, "已冻结")
+                                MilletIpcContract.encodeUnfrozenResponse(target, "已冻结")
                             )
                         } else {
                             sendToClient(
                                 MilletIpcContract.CLIENT_POWER_KEEPER,
-                                MilletIpcContract.encodeUnfrozenQuery(pkg)
+                                MilletIpcContract.encodeUnfrozenQuery(target)
                             )
                         }
                     }
@@ -234,6 +239,13 @@ class SystemBinderService : Binder() {
                     val resetOk = FreezeStatsRecorder.reset()
                     reply?.writeNoException()
                     reply?.writeInt(if (resetOk) 1 else 0)
+                    true
+                }
+
+                MilletIpcContract.TX_GET_DUAL_APPS -> {
+                    data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
+                    reply?.writeNoException()
+                    reply?.writeString(SystemState.queryDualAppsSnapshot())
                     true
                 }
 

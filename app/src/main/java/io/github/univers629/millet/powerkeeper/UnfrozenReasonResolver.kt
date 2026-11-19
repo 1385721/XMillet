@@ -28,9 +28,14 @@ object UnfrozenReasonResolver {
     /**
      * 诊断指定包名当前未被冻结的原因。
      */
-    fun resolve(context: Context?, packageName: String): String {
+    fun resolve(context: Context?, target: String): String {
+        val (packageName, userId) = io.github.univers629.millet.core.AppUidUtils.decodeQueryTarget(target)
         val ctx = context ?: PowerKeeperState.applicationContext
-        val uid = PowerKeeperState.getPackageUid(ctx, packageName)
+        val uid = if (userId == io.github.univers629.millet.core.AppUidUtils.DUAL_APP_USER_ID) {
+            PowerKeeperState.getDualPackageUid(ctx, packageName)
+        } else {
+            PowerKeeperState.getPackageUid(ctx, packageName)
+        }
         if (uid == 0) {
             Logger.info("未冻结原因 uid == 0")
             return "无法获取UID"
@@ -90,7 +95,7 @@ object UnfrozenReasonResolver {
         }
 
         // 7. 系统 UID 范围检查
-        if (uid <= 10000 || uid >= 19999) {
+        if (!io.github.univers629.millet.core.AppUidUtils.isManagedAppUid(uid, includeDualApp = true)) {
             return "非系统应用"
         }
 
@@ -192,6 +197,9 @@ object UnfrozenReasonResolver {
         if (packageName in prefs.whiteAppSet && packageName !in prefs.forceFreezeSet) {
             return "已加入 XMillet 保护白名单"
         }
+        if (io.github.univers629.millet.core.ActiveImeTracker.isProtectedDefaultIme(ctx, packageName, prefs)) {
+            return "当前默认输入法（已受 XMillet 自动保护）"
+        }
 
         if (ctx != null) {
             val rawNoRestrict = runCatching {
@@ -215,7 +223,7 @@ object UnfrozenReasonResolver {
             return "前台应用"
         }
 
-        if (uid <= 10000 || uid >= 19999) {
+        if (!io.github.univers629.millet.core.AppUidUtils.isManagedAppUid(uid, includeDualApp = true)) {
             return "非普通用户应用(系统或特殊 UID)"
         }
 

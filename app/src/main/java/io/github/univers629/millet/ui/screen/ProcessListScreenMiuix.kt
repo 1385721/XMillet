@@ -92,7 +92,7 @@ fun ProcessListScreenMiuix(
     onFilterIndexChange: (Int) -> Unit = {},
     onRefresh: () -> Unit,
     onThawAll: () -> Unit,
-    onOpenAppProfile: (packageName: String, appName: String) -> Unit,
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
     onQueryUnfrozenReason: (packageName: String) -> Unit = {},
 ) {
     val scrollBehavior = MiuixScrollBehavior()
@@ -123,7 +123,8 @@ fun ProcessListScreenMiuix(
                 proc.appName.lowercase().contains(q) ||
                 proc.packageName.lowercase().contains(q) ||
                 proc.uid.toString().contains(q) ||
-                proc.pids.any { it.toString().contains(q) }
+                proc.pids.any { it.toString().contains(q) } ||
+                (proc.isDualApp && "双开".contains(q))
 
             filterMatch && queryMatch
         }
@@ -301,7 +302,7 @@ fun ProcessListScreenMiuix(
                         items(filteredProcesses, key = { "${it.packageName}:${it.uid}" }) { proc ->
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
-                                onClick = { onOpenAppProfile(proc.packageName, proc.appName) },
+                                onClick = { onOpenAppProfile(proc.packageName, proc.uid) },
                                 showIndication = true,
                                 pressFeedbackType = PressFeedbackType.Sink,
                                 insideMargin = PaddingValues(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp)
@@ -354,6 +355,13 @@ fun ProcessListScreenMiuix(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
+                                        if (proc.isDualApp) {
+                                            StatusTagMiuix(
+                                                label = "双开",
+                                                backgroundColor = colorScheme.tertiaryContainer,
+                                                contentColor = colorScheme.onTertiaryContainer
+                                            )
+                                        }
                                         if (proc.isFrozen) {
                                             StatusTagMiuix(
                                                 label = "已冻结",

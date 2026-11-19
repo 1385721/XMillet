@@ -61,6 +61,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.FreezeModeLabels
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsKeys
@@ -125,24 +126,27 @@ fun AppProfileScreenMiuix(
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
+    val processCacheKey = "${app.packageName}:${app.uid}"
     var appProcesses by remember(app.packageName, app.uid) {
-        mutableStateOf(AppProcessSnapshotCache.get(app.packageName).orEmpty())
+        mutableStateOf(AppProcessSnapshotCache.get(processCacheKey).orEmpty())
     }
     var isScanningProcesses by remember { mutableStateOf(false) }
     var hasScannedProcesses by remember(app.packageName, app.uid) {
-        mutableStateOf(AppProcessSnapshotCache.get(app.packageName) != null)
+        mutableStateOf(AppProcessSnapshotCache.get(processCacheKey) != null)
     }
 
     suspend fun scanProcesses() {
         if (isScanningProcesses) return
         isScanningProcesses = true
         val list = withContext(Dispatchers.IO) {
-            // 优先用 system_server 采集的快照（含每个进程挂载的服务），App 侧不需要 root
+            // 优先用 system_server 采集的快照（含每个进程挂载的服务），按 UID 严格隔离主应用与双开空间
             val fromSystem = PowerKeeperBinderClient.queryProcessSnapshot()
-                ?.filter {
-                    it.packageName == app.packageName ||
-                        it.uid == app.uid ||
-                        it.processName.startsWith("${app.packageName}:")
+                ?.filter { entry ->
+                    if (app.uid > 0) {
+                        entry.uid == app.uid
+                    } else {
+                        entry.packageName == app.packageName && !AppUidUtils.isDualAppUid(entry.uid)
+                    }
                 }
                 .orEmpty()
             if (fromSystem.isNotEmpty()) {
@@ -153,7 +157,7 @@ fun AppProfileScreenMiuix(
             }
         }
         appProcesses = list
-        AppProcessSnapshotCache.put(app.packageName, list)
+        AppProcessSnapshotCache.put(processCacheKey, list)
         hasScannedProcesses = true
         isScanningProcesses = false
     }
@@ -285,7 +289,9 @@ fun AppProfileScreenMiuix(
                                             onSelectedIndexChange = {
                                                 showTopPopup.value = false
                                                 when (idx) {
-                                                    0 -> onQueryUnfrozenReason(app.packageName)
+                                                    0 -> onQueryUnfrozenReason(
+                                                        AppUidUtils.encodeQueryTarget(app.packageName, app.uid)
+                                                    )
                                                     1 -> {
                                                         val launchIntent = context.packageManager
                                                             .getLaunchIntentForPackage(app.packageName)
@@ -381,6 +387,13 @@ fun AppProfileScreenMiuix(
                                 horizontalAlignment = Alignment.End,
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                if (app.isDualApp) {
+                                    StatusTagMiuix(
+                                        label = "双开",
+                                        backgroundColor = colorScheme.tertiaryContainer,
+                                        contentColor = colorScheme.onTertiaryContainer
+                                    )
+                                }
                                 StatusTagMiuix(
                                     label = "UID ${app.uid}",
                                     backgroundColor = colorScheme.primary.copy(alpha = 0.85f),
@@ -1029,10 +1042,10 @@ private object AppProcessSnapshotCache {
         }
 
     @Synchronized
-    fun get(packageName: String): List<RootHelper.ProcessRawEntry>? = entries[packageName]
+    fun get(cacheKey: String): List<RootHelper.ProcessRawEntry>? = entries[cacheKey]
 
     @Synchronized
-    fun put(packageName: String, snapshot: List<RootHelper.ProcessRawEntry>) {
-        entries[packageName] = snapshot
+    fun put(cacheKey: String, snapshot: List<RootHelper.ProcessRawEntry>) {
+        entries[cacheKey] = snapshot
     }
 }

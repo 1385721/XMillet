@@ -1,8 +1,11 @@
 package io.github.univers629.millet.system
 
+import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.XReflect
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -77,22 +80,39 @@ object ForceFreezeBridge {
 
         var frozen = 0
         var skipped = 0
-        val whiteApps = PrefReader.systemPrefs.whiteAppSet
+        val prefs = PrefReader.systemPrefs
+        val whiteApps = prefs.whiteAppSet
         for (pkg in target) {
             if (pkg in whiteApps) {
                 skipped++
                 continue
             }
             val uid = SystemState.getPackageUid(pkg)
-            if (uid <= 10000 || SystemState.isUidFrozen(uid)) {
+            val candidates = ArrayList<Int>(2)
+            if (AppUidUtils.isManagedAppUid(uid, includeDualApp = false)) {
+                candidates.add(uid)
+            }
+            if (prefs.freezeDualApp) {
+                val dualUid = SystemState.getDualPackageUid(pkg)
+                if (AppUidUtils.isDualAppUid(dualUid)) {
+                    candidates.add(dualUid)
+                }
+            }
+            if (candidates.isEmpty()) {
                 skipped++
                 continue
             }
-            when (val outcome = invoker(service, uid)) {
-                is FreezeOutcome.Done -> if (outcome.frozenNow) frozen++ else skipped++
-                is FreezeOutcome.Failed -> {
-                    val err = outcome.error
-                    Logger.warn("强制冻结 $pkg($uid) 失败:${err.javaClass.simpleName}:${err.message}")
+            for (targetUid in candidates) {
+                if (SystemState.isUidFrozen(targetUid)) {
+                    skipped++
+                    continue
+                }
+                when (val outcome = invoker(service, targetUid, FORCE_FREEZE_REASON, false)) {
+                    is FreezeOutcome.Done -> if (outcome.frozenNow) frozen++ else skipped++
+                    is FreezeOutcome.Failed -> {
+                        val err = outcome.error
+                        Logger.warn("强制冻结 $pkg($targetUid) 失败:${err.javaClass.simpleName}:${err.message}")
+                    }
                 }
             }
         }
@@ -101,7 +121,100 @@ object ForceFreezeBridge {
         }
     }
 
-    private fun resolveInvoker(serviceClass: Class<*>): ((Any, Int) -> FreezeOutcome)? {
+    /**
+     * HyperOS 1 息屏双开冻结兜底：OS1 无 `AurogonImmobulusMode#isUidValid` 与 `checkStateForScrOff`，
+     * 且 PowerKeeper 旧版 `millet.*` 全链路写死 `<= 19999`，因此息屏时从系统侧主动扫描并冻结后台双开进程。
+     */
+    fun freezeDualAppsOnScreenOffAsync() {
+        val prefs = PrefReader.systemPrefs
+        if (!prefs.freezeDualApp || !SystemState.isGreezeReady) return
+        val service = SystemState.greezeService ?: return
+        Thread({
+            try {
+                val invoker = resolveInvoker(service.javaClass) ?: return@Thread
+                val dualUids = collectRunningDualAppUids()
+                if (dualUids.isEmpty()) return@Thread
+                val latestPrefs = PrefReader.systemPrefs
+                if (!latestPrefs.freezeDualApp) return@Thread
+                var frozen = 0
+                var skipped = 0
+                val skipDetails = ArrayList<String>()
+                for (uid in dualUids) {
+                    if (SystemState.isUidFrozen(uid)) {
+                        skipped++
+                        skipDetails.add("$uid:alreadyFrozen")
+                        continue
+                    }
+                    val pkg = SystemState.getPackageNameForUid(uid) ?: run {
+                        skipped++
+                        skipDetails.add("$uid:pkgNull")
+                        continue
+                    }
+                    if (pkg in latestPrefs.whiteAppSet ||
+                        ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, latestPrefs)
+                    ) {
+                        skipped++
+                        skipDetails.add("$uid($pkg):exempt")
+                        continue
+                    }
+                    val inForce = pkg in latestPrefs.forceFreezeSet
+                    if (!inForce && SystemState.isSystemAppUid(uid)) {
+                        skipped++
+                        skipDetails.add("$uid($pkg):system")
+                        continue
+                    }
+                    if (!inForce &&
+                        pkg in latestPrefs.notFreezeWhenHasFgsSet &&
+                        SystemState.checkAppFgService(uid)
+                    ) {
+                        skipped++
+                        skipDetails.add("$uid($pkg):fgs")
+                        continue
+                    }
+                    when (val outcome = invoker(service, uid, "XMillet DualScrOff", !inForce)) {
+                        is FreezeOutcome.Done -> {
+                            if (outcome.frozenNow) {
+                                frozen++
+                            } else {
+                                skipped++
+                                skipDetails.add("$uid($pkg):false")
+                            }
+                        }
+                        is FreezeOutcome.Failed -> {
+                            skipped++
+                            val err = outcome.error
+                            skipDetails.add("$uid($pkg):err=${err.javaClass.simpleName}")
+                            Logger.warn("息屏双开冻结 $pkg($uid) 失败:${err.javaClass.simpleName}:${err.message}")
+                        }
+                    }
+                }
+                if (frozen > 0) {
+                    Logger.alwaysInfo("息屏双开兜底冻结完成: 已冻结=$frozen, 跳过=$skipped")
+                } else {
+                    Logger.info("息屏双开兜底未冻结: dual=${dualUids.size}, details=${skipDetails.joinToString(",")}")
+                }
+            } catch (t: Throwable) {
+                Logger.error("息屏双开冻结异常", t)
+            }
+        }, "XMillet-DualScrOff").start()
+    }
+
+    private fun collectRunningDualAppUids(): Set<Int> {
+        val result = LinkedHashSet<Int>()
+        val procEntries = File("/proc").listFiles() ?: return result
+        for (entry in procEntries) {
+            val name = entry.name
+            if (name.isEmpty() || !name[0].isDigit()) continue
+            val pid = name.toIntOrNull() ?: continue
+            val uid = SystemState.readUidFromProcStatus(pid)
+            if (AppUidUtils.isDualAppUid(uid)) {
+                result.add(uid)
+            }
+        }
+        return result
+    }
+
+    private fun resolveInvoker(serviceClass: Class<*>): ((Any, Int, String, Boolean) -> FreezeOutcome)? {
         findMethodOrNull(
             serviceClass,
             "freezeUids",
@@ -111,15 +224,15 @@ object ForceFreezeBridge {
             String::class.java,
             Boolean::class.javaPrimitiveType!!
         )?.let { method ->
-            return { service, uid ->
+            return { service, uid, reason, checkFg ->
                 invokeFreezeMethod {
                     when (val res: Any? = method.invoke(
                         service,
                         intArrayOf(uid),
                         0L,
                         FROM_WHO_MILLET,
-                        FORCE_FREEZE_REASON,
-                        false
+                        reason,
+                        checkFg
                     )) {
                         null -> false
                         is Collection<*> -> uid in res
@@ -144,9 +257,9 @@ object ForceFreezeBridge {
                 String::class.java,
                 tailType
             )?.let { method ->
-                return { service, uid ->
+                return { service, uid, reason, _ ->
                     invokeFreezeMethod {
-                        val res = method.invoke(service, uid, 0L, FROM_WHO_MILLET, FORCE_FREEZE_REASON, tailVal)
+                        val res = method.invoke(service, uid, 0L, FROM_WHO_MILLET, reason, tailVal)
                         res as? Boolean ?: true
                     }
                 }

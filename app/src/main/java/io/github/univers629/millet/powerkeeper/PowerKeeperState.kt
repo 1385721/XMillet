@@ -400,4 +400,45 @@ object PowerKeeperState {
             0
         }
     }
+
+    fun getDualPackageUid(context: Context?, packageName: String): Int {
+        val ctx = context ?: applicationContext ?: return 0
+        val primaryUid = getPackageUid(ctx, packageName)
+        val dualUid = io.github.univers629.millet.core.AppUidUtils.dualUidOf(primaryUid)
+        if (dualUid <= 0) return 0
+        return try {
+            val pkgs = ctx.packageManager.getPackagesForUid(dualUid)
+            if (pkgs != null && packageName in pkgs) dualUid else 0
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    fun syncDualAppSupport(enabled: Boolean) {
+        val loader = appClassLoader
+            ?: milletPolicyInstance?.javaClass?.classLoader
+            ?: powerKeeperManagerInstance?.javaClass?.classLoader
+            ?: return
+        val configClass = XReflect.findClassIfExists("com.miui.powerkeeper.millet.MilletConfig", loader) ?: return
+        for (fieldName in listOf("supportDoubleApp", "mSupportDoubleApp")) {
+            if (io.github.univers629.millet.core.RomCapabilities.hasField(configClass, fieldName)) {
+                runCatching { XReflect.findField(configClass, fieldName).setBoolean(null, enabled) }
+            }
+        }
+        if (enabled && io.github.univers629.millet.core.RomCapabilities.hasField(configClass, "ENABLE_DOUBLE_APP")) {
+            runCatching {
+                val raw = XReflect.getStaticObjectField(configClass, "ENABLE_DOUBLE_APP") as? Collection<*>
+                val device = android.os.Build.DEVICE
+                if (raw != null && device !in raw) {
+                    val updated = ArrayList<String>(raw.size + 1).apply {
+                        for (item in raw) {
+                            if (item is String) add(item)
+                        }
+                        add(device)
+                    }
+                    XReflect.setStaticObjectField(configClass, "ENABLE_DOUBLE_APP", updated)
+                }
+            }
+        }
+    }
 }

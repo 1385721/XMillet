@@ -160,6 +160,15 @@ object PowerKeeperHooks {
         logInstallSummary()
     }
 
+    /**
+     * 热重载卸载前清理 PowerKeeper 侧注册的输入法监听、重连 Handler 与配置回调。
+     */
+    fun onHotReloading() {
+        ActiveImeTracker.onHotReloading()
+        PowerKeeperBinderClient.cancelPendingRetries()
+        PrefReader.onPowerKeeperGroupReloaded = null
+    }
+
     /** 安装结果落一条日志：既方便跨版本排查「少了哪几条」，也是界面徽标的数据来源。 */
     private fun logInstallSummary() {
         Logger.alwaysWarn("Hook 安装结果[电量与性能侧]: ${HookInstallRegistry.summary()}")
@@ -576,7 +585,7 @@ object PowerKeeperHooks {
     private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot): Boolean {
         if (pkg == null) return false
         return pkg in prefs.whiteAppSet ||
-            ActiveImeTracker.isProtectedDefaultIme(PowerKeeperState.applicationContext, pkg, prefs)
+            ActiveImeTracker.isProtectedSystemServiceApp(PowerKeeperState.applicationContext, pkg, prefs)
     }
 
     /**

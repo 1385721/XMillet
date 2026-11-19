@@ -200,6 +200,9 @@ object UnfrozenReasonResolver {
         if (io.github.univers629.millet.core.ActiveImeTracker.isProtectedDefaultIme(ctx, packageName, prefs)) {
             return "当前默认输入法（已受 XMillet 自动保护）"
         }
+        if (io.github.univers629.millet.core.ActiveImeTracker.isProtectedAccessibilityApp(ctx, packageName, prefs)) {
+            return "已启用的无障碍服务（已受 XMillet 自动保护）"
+        }
 
         if (ctx != null) {
             val rawNoRestrict = runCatching {

@@ -20,6 +20,9 @@
 
 </div>
 
+> [!CAUTION]
+> **框架与冲突提示**：本模块基于 **[libxposed API 102](<https://github.com/libxposed/api>)** 构建（如 [LSPosed](<https://t.me/LSPosedArchives>)），请勿与其他同样作用于**「电量与性能 (`com.miui.powerkeeper`)」**或**墓碑冻结调度**的模块同时启用，以免产生冲突。
+
 ---
 
 ## 简介
@@ -43,19 +46,19 @@
 ## 核心能力
 
 ### 1. 冻结与解冻闸门控制
-- 接管 `freezeUids` / `freezeProcess` / `freezePids` 与 `thawUid(s)` / `thawUidAsync` / `thawAll` 等关键入口
-- 支持按开关拦截**插电解冻**、**网络唤醒**与**同步 Binder 解冻**，并在查杀检查路径提供阻止查杀保护
-- 采用 `libxposed RemotePreferences` 配置通道，常规策略调整支持热重载，无需反复重启设备
+- 接管 `freezeUids` / `freezePids` / `freezeAction` 与 `thawUid(s)` / `thawUidAsync` / `thawAll` 等关键入口
+- 支持按开关拦截**亮屏解冻**（默认开启，并自动豁免当前前台应用、系统核心进程、默认输入法、已启用无障碍服务与白名单）、**插电解冻**、**网络唤醒**与**同步 Binder 解冻**，并在查杀检查路径提供阻止查杀保护
+- 采用 `libxposed RemotePreferences` 配置通道与 API 102 无空窗热重载，常规策略调整与模块更新无需反复重启设备
 
 ### 2. 分应用策略
-- 支持为每个应用独立配置：**免冻白名单**、**消息应用**、**强力冻结**、**有前台服务时不冻结**、**忽略网络唤醒**以及 **Doze 白/黑名单**
+- 支持为每个应用独立配置：**免冻白名单**、**消息应用**、**强力冻结**、**有前台服务时不冻结**、**忽略网络唤醒**以及 **Doze 白/黑名单**；双开空间（user 999）应用独立分组展示与调度
 - 广播放行：联动 `isAllowBroadcast` / `deferBroadcastForMiui`，在严格冻结的同时保障消息应用正常收发推送
 - 云名单兼容：直接走系统 `GlobalFeatureConfigureHelper`，不自行篡改解析底层数据库
-- 支持系统/三方应用筛选、搜索定位，以及策略配置的导出备份与一键恢复
+- 支持系统/三方应用筛选、搜索定位，以及配置 JSON 备份/恢复与 `bugreport-*.tar.gz` 诊断日志打包分享
 
 ### 3. 内核态观测与实时状态
-- 通过跨进程 Binder IPC 实时读取 `system_server` 中的 Greeze（Millet 底层冻结服务）运行态与 Hook 实装状态
-- 冻结状态直接取自 `/sys/fs/cgroup` 内核真值，「主页」「进程列表」与「应用详情」同源一致
+- 通过跨进程 Binder IPC 实时读取 `system_server` 中的 Greeze（Millet 底层冻结服务）运行态与 Hook 实装状态，并集成 `XposedService` 框架能力检测、一键授权作用域与过期进程热重载
+- 冻结状态直接取自 `/sys/fs/cgroup` 内核真值，进程内存按 `/proc/<pid>/smaps_rollup` 的 PSS 统计，「主页」「进程列表」与「应用详情」同源一致
 
 ### 4. 墓碑统计面板
 - 在 `system_server` 内使用内存定长结构与紧凑 `v1` 行协议聚合与持久化，自动过滤无独立包名的沙盒/隔离进程（`90000..99999`），并兼容 MIUI 双开应用包名与图标解析
@@ -64,7 +67,7 @@
 
 ## 版本适配与 Hook 探测
 
-模块在注入前会对目标类与方法逐一探测：系统侧共 **30 个**点位、电量侧共 **28 个**点位。当 HyperOS 3.0 / 4.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
+模块在注入前会对目标类与方法逐一探测：系统侧共 **34 个**点位、电量侧共 **29 个**点位（合计 **63 个**）。当 HyperOS 3.0 / 4.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
 
 ## 实机核验
 
@@ -72,19 +75,19 @@
 
 | 设备 | 代号 | 系统版本 | Android | 内核 | Root | LSPosed | Hook 实装（系统侧 + 电量侧） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 23/30 + 25/28 |
-| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf-gb57830672689` | Magisk | v2.2.1-log (7939) | 25/30 + 25/28 |
-| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8-gc44b714366cc-abogki519650608-4k` | KernelSU | v2.2.1 (7940) | 26/30 + 17/28 |
-| Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k` | KernelSU | v2.2.1 (7939) | 29/30 + 14/28 |
+| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 25/34 + 25/29 |
+| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf-gb57830672689` | Magisk | v2.2.1-log (7939) | 25/30* + 25/28* |
+| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8-gc44b714366cc-abogki519650608-4k` | KernelSU | v2.2.1 (7940) | 28/34 + 17/29 |
+| Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k` | KernelSU | v2.2.1 (7939) | 29/30* + 14/28* |
 
-> 默认配置下关闭「简化日志 (`simplifyLog`)」，开启该开关后前三台设备的系统侧 Hook 实装数可分别升至 `29/30`、`28/30`、`26/30`；`dada` 一行采集于开启 `simplifyLog` 状态。
+> `ares` 与 `miro` 数据为当前版本默认关闭 `simplifyLog` 下的实测值（开启 `simplifyLog` 后可额外启用 `S16–S18` 等日志点位）；标注 `*` 的 `dagu` 与 `dada` 为早期 `30 + 28` 点位基线下的历史核验数据。
 
 ## 使用与构建
 
 ### 使用步骤
 1. 安装 XMillet APK；
 2. 在 **LSPosed 管理器** 中启用本模块，并仅勾选作用域：**系统框架 (`system`)** 与 **电量与性能 (`com.miui.powerkeeper`)**；
-3. 重启设备（或按需软重启相关作用域），打开 XMillet 即可完成 OOBE 检测并开始管理。
+3. 重启设备（后续模块更新支持 API 102 免重启热重载），打开 XMillet 完成初始化检测即可开始管理。
 
 ### 构建
 
@@ -97,6 +100,19 @@
 ## 开源许可
 
 本项目基于 [GNU General Public License v3.0](LICENSE) 开源发布。
+
+## 支持
+
+<details>
+<summary>欢迎打赏</summary>
+
+<sub>如果 XMillet 对你有所帮助，欢迎请作者喝杯咖啡</sub>
+
+| | |
+| :---: | :---: |
+| <img src="app/src/main/res/drawable-nodpi/qr_donate_alipay.webp" width="220" alt="赞赏码 1" /> | <img src="app/src/main/res/drawable-nodpi/qr_donate_wechat.webp" width="220" alt="赞赏码 2" /> |
+
+</details>
 
 ---
 

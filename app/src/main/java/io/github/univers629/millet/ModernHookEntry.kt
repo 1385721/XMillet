@@ -5,6 +5,7 @@ import io.github.libxposed.api.XposedModuleInterface
 import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.ModernBridge
+import io.github.univers629.millet.core.ModernHookInstaller
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.ipc.MilletIpcContract
 import io.github.univers629.millet.ipc.SystemBinderService
@@ -75,17 +76,21 @@ class ModernHookEntry : XposedModule() {
             Logger.alwaysWarn("XMillet 热重载：缺少上一代装机上下文，放弃本次热重载，请重启设备")
             return false
         }
-        // powerkeeper 的注册信息也一起带过去：热重载换掉类加载器后，
-        // SystemBinderService 里的回调表会跟着清空，而 powerkeeper 多半已经握手完成、
-        // 不会再主动注册一次（现象：账本有数据但 pkConnected=false）。
+        // powerkeeper / App 的注册信息也一起带过去：热重载换掉类加载器后，
+        // SystemBinderService 里的回调表会清空并销毁旧 Binder 链路，随后在新代重装后通知客户端重绑新 Binder。
         val carriedSnapshot = if (savedRole == ROLE_SYSTEM_SERVER || savedRole == ROLE_PACKAGE_SYSTEM) {
-            runCatching { FreezeStatsRecorder.onHotReloading() }
             runCatching { SystemBinderService.exportRegistrationSnapshot() }.getOrNull()
         } else {
             null
         }
         param.setSavedInstanceState(arrayOf<Any?>(savedRole, savedLoader, carriedSnapshot))
         Logger.alwaysWarn("XMillet 热重载：接受重装请求（$savedRole）")
+
+        when (savedRole) {
+            ROLE_SYSTEM_SERVER, ROLE_PACKAGE_SYSTEM -> SystemHooks.onHotReloading()
+            ROLE_POWERKEEPER -> runCatching { PowerKeeperHooks.onHotReloading() }
+        }
+        Logger.onHotReloading()
         return true
     }
 
@@ -98,25 +103,20 @@ class ModernHookEntry : XposedModule() {
         // 新一代代码有全新的静态字段，这里必须先挂上模块实例，
         // 否则它之前的日志会落在「模块实例为 null」的空档里丢掉。
         ModernBridge.xposedModule = this
-
-        // 旧一代的句柄由新一代代码决定去留。本模块每一轮都是整表重装，
-        // 因此先全部卸载，再由下文重新挂载，避免同一个点位叠出两层回调。
-        var removed = 0
-        for (handle in param.oldHookHandles) {
-            val ok = runCatching { handle.unhook() }.isSuccess
-            if (ok) removed++
-        }
         HookInstallRegistry.clear()
 
         if (savedRole == null || savedLoader == null) {
+            var removed = 0
+            for (handle in param.oldHookHandles) {
+                if (runCatching { handle.unhook() }.isSuccess) removed++
+            }
             Logger.alwaysWarn("XMillet 热重载：已卸载 $removed 个旧 Hook，但没有可复用的类加载器，需重启设备恢复")
             return
         }
 
         role = savedRole
         roleClassLoader = savedLoader
-        Logger.alwaysWarn("XMillet 热重载：已卸载 $removed 个旧 Hook，按 $savedRole 重新装机")
-
+        ModernHookInstaller.beginHotReloadSession()
         try {
             when (savedRole) {
                 ROLE_SYSTEM_SERVER, ROLE_PACKAGE_SYSTEM -> {
@@ -141,6 +141,12 @@ class ModernHookEntry : XposedModule() {
             }
         } catch (t: Throwable) {
             Logger.error("XMillet 热重载重装失败（$savedRole）: ${t.message}", t)
+        } finally {
+            // 新一代按 id 原子替换同点位后，再摘掉不再安装的过时旧句柄，消除中间空窗期
+            val staleRemoved = ModernHookInstaller.finishHotReloadSession(param.oldHookHandles)
+            Logger.alwaysWarn(
+                "XMillet 热重载：按 $savedRole 无空窗重装完成（旧句柄 ${param.oldHookHandles.size} 个，清理过时句柄 $staleRemoved 个）"
+            )
         }
     }
 

@@ -47,9 +47,39 @@ object SystemState {
     @Volatile
     var deviceIdleController: Any? = null
 
-    /** S20 记录最近一次因 toFront 解冻的应用包名（用于配合 screen on 例外放行） */
+    /** S20 记录最近一次因 toFront/Activity Start 解冻的应用包名（用于配合 screen on 例外放行） */
     @Volatile
     var lastToFrontPackage: String = ""
+
+    /**
+     * 判断包名当前是否处于系统前台或用户可见状态（如分屏/小窗/顶层 Activity）。
+     *
+     * 优先匹配 [lastToFrontPackage]；若未曾触发过 toFront 解冻（例如此前未冻结或冷启动未记入），
+     * 兜底通过 `ActivityManagerService#getPackageImportance` 实时查询，避免亮屏保持冻结误伤当前前台应用。
+     */
+    fun isPackageCurrentlyForeground(packageName: String?): Boolean {
+        if (packageName.isNullOrEmpty()) return false
+        if (lastToFrontPackage == packageName) return true
+        val token = android.os.Binder.clearCallingIdentity()
+        return try {
+            val maxVisibleImportance = android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+            val ams = amsInstance
+            if (ams != null) {
+                val importance = XReflect.callMethod(ams, "getPackageImportance", packageName) as? Int
+                importance != null && importance in 1..maxVisibleImportance
+            } else {
+                val am = systemContext?.getSystemService(android.app.ActivityManager::class.java)
+                am?.runningAppProcesses?.any { proc ->
+                    proc.importance in 1..maxVisibleImportance &&
+                        proc.pkgList?.any { it == packageName } == true
+                } == true
+            }
+        } catch (_: Throwable) {
+            false
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
+        }
+    }
 
     /** S2 构造器直接传入的系统 Context 备份 */
     @Volatile

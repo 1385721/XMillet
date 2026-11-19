@@ -62,12 +62,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.BatteryPolicyHelper
 import io.github.univers629.millet.core.FreezeModeLabels
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.SystemBatteryOptimizationHelper
-import io.github.univers629.millet.core.SETTING_MILLET_NO_RESTRICT_APP
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
@@ -205,8 +205,8 @@ fun AppProfileScreenMiuix(
 
     suspend fun refreshSystemPolicy() {
         val (unrestricted, label) = withContext(Dispatchers.IO) {
-            val value = readNoRestrict(context, app.packageName)
-            value to readSystemPolicyLabel(context, app.packageName)
+            val value = BatteryPolicyHelper.isPackageNoRestrict(context, app.packageName)
+            value to readSystemPolicyLabel(context, app.packageName, value)
         }
         systemUnrestricted = unrestricted
         systemPolicyLabel = label
@@ -993,24 +993,9 @@ fun AppProfileScreenMiuix(
     }
 }
 
-/**
- * 判定某个包是否在系统「省电策略 = 无限制」名单里。
- *
- * 权威来源是 `Settings.System.MILLET_NO_RESTRICT_APP`（Greezer 真正认的名单），
- * 无需 root 即可读；注意这里判定的是「任意包名」，与 `BatteryPolicyHelper.isInNoRestrictSetting`
- * （只判定本应用）用途不同。
- */
-private fun readNoRestrict(context: Context, packageName: String): Boolean =
-    runCatching {
-        Settings.System.getString(context.contentResolver, SETTING_MILLET_NO_RESTRICT_APP)
-    }.getOrNull()
-        ?.split(',')
-        ?.any { it.trim() == packageName }
-        ?: false
-
 /** 把系统省电策略翻译成一句话，供只读行展示。 */
-private fun readSystemPolicyLabel(context: Context, packageName: String): String = when {
-    readNoRestrict(context, packageName) -> "无限制（系统不会主动冻结该应用）"
+private fun readSystemPolicyLabel(context: Context, packageName: String, noRestrict: Boolean): String = when {
+    noRestrict -> "无限制（系统不会主动冻结该应用）"
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(packageName) == true -> "已忽略电池优化（AOSP 白名单）"
     else -> "智能推荐（系统可随时冻结该应用）"

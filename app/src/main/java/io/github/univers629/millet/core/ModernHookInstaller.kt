@@ -10,6 +10,34 @@ import java.lang.reflect.Method
  */
 object ModernHookInstaller {
 
+    @Volatile
+    private var activeSessionInstalled: MutableSet<Pair<String?, Executable>>? = null
+
+    /**
+     * 开启一次热重载安装记账会话，收集本轮重新挂载的 `(id, executable)` 以便对旧句柄做无空窗原子替换。
+     */
+    fun beginHotReloadSession() {
+        activeSessionInstalled = HashSet()
+    }
+
+    /**
+     * 结束热重载安装会话：未被新一轮覆盖到的过时旧句柄（例如门控变化或宿主缺失）统一卸载，其余已由 `setId` 原子替换。
+     */
+    fun finishHotReloadSession(oldHandles: List<XposedInterface.HookHandle>): Int {
+        val installed = activeSessionInstalled
+        activeSessionInstalled = null
+        var removed = 0
+        for (handle in oldHandles) {
+            val handleId = runCatching { handle.id }.getOrNull()
+            val stillReplaced = installed != null && handleId != null &&
+                (handleId to handle.executable) in installed
+            if (!stillReplaced && runCatching { handle.unhook() }.isSuccess) {
+                removed++
+            }
+        }
+        return removed
+    }
+
     /**
      * 按顺序批量安装声明式 Hook 列表。
      */
@@ -59,6 +87,7 @@ object ModernHookInstaller {
                 builder.setId(spec.id)
             }
             builder.intercept(buildHooker(spec))
+            activeSessionInstalled?.add(spec.id to executable)
 
             // 目标方法可能已被 JIT 内联进调用方，此时只挂钩子不反优化会「显示已安装但不触发」。
             deoptimizeTarget(xposed, executable, spec.id)
@@ -108,8 +137,9 @@ object ModernHookInstaller {
                     val builder = xposed.hook(method)
                         .setPriority(XposedInterface.PRIORITY_DEFAULT)
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    val hookId = "$id#${method.name}"
                     if (xposed.apiVersion >= XposedInterface.API_102) {
-                        builder.setId("$id#${method.name}")
+                        builder.setId(hookId)
                     }
                     builder.intercept(object : XposedInterface.Hooker {
                             override fun intercept(chain: XposedInterface.Chain): Any? {
@@ -130,7 +160,8 @@ object ModernHookInstaller {
                                 return chain.proceed()
                             }
                         })
-                    deoptimizeTarget(xposed, method, "$id#${method.name}")
+                    activeSessionInstalled?.add(hookId to method)
+                    deoptimizeTarget(xposed, method, hookId)
                     hookedCount++
                 } catch (inner: Throwable) {
                     Logger.error("install [$id:${method.name}] overload failed", inner)

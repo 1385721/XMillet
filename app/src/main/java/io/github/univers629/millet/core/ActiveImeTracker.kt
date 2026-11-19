@@ -24,9 +24,43 @@ object ActiveImeTracker {
     private var cachedImePackage: String? = null
 
     @Volatile
+    private var cachedAccessibilityPackages: Set<String> = emptySet()
+
+    @Volatile
     private var lastRefreshUptimeMs: Long = 0L
 
     private val observerRegistered = AtomicBoolean(false)
+    private val observerLock = Any()
+
+    @Volatile
+    private var registeredContext: Context? = null
+
+    @Volatile
+    private var registeredObserver: ContentObserver? = null
+
+    fun onHotReloading() {
+        val ctx: Context?
+        val observer: ContentObserver?
+        synchronized(observerLock) {
+            ctx = registeredContext
+            observer = registeredObserver
+            registeredContext = null
+            registeredObserver = null
+            observerRegistered.set(false)
+            cachedImePackage = null
+            cachedAccessibilityPackages = emptySet()
+            lastRefreshUptimeMs = 0L
+        }
+        if (ctx != null && observer != null) {
+            val token = Binder.clearCallingIdentity()
+            try {
+                ctx.contentResolver.unregisterContentObserver(observer)
+            } catch (_: Throwable) {
+            } finally {
+                Binder.restoreCallingIdentity(token)
+            }
+        }
+    }
 
     fun parseImePackage(componentId: String?): String? {
         if (componentId.isNullOrBlank()) return null
@@ -34,15 +68,37 @@ object ActiveImeTracker {
         return pkg.takeIf { it.isNotEmpty() && '.' in it }
     }
 
+    fun parseAccessibilityPackages(enabledFlag: Int, servicesRaw: String?): Set<String> {
+        if (enabledFlag != 1 || servicesRaw.isNullOrBlank()) return emptySet()
+        val result = LinkedHashSet<String>()
+        for (entry in servicesRaw.split(':')) {
+            parseImePackage(entry)?.let(result::add)
+        }
+        return result
+    }
+
     fun resolveDefaultImePackage(context: Context?): String? {
         val ctx = context ?: return cachedImePackage
         ensureObserver(ctx)
-        val now = SystemClock.uptimeMillis()
-        val cached = cachedImePackage
-        if (cached != null && (observerRegistered.get() || now - lastRefreshUptimeMs in 0..REFRESH_FALLBACK_INTERVAL_MS)) {
-            return cached
+        if (!isCacheFresh()) {
+            refresh(ctx)
         }
-        return refresh(ctx)
+        return cachedImePackage
+    }
+
+    fun resolveAccessibilityPackages(context: Context?): Set<String> {
+        val ctx = context ?: return cachedAccessibilityPackages
+        ensureObserver(ctx)
+        if (!isCacheFresh()) {
+            refresh(ctx)
+        }
+        return cachedAccessibilityPackages
+    }
+
+    private fun isCacheFresh(): Boolean {
+        if (observerRegistered.get() && lastRefreshUptimeMs > 0L) return true
+        val now = SystemClock.uptimeMillis()
+        return lastRefreshUptimeMs > 0L && (now - lastRefreshUptimeMs in 0..REFRESH_FALLBACK_INTERVAL_MS)
     }
 
     fun isProtectedDefaultIme(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean {
@@ -51,17 +107,27 @@ object ActiveImeTracker {
         return packageName == activeIme
     }
 
+    fun isProtectedAccessibilityApp(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean {
+        if (packageName.isNullOrEmpty() || packageName in prefs.forceFreezeSet) return false
+        return packageName in resolveAccessibilityPackages(context)
+    }
+
+    fun isProtectedSystemServiceApp(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean =
+        isProtectedDefaultIme(context, packageName, prefs) ||
+            isProtectedAccessibilityApp(context, packageName, prefs)
+
     private fun refresh(context: Context): String? {
         val token = Binder.clearCallingIdentity()
         return try {
-            val raw = Settings.Secure.getString(
-                context.contentResolver,
-                Settings.Secure.DEFAULT_INPUT_METHOD
-            )
-            val pkg = parseImePackage(raw)
-            cachedImePackage = pkg
+            val resolver = context.contentResolver
+            val rawIme = Settings.Secure.getString(resolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+            val imePkg = parseImePackage(rawIme)
+            val a11yEnabled = Settings.Secure.getInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+            val rawA11y = Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            cachedImePackage = imePkg
+            cachedAccessibilityPackages = parseAccessibilityPackages(a11yEnabled, rawA11y)
             lastRefreshUptimeMs = SystemClock.uptimeMillis()
-            pkg
+            imePkg
         } catch (_: Throwable) {
             cachedImePackage
         } finally {
@@ -76,13 +142,31 @@ object ActiveImeTracker {
         val appCtx = context.applicationContext ?: context
         val token = Binder.clearCallingIdentity()
         try {
-            val uri = Settings.Secure.getUriFor(Settings.Secure.DEFAULT_INPUT_METHOD)
+            val resolver = appCtx.contentResolver
             val observer = object : ContentObserver(Handler(looper)) {
                 override fun onChange(selfChange: Boolean) {
                     refresh(appCtx)
                 }
             }
-            appCtx.contentResolver.registerContentObserver(uri, false, observer)
+            resolver.registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.DEFAULT_INPUT_METHOD),
+                false,
+                observer
+            )
+            resolver.registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
+                false,
+                observer
+            )
+            resolver.registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_ENABLED),
+                false,
+                observer
+            )
+            synchronized(observerLock) {
+                registeredContext = appCtx
+                registeredObserver = observer
+            }
             refresh(appCtx)
         } catch (_: Throwable) {
             observerRegistered.set(false)

@@ -151,7 +151,7 @@ object ForceFreezeBridge {
                         continue
                     }
                     if (pkg in latestPrefs.whiteAppSet ||
-                        ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, latestPrefs)
+                        ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, latestPrefs)
                     ) {
                         skipped++
                         skipDetails.add("$uid($pkg):exempt")

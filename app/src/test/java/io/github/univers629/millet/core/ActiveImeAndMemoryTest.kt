@@ -3,6 +3,7 @@ package io.github.univers629.millet.core
 import io.github.univers629.millet.system.ProcessSnapshotProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActiveImeAndMemoryTest {
@@ -20,6 +21,25 @@ class ActiveImeAndMemoryTest {
         assertNull(ActiveImeTracker.parseImePackage(null))
         assertNull(ActiveImeTracker.parseImePackage(""))
         assertNull(ActiveImeTracker.parseImePackage("invalid"))
+    }
+
+    @Test
+    fun `parseAccessibilityPackages parses enabled services only when accessibility is enabled`() {
+        val raw = "com.example.skip/.SkipService : com.google.android.marvin.talkback/.TalkBackService:invalid"
+        assertTrue(ActiveImeTracker.parseAccessibilityPackages(0, raw).isEmpty())
+        assertEquals(
+            setOf("com.example.skip", "com.google.android.marvin.talkback"),
+            ActiveImeTracker.parseAccessibilityPackages(1, raw)
+        )
+    }
+
+    @Test
+    fun `isToFrontReason recognizes activity start alongside resume and front`() {
+        assertTrue(FreezeReasonClassifier.isToFrontReason("Activity Start"))
+        assertTrue(FreezeReasonClassifier.isToFrontReason(" Activity Start!"))
+        assertTrue(FreezeReasonClassifier.isToFrontReason("Activity Front"))
+        assertTrue(FreezeReasonClassifier.isToFrontReason("Activity Resume"))
+        assertTrue(FreezeReasonClassifier.isToFrontReason("toFrontActivity"))
     }
 
     @Test

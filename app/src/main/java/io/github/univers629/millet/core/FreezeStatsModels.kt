@@ -211,6 +211,7 @@ object FreezeReasonClassifier {
         return trimmed.equals("tofront", ignoreCase = true) ||
             trimmed.contains("toFront", ignoreCase = true) ||
             trimmed.startsWith("Activity Front", ignoreCase = true) ||
+            trimmed.startsWith("Activity Start", ignoreCase = true) ||
             trimmed.equals("Activity Resume", ignoreCase = true)
     }
 

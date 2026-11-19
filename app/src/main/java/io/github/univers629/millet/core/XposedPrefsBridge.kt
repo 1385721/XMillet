@@ -2,9 +2,17 @@ package io.github.univers629.millet.core
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
+import io.github.libxposed.service.HookedTarget
+import io.github.libxposed.service.HotReloadResult
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 把本应用的 Hook 设置增量镜像到 LibXposed 框架的远程配置（RemotePreferences）。
@@ -20,6 +28,49 @@ import io.github.univers629.millet.ipc.PowerKeeperBinderClient
  */
 object XposedPrefsBridge {
 
+    enum class HookTargetState {
+        UP_TO_DATE,
+        STALE,
+        RELOADING,
+        FAILED
+    }
+
+    data class HookTargetSnapshot(
+        val processName: String,
+        val uid: Int,
+        val pid: Int,
+        val state: HookTargetState,
+        val loadedVersionCode: Long
+    )
+
+    data class XposedFrameworkState(
+        val isServiceConnected: Boolean = false,
+        val apiVersion: Int = 0,
+        val frameworkName: String = "",
+        val frameworkVersion: String = "",
+        val frameworkVersionCode: Long = 0L,
+        val supportsSystemHook: Boolean = false,
+        val supportsRemotePrefs: Boolean = false,
+        val apiProtectionEnabled: Boolean = false,
+        val scope: List<String> = emptyList(),
+        val runningTargets: List<HookTargetSnapshot> = emptyList()
+    ) {
+        val hasSystemScope: Boolean
+            get() = "system" in scope || "android" in scope
+
+        val hasPowerKeeperScope: Boolean
+            get() = "com.miui.powerkeeper" in scope
+
+        val missingScopes: List<String>
+            get() = buildList {
+                if (!hasSystemScope) add("system")
+                if (!hasPowerKeeperScope) add("com.miui.powerkeeper")
+            }
+
+        val staleTargets: List<HookTargetSnapshot>
+            get() = runningTargets.filter { it.state == HookTargetState.STALE }
+    }
+
     /** 与 [PrefsKeys.PREFS_FILE_NAME] 保持一致，框架按组名存储。 */
     private const val GROUP = "Settings"
 
@@ -27,6 +78,12 @@ object XposedPrefsBridge {
     private const val ALL_GROUPS_KEY = "*"
 
     private val syncLock = Any()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val _frameworkState = MutableStateFlow(XposedFrameworkState())
+    val frameworkState: StateFlow<XposedFrameworkState> = _frameworkState.asStateFlow()
+
+    @Volatile
+    private var remoteUnsupportedLogged = false
 
     @Volatile
     private var appContext: Context? = null
@@ -74,11 +131,13 @@ object XposedPrefsBridge {
                         boundService = service
                         lastSyncedService = null
                         lastSyncedValues.clear()
+                        remoteUnsupportedLogged = false
                     }
                     Logger.alwaysInfo(
                         "LibXposed 服务已连接: ${service.frameworkName} ${service.frameworkVersion} " +
                             "(API ${service.apiVersion})"
                     )
+                    refreshFrameworkState()
                     push(ctx, forceNotify = true)
                 }
 
@@ -93,6 +152,7 @@ object XposedPrefsBridge {
                             Logger.warn("LibXposed 服务已断开")
                         }
                     }
+                    refreshFrameworkState()
                 }
             })
         }.onFailure { Logger.error("注册 LibXposed 服务监听失败", it) }
@@ -169,10 +229,160 @@ object XposedPrefsBridge {
         }.onFailure { Logger.warn("通知 Hook 重读配置失败: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
+    fun refreshFrameworkState(): XposedFrameworkState {
+        val service = boundService ?: return XposedFrameworkState().also {
+            _frameworkState.value = it
+        }
+        val state = runCatching {
+            val apiVersion = service.apiVersion
+            val props = service.frameworkProperties
+            val scope = runCatching { service.scope }.getOrDefault(emptyList())
+            val targets = if (apiVersion >= XposedService.API_102) {
+                runCatching {
+                    service.runningTargets.map { target ->
+                        HookTargetSnapshot(
+                            processName = target.processName,
+                            uid = target.uid,
+                            pid = target.pid,
+                            state = when (target.state) {
+                                HookedTarget.State.UP_TO_DATE -> HookTargetState.UP_TO_DATE
+                                HookedTarget.State.STALE -> HookTargetState.STALE
+                                HookedTarget.State.RELOADING -> HookTargetState.RELOADING
+                                HookedTarget.State.FAILED -> HookTargetState.FAILED
+                            },
+                            loadedVersionCode = target.loadedVersionCode
+                        )
+                    }
+                }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            XposedFrameworkState(
+                isServiceConnected = true,
+                apiVersion = apiVersion,
+                frameworkName = service.frameworkName,
+                frameworkVersion = service.frameworkVersion,
+                frameworkVersionCode = service.frameworkVersionCode,
+                supportsSystemHook = (props and XposedService.PROP_CAP_SYSTEM) != 0L,
+                supportsRemotePrefs = (props and XposedService.PROP_CAP_REMOTE) != 0L,
+                apiProtectionEnabled = (props and XposedService.PROP_RT_API_PROTECTION) != 0L,
+                scope = scope,
+                runningTargets = targets
+            )
+        }.getOrElse { XposedFrameworkState() }
+        _frameworkState.value = state
+        return state
+    }
+
+    /**
+     * 通过 `XposedService.requestScope` 主动向框架申请缺失的核心作用域（`system` 与 `com.miui.powerkeeper`）。
+     */
+    fun requestMissingScopes(onResult: (approved: Boolean, message: String) -> Unit) {
+        val service = boundService
+        if (service == null) {
+            mainHandler.post { onResult(false, "Xposed 服务未连接") }
+            return
+        }
+        val missing = refreshFrameworkState().missingScopes
+        if (missing.isEmpty()) {
+            mainHandler.post { onResult(true, "核心作用域已授权") }
+            return
+        }
+        runCatching {
+            service.requestScope(missing, object : XposedService.OnScopeEventListener {
+                override fun onScopeRequestApproved(approved: List<String>) {
+                    refreshFrameworkState()
+                    mainHandler.post {
+                        onResult(true, "已授权作用域: ${approved.joinToString(", ")}")
+                    }
+                }
+
+                override fun onScopeRequestFailed(message: String) {
+                    refreshFrameworkState()
+                    mainHandler.post {
+                        onResult(false, message.ifBlank { "作用域授权被拒绝" })
+                    }
+                }
+            })
+        }.onFailure { t ->
+            mainHandler.post { onResult(false, t.message ?: t.javaClass.simpleName) }
+        }
+    }
+
+    /**
+     * 针对 API 102 的 `STALE` 过期目标进程批量发起模块热重载（无需重启系统）。
+     */
+    fun hotReloadStaleTargets(onResult: (succeeded: Int, total: Int, summary: String) -> Unit) {
+        val service = boundService
+        if (service == null) {
+            mainHandler.post { onResult(0, 0, "Xposed 服务未连接") }
+            return
+        }
+        if (runCatching { service.apiVersion }.getOrDefault(0) < XposedService.API_102) {
+            mainHandler.post { onResult(0, 0, "当前框架不支持 API 102 热重载") }
+            return
+        }
+        val staleTargets = runCatching {
+            service.runningTargets.filter { it.state == HookedTarget.State.STALE }
+        }.getOrDefault(emptyList())
+        if (staleTargets.isEmpty()) {
+            refreshFrameworkState()
+            mainHandler.post { onResult(0, 0, "所有目标进程已是最新模块代码") }
+            return
+        }
+
+        val total = staleTargets.size
+        val remaining = AtomicInteger(total)
+        val succeeded = AtomicInteger(0)
+        val failures = ArrayList<String>()
+
+        for (target in staleTargets) {
+            runCatching {
+                service.hotReloadModule(target, null) { proc, result ->
+                    when (result.status) {
+                        HotReloadResult.Status.SUCCEEDED -> succeeded.incrementAndGet()
+                        else -> synchronized(failures) {
+                            val detail = result.message?.let { ": $it" }.orEmpty()
+                            failures.add("${proc.processName}(${result.status}$detail)")
+                        }
+                    }
+                    if (remaining.decrementAndGet() == 0) {
+                        refreshFrameworkState()
+                        val ok = succeeded.get()
+                        val summary = if (failures.isEmpty()) {
+                            "已热重载 $ok/$total 个目标进程"
+                        } else {
+                            "热重载完成 $ok/$total，未完成: ${failures.joinToString("; ")}"
+                        }
+                        mainHandler.post { onResult(ok, total, summary) }
+                    }
+                }
+            }.onFailure { t ->
+                synchronized(failures) {
+                    failures.add("${target.processName}(${t.javaClass.simpleName})")
+                }
+                if (remaining.decrementAndGet() == 0) {
+                    refreshFrameworkState()
+                    val ok = succeeded.get()
+                    mainHandler.post {
+                        onResult(ok, total, "热重载完成 $ok/$total，未完成: ${failures.joinToString("; ")}")
+                    }
+                }
+            }
+        }
+    }
+
     private fun syncDiffInternal(context: Context, targetKeys: Set<String>?): Boolean {
         synchronized(syncLock) {
             val service = boundService ?: return false
             return runCatching {
+                if ((service.frameworkProperties and XposedService.PROP_CAP_REMOTE) == 0L) {
+                    if (!remoteUnsupportedLogged) {
+                        remoteUnsupportedLogged = true
+                        Logger.alwaysWarn("当前 Xposed 框架未启用 PROP_CAP_REMOTE 远程配置能力，设置同步已跳过")
+                    }
+                    return false
+                }
                 val localAll = PrefReader.openUiPrefs(context).all
                 val remote = service.getRemotePreferences(GROUP)
 

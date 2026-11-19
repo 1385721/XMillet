@@ -53,8 +53,19 @@ object BroadcastAndDozeHooks {
     @Volatile
     private var isInDeepIdle: Boolean = false
 
+    private val receiverLifecycleLock = Any()
+
+    @Volatile
+    private var screenReceiver: BroadcastReceiver? = null
+
+    @Volatile
+    private var screenReceiverContext: Context? = null
+
     @Volatile
     private var screenReceiverRegistered: Boolean = false
+
+    @Volatile
+    private var batteryReceiverContext: Context? = null
 
     @Volatile
     private var batteryReceiverRegistered: Boolean = false
@@ -65,10 +76,75 @@ object BroadcastAndDozeHooks {
     @Volatile
     private var lastBatteryTimestamp: Long = -1L
 
-    private val screenDozeHandler: Handler by lazy {
-        val thread = HandlerThread("XMillet-Screen", Process.THREAD_PRIORITY_FOREGROUND)
-        thread.start()
-        Handler(thread.looper)
+    private val screenThreadLock = Any()
+
+    @Volatile
+    private var screenThread: HandlerThread? = null
+
+    @Volatile
+    private var screenHandlerInstance: Handler? = null
+
+    @Volatile
+    private var hotReloading: Boolean = false
+
+    private fun ensureScreenHandler(): Handler? {
+        if (hotReloading) return null
+        screenHandlerInstance?.let { return it }
+        synchronized(screenThreadLock) {
+            if (hotReloading) return null
+            screenHandlerInstance?.let { return it }
+            val thread = HandlerThread("XMillet-Screen", Process.THREAD_PRIORITY_FOREGROUND)
+            thread.start()
+            val handler = Handler(thread.looper)
+            screenThread = thread
+            screenHandlerInstance = handler
+            return handler
+        }
+    }
+
+    /**
+     * 热重载卸载前注销广播接收器、取消闹钟监听并停掉 `XMillet-Screen` 线程，避免旧代 ClassLoader 泄漏与回调叠加。
+     */
+    fun onHotReloading() {
+        hotReloading = true
+        val screenCtx: Context?
+        val scrReceiver: BroadcastReceiver?
+        val batCtx: Context?
+        val wasBatRegistered: Boolean
+        synchronized(receiverLifecycleLock) {
+            screenCtx = screenReceiverContext
+            scrReceiver = screenReceiver
+            screenReceiver = null
+            screenReceiverContext = null
+            screenReceiverRegistered = false
+
+            batCtx = batteryReceiverContext
+            wasBatRegistered = batteryReceiverRegistered
+            batteryReceiverContext = null
+            batteryReceiverRegistered = false
+        }
+        if (screenCtx != null && scrReceiver != null) {
+            runCatching { screenCtx.unregisterReceiver(scrReceiver) }
+        }
+        if (wasBatRegistered && batCtx != null) {
+            runCatching { batCtx.unregisterReceiver(batteryChangeReceiver) }
+        }
+        val alarmCtx = screenCtx ?: batCtx ?: SystemState.systemContext
+        alarmCtx?.let { ctx ->
+            runCatching {
+                val am = ctx.getSystemService(AlarmManager::class.java)
+                am?.cancel(dualScreenOffFreezeListener)
+                am?.cancel(deepDozeAlarmListener)
+            }
+        }
+        val thread: HandlerThread?
+        synchronized(screenThreadLock) {
+            screenHandlerInstance?.removeCallbacksAndMessages(null)
+            screenHandlerInstance = null
+            thread = screenThread
+            screenThread = null
+        }
+        thread?.quitSafely()
     }
 
     private val dualScreenOffFreezeListener = AlarmManager.OnAlarmListener {
@@ -409,32 +485,39 @@ object BroadcastAndDozeHooks {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     fun registerScreenStatusReceiver(context: Context) {
-        if (screenReceiverRegistered) return
-        try {
-            val filter = IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_ON)
-                addAction(Intent.ACTION_SCREEN_OFF)
-            }
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context?, intent: Intent?) {
-                    handleScreenBroadcast(intent?.action)
+        if (hotReloading) return
+        synchronized(receiverLifecycleLock) {
+            if (hotReloading || screenReceiverRegistered) return
+            val targetCtx = context.applicationContext ?: context
+            try {
+                val filter = IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_SCREEN_OFF)
                 }
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(ctx: Context?, intent: Intent?) {
+                        handleScreenBroadcast(intent?.action)
+                    }
+                }
+                targetCtx.registerReceiver(receiver, filter)
+                screenReceiver = receiver
+                screenReceiverContext = targetCtx
+                screenReceiverRegistered = true
+                Logger.alwaysWarn("registerReceiverScreenStatus")
+            } catch (t: Throwable) {
+                Logger.error("registerScreenStatusReceiver failed", t)
             }
-            context.registerReceiver(receiver, filter)
-            screenReceiverRegistered = true
-            Logger.alwaysWarn("registerReceiverScreenStatus")
-        } catch (t: Throwable) {
-            Logger.error("registerScreenStatusReceiver failed", t)
         }
     }
 
     private fun handleScreenBroadcast(action: String?) {
-        if (action == null || !SystemState.isGreezeReady) return
+        if (hotReloading || action == null || !SystemState.isGreezeReady) return
         val prefs = PrefReader.systemPrefs
+        val handler = ensureScreenHandler() ?: return
         when (action) {
             Intent.ACTION_SCREEN_OFF -> {
                 if (!SystemState.hasAurogonIsUidValid && prefs.freezeDualApp) {
-                    screenDozeHandler.removeCallbacks(dualScreenOffPostRunnable)
+                    handler.removeCallbacks(dualScreenOffPostRunnable)
                     val ctx = SystemState.systemContext
                     var alarmScheduled = false
                     if (ctx != null) {
@@ -447,7 +530,7 @@ object BroadcastAndDozeHooks {
                                 SystemClock.elapsedRealtime() + 4_500L,
                                 "XMillet.DualScrOff",
                                 dualScreenOffFreezeListener,
-                                screenDozeHandler
+                                handler
                             )
                             alarmScheduled = am != null
                         } catch (t: Throwable) {
@@ -455,7 +538,7 @@ object BroadcastAndDozeHooks {
                         }
                     }
                     if (!alarmScheduled) {
-                        screenDozeHandler.postDelayed(dualScreenOffPostRunnable, 4_500L)
+                        handler.postDelayed(dualScreenOffPostRunnable, 4_500L)
                     }
                 } else {
                     Logger.info(
@@ -476,7 +559,7 @@ object BroadcastAndDozeHooks {
                             SystemClock.elapsedRealtime() + 10_000L,
                             "XMillet.Screen",
                             deepDozeAlarmListener,
-                            screenDozeHandler
+                            handler
                         )
                     } catch (_: Throwable) {
                     }
@@ -484,7 +567,7 @@ object BroadcastAndDozeHooks {
             }
 
             Intent.ACTION_SCREEN_ON -> {
-                screenDozeHandler.removeCallbacks(dualScreenOffPostRunnable)
+                handler.removeCallbacks(dualScreenOffPostRunnable)
                 SystemState.systemContext?.let { ctx ->
                     try {
                         ctx.getSystemService(AlarmManager::class.java)?.cancel(dualScreenOffFreezeListener)
@@ -507,17 +590,22 @@ object BroadcastAndDozeHooks {
                     }
                 }
                 if (prefs.disableScreenOnThaw) {
-                    val imePkg = ActiveImeTracker.resolveDefaultImePackage(SystemState.systemContext)
-                    if (imePkg != null &&
-                        imePkg !in prefs.blockThawSet &&
-                        imePkg !in prefs.ignoreNetworkWakeSet &&
-                        ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, imePkg, prefs)
-                    ) {
-                        val imeUid = SystemState.getPackageUid(imePkg)
-                        if (imeUid > 0 && SystemState.isUidFrozen(imeUid)) {
-                            screenDozeHandler.post {
+                    val protectedPkgs = buildList {
+                        ActiveImeTracker.resolveDefaultImePackage(SystemState.systemContext)?.let(::add)
+                        addAll(ActiveImeTracker.resolveAccessibilityPackages(SystemState.systemContext))
+                    }
+                    for (svcPkg in protectedPkgs.distinct()) {
+                        if (svcPkg in prefs.blockThawSet ||
+                            svcPkg in prefs.ignoreNetworkWakeSet ||
+                            !ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, svcPkg, prefs)
+                        ) {
+                            continue
+                        }
+                        val svcUid = SystemState.getPackageUid(svcPkg)
+                        if (svcUid > 0 && SystemState.isUidFrozen(svcUid)) {
+                            handler.post {
                                 SystemState.greezeService?.let { greeze ->
-                                    runCatching { XReflect.callMethod(greeze, "thawUid", imeUid, 1000, "screen on") }
+                                    runCatching { XReflect.callMethod(greeze, "thawUid", svcUid, 1000, "screen on") }
                                 }
                             }
                         }
@@ -594,19 +682,29 @@ object BroadcastAndDozeHooks {
     }
 
     fun updateBatteryObservation(enabled: Boolean) {
-        val ctx = SystemState.systemContext ?: return
-        try {
-            if (enabled && !batteryReceiverRegistered) {
-                ctx.registerReceiver(batteryChangeReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                batteryReceiverRegistered = true
-                Logger.battery(Logger.Level.INFO, "开启电量记录成功")
+        synchronized(receiverLifecycleLock) {
+            if (enabled && !hotReloading && !batteryReceiverRegistered) {
+                val ctx = SystemState.systemContext ?: return
+                try {
+                    val targetCtx = ctx.applicationContext ?: ctx
+                    targetCtx.registerReceiver(batteryChangeReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                    batteryReceiverContext = targetCtx
+                    batteryReceiverRegistered = true
+                    Logger.battery(Logger.Level.INFO, "开启电量记录成功")
+                } catch (t: Throwable) {
+                    Logger.error("updateBatteryObservation($enabled) failed", t)
+                }
             } else if (!enabled && batteryReceiverRegistered) {
-                ctx.unregisterReceiver(batteryChangeReceiver)
-                batteryReceiverRegistered = false
-                Logger.battery(Logger.Level.INFO, "关闭电量记录成功")
+                val ctx = batteryReceiverContext ?: SystemState.systemContext ?: return
+                try {
+                    ctx.unregisterReceiver(batteryChangeReceiver)
+                    batteryReceiverContext = null
+                    batteryReceiverRegistered = false
+                    Logger.battery(Logger.Level.INFO, "关闭电量记录成功")
+                } catch (t: Throwable) {
+                    Logger.error("updateBatteryObservation($enabled) failed", t)
+                }
             }
-        } catch (t: Throwable) {
-            Logger.error("updateBatteryObservation($enabled) failed", t)
         }
     }
 

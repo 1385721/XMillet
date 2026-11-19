@@ -1,6 +1,6 @@
 # LibXposed (Modern Xposed API 102) Rules
 -dontwarn io.github.libxposed.annotation.**
 -adaptresourcefilecontents META-INF/xposed/java_init.list
--keep,allowoptimization public class * extends io.github.libxposed.api.XposedModule {
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }

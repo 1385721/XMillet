@@ -67,6 +67,9 @@ object PowerKeeperBinderClient {
     @Volatile
     private var appCallbackStub: ClientCallbackStub? = null
 
+    @Volatile
+    private var appProcessContext: Context? = null
+
     /** powerkeeper 侧握手失败后的重试计数与互斥锁（见 [bindFromPowerKeeper]）。 */
     private val bindRetryLock = Any()
 
@@ -233,6 +236,7 @@ object PowerKeeperBinderClient {
      * 在模块 App（UI 进程）启动时建立双向链路并注册 `"XMillet"` 客户端回调。
      */
     fun bindFromApp(context: Context): Boolean {
+        appProcessContext = context.applicationContext ?: context
         val binder = acquireSystemBinder(context) ?: return false
         if (!pingAlive(binder)) return false
 
@@ -243,7 +247,26 @@ object PowerKeeperBinderClient {
         return true
     }
 
+    /**
+     * 热重载卸载前清理所有待执行的重连或回调任务，防止旧代 Handler 持有类加载器引用。
+     */
+    fun cancelPendingRetries() {
+        synchronized(bindRetryLock) {
+            bindRetryAttempt = 0
+        }
+        retryHandler.removeCallbacksAndMessages(null)
+        mainHandler.removeCallbacksAndMessages(null)
+    }
+
     private fun handlePowerKeeperInboundMessage(context: Context, message: String) {
+        if (message == MilletIpcContract.MSG_REBIND_SYSTEM_BINDER) {
+            remoteSystemBinder = null
+            Logger.postIoTask {
+                runCatching { bindFromPowerKeeper(context) }
+                    .onFailure { Logger.error("热重载重连 system_server 失败", it) }
+            }
+            return
+        }
         val queryPkg = MilletIpcContract.decodeUnfrozenQueryOrNull(message)
         if (queryPkg != null) {
             // 收到「查询某包为什么没被冻结」指令 -> 执行 40 步诊断链并回传结果
@@ -260,6 +283,16 @@ object PowerKeeperBinderClient {
     }
 
     private fun handleAppInboundMessage(message: String) {
+        if (message == MilletIpcContract.MSG_REBIND_SYSTEM_BINDER) {
+            remoteSystemBinder = null
+            val ctx = appProcessContext
+            if (ctx != null) {
+                Thread({
+                    runCatching { bindFromApp(ctx) }
+                }, "XMillet-AppRebind").start()
+            }
+            return
+        }
         if (message == MilletIpcContract.MSG_IS_UPDATE) {
             mainHandler.post { onAppUpdateNoticeReceived?.invoke() }
             return

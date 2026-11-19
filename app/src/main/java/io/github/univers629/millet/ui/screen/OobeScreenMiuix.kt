@@ -47,7 +47,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
-import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Widgets
 import io.github.univers629.millet.ui.component.XMilletIcons
 import androidx.compose.runtime.Composable
@@ -100,7 +99,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.univers629.millet.R
 import io.github.univers629.millet.core.AppListPermissionHelper
-import io.github.univers629.millet.core.BatteryPolicyHelper
 import io.github.univers629.millet.core.LsposedHelper
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.effect.BgEffectBackground
@@ -236,17 +234,14 @@ fun OobeScreenMiuix(
 
     var isLspActive by remember { mutableStateOf(false) }
     var canReadApps by remember { mutableStateOf(false) }
-    var isIgnoringBattery by remember { mutableStateOf(false) }
 
     // 检查并更新当前所有权限状态（并发异步刷新）
     suspend fun refreshPermissions() = coroutineScope {
         val lspDeferred = async(Dispatchers.IO) { LsposedHelper.isScopeActive(context) }
         val appsDeferred = async(Dispatchers.IO) { AppListPermissionHelper.canReadInstalledApps(context) }
-        val batteryDeferred = async(Dispatchers.IO) { BatteryPolicyHelper.isNoRestrict(context) }
 
         isLspActive = lspDeferred.await()
         canReadApps = appsDeferred.await()
-        isIgnoringBattery = batteryDeferred.await()
     }
 
     val appListPermissionLauncher = rememberLauncherForActivityResult(
@@ -269,9 +264,6 @@ fun OobeScreenMiuix(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 coroutineScope.launch {
-                    isIgnoringBattery = withContext(Dispatchers.IO) {
-                        BatteryPolicyHelper.quickIsNoRestrict(context)
-                    }
                     refreshPermissions()
                 }
             }
@@ -549,50 +541,6 @@ fun OobeScreenMiuix(
                                                     }
                                                 }
                                             )
-
-                                            // 权限 3：忽略电池优化
-                                            BasicComponent(
-                                                startAction = {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.BatteryChargingFull,
-                                                        contentDescription = null,
-                                                        modifier = Modifier
-                                                            .padding(end = 8.dp)
-                                                            .size(24.dp),
-                                                        tint = colorScheme.onSurface,
-                                                    )
-                                                },
-                                                title = "忽略电池优化",
-                                                summary = "免受系统智能省电策略杀害，确保进程状态常驻与前后台精准感知",
-                                                endActions = {
-                                                    if (isIgnoringBattery) {
-                                                        GrantedCheckIndicator()
-                                                    } else {
-                                                        StatusTagMiuix(
-                                                            label = "点击设置",
-                                                            backgroundColor = colorScheme.secondaryContainer,
-                                                            contentColor = colorScheme.onSecondaryContainer
-                                                        )
-                                                    }
-                                                },
-                                                onClick = {
-                                                    if (isIgnoringBattery) {
-                                                        Toast.makeText(context, "电量与性能已处于无限制状态", Toast.LENGTH_SHORT).show()
-                                                    } else {
-                                                        val aospIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                                            data = Uri.fromParts("package", context.packageName, null)
-                                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                        }
-                                                        runCatching {
-                                                            context.startActivity(aospIntent)
-                                                        }.onFailure {
-                                                            val altIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                            runCatching { context.startActivity(altIntent) }
-                                                        }
-                                                    }
-                                                }
-                                            )
                                         }
                                     }
                                 }
@@ -620,7 +568,7 @@ fun OobeScreenMiuix(
                                         )
                                     ) {
                                         Text(
-                                            text = if (isLspActive && isIgnoringBattery) "完成并进入" else "完成",
+                                            text = if (isLspActive && canReadApps) "完成并进入" else "完成",
                                             fontSize = 16.sp,
                                             fontWeight = FontWeight.SemiBold
                                         )

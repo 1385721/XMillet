@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
 import io.github.libxposed.api.XposedInterface
+import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
@@ -165,6 +166,17 @@ object SystemHooks {
         FreezeStatsRecorder.setDispatchThawEventActive(s22Installed)
 
         Logger.alwaysWarn("Hook 安装结果[系统侧]: ${HookInstallRegistry.summary()}")
+    }
+
+    /**
+     * 热重载卸载前回收 system_server 侧的输入法观察者、亮灭屏/电量广播接收器、定时统计及 Binder 客户端回调。
+     */
+    fun onHotReloading() {
+        runCatching { FreezeStatsRecorder.onHotReloading() }
+        runCatching { ActiveImeTracker.onHotReloading() }
+        runCatching { BroadcastAndDozeHooks.onHotReloading() }
+        runCatching { SystemBinderService.onHotReloading() }
+        PrefReader.onSystemGroupReloaded = null
     }
 
     /**

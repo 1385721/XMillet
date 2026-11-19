@@ -1,6 +1,5 @@
 package io.github.univers629.millet.core
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import io.github.libxposed.api.XposedModule
@@ -287,35 +286,18 @@ object PrefReader {
 
     // ==================== UI 侧读写与热更新封装 ====================
 
-    private const val MODE_WORLD_READABLE_LEGACY = 0x0001
-    private const val MODE_MULTI_PROCESS_LEGACY = 0x0004
-
     /**
      * 打开 Device-Protected Storage 下的 Settings.xml（供 App UI 进程调用）。
-     * 优先使用 MODE_WORLD_READABLE | MODE_MULTI_PROCESS (5)，以配合 LSPosed XSharedPreferences；
-     * 若宿主机限制 MODE_WORLD_READABLE 则依次回退到 MODE_MULTI_PROCESS (4) 与 MODE_PRIVATE (0)。
+     * Direct Boot 阶段即可访问；跨进程配置由 [XposedPrefsBridge] 同步到 LibXposed RemotePreferences，
+     * 不再使用已废弃的 MODE_WORLD_READABLE / MODE_MULTI_PROCESS。
      */
-    @SuppressLint("WorldReadableFiles")
     fun openUiPrefs(context: Context): SharedPreferences {
         val deContext = try {
             context.createDeviceProtectedStorageContext() ?: context
         } catch (_: Throwable) {
             context
         }
-        return try {
-            @Suppress("DEPRECATION")
-            deContext.getSharedPreferences(
-                PrefsKeys.PREFS_FILE_NAME,
-                MODE_WORLD_READABLE_LEGACY or MODE_MULTI_PROCESS_LEGACY
-            )
-        } catch (_: Throwable) {
-            try {
-                @Suppress("DEPRECATION")
-                deContext.getSharedPreferences(PrefsKeys.PREFS_FILE_NAME, MODE_MULTI_PROCESS_LEGACY)
-            } catch (_: Throwable) {
-                deContext.getSharedPreferences(PrefsKeys.PREFS_FILE_NAME, Context.MODE_PRIVATE)
-            }
-        }
+        return deContext.getSharedPreferences(PrefsKeys.PREFS_FILE_NAME, Context.MODE_PRIVATE)
     }
 
     /**

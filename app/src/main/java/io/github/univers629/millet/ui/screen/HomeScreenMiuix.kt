@@ -38,6 +38,7 @@ import androidx.compose.material.icons.rounded.Tag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +60,7 @@ import io.github.univers629.millet.core.FreezeModeLabels
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.SoftRebootHelper
 import io.github.univers629.millet.core.VersionGate
+import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
@@ -146,6 +148,7 @@ fun HomeScreenMiuix(
     var showTopPopup by remember { mutableStateOf(false) }
     var showHookCheckDialog by remember { mutableStateOf(false) }
     var kernelFreezer by remember { mutableStateOf(RootHelper.KernelFreezer.UNKNOWN) }
+    val frameworkState by XposedPrefsBridge.frameworkState.collectAsState()
 
     // 「已冻结」口径以进程快照里的内核证据为准（wchan = do_freezer_trap /
     // __refrigerator，或进程处于 D 状态）。greeze 的记账名单不参与判定——被 hook
@@ -158,10 +161,11 @@ fun HomeScreenMiuix(
         frozenApps.map { it.packageName }.distinct().size
     }
 
-    // 打开检测弹窗时在 IO 线程探测内核冻结器类型（只问模块，模块缺席时保持 UNKNOWN）
+    // 打开检测弹窗时在 IO 线程探测内核冻结器类型与 XposedService 状态
     LaunchedEffect(showHookCheckDialog) {
         if (showHookCheckDialog) {
             kernelFreezer = withContext(Dispatchers.IO) {
+                XposedPrefsBridge.refreshFrameworkState()
                 // system_server 才有 /sys/fs/cgroup 与 /proc/<pid>/wchan 的读权限；
                 // App 侧自行探测需要 root，会弹一次超级用户提示，因此不做回退。
                 PowerKeeperBinderClient.queryKernelFreezer() ?: RootHelper.KernelFreezer.UNKNOWN
@@ -174,7 +178,25 @@ fun HomeScreenMiuix(
             show = true,
             runtimeStatus = runtimeStatus,
             kernelFreezer = kernelFreezer,
-            onRefresh = onRefresh,
+            frameworkState = frameworkState,
+            onRequestScope = {
+                XposedPrefsBridge.requestMissingScopes { _, message ->
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    onRefresh()
+                }
+            },
+            onHotReloadStale = {
+                XposedPrefsBridge.hotReloadStaleTargets { _, _, summary ->
+                    Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
+                    onRefresh()
+                }
+            },
+            onRefresh = {
+                scope.launch(Dispatchers.IO) {
+                    XposedPrefsBridge.refreshFrameworkState()
+                }
+                onRefresh()
+            },
             onDismiss = { showHookCheckDialog = false }
         )
     }

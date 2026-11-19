@@ -47,10 +47,44 @@ object Logger {
     }
 
     /** 单线程异步 IO Handler，避免在 Hook 回调中阻塞宿主线程 */
-    private val ioHandler: Handler by lazy {
-        val thread = HandlerThread("XMillet-LogIo", Process.THREAD_PRIORITY_BACKGROUND)
-        thread.start()
-        Handler(thread.looper)
+    private val ioLock = Any()
+
+    @Volatile
+    private var ioThread: HandlerThread? = null
+
+    @Volatile
+    private var ioHandler: Handler? = null
+
+    @Volatile
+    private var hotReloading: Boolean = false
+
+    private fun ensureIoHandler(): Handler? {
+        if (hotReloading) return null
+        ioHandler?.let { return it }
+        synchronized(ioLock) {
+            if (hotReloading) return null
+            ioHandler?.let { return it }
+            val thread = HandlerThread("XMillet-LogIo", Process.THREAD_PRIORITY_BACKGROUND)
+            thread.start()
+            val handler = Handler(thread.looper)
+            ioThread = thread
+            ioHandler = handler
+            return handler
+        }
+    }
+
+    /**
+     * 热重载卸载前安全退出日志 IO 线程，排空已有任务且不再接收新异步投递。
+     */
+    fun onHotReloading() {
+        val thread: HandlerThread?
+        synchronized(ioLock) {
+            hotReloading = true
+            ioHandler = null
+            thread = ioThread
+            ioThread = null
+        }
+        thread?.quitSafely()
     }
 
     private fun currentSnapshot(): PrefsSnapshot {
@@ -186,8 +220,9 @@ object Logger {
      * 后台单线程异步任务投递入口（供 `/proc` 读取、文件落盘等非阻塞操作复用）。
      */
     fun postIoTask(task: () -> Unit) {
+        val handler = ensureIoHandler() ?: return
         try {
-            ioHandler.post {
+            handler.post {
                 try {
                     task()
                 } catch (t: Throwable) {

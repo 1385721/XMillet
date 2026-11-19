@@ -72,6 +72,7 @@ object MilletIpcContract {
     private const val PREFIX_QUERY_UNFROZEN = "?unfrozen\t"
     private const val PREFIX_RESPONSE_UNFROZEN = "!unfrozen\t"
     const val MSG_IS_UPDATE = "isUpdate"
+    const val MSG_REBIND_SYSTEM_BINDER = "__xmillet_rebind_system_binder__"
 
     /**
      * 编码「查询某包为什么没被冻结」请求消息（system_server -> powerkeeper）。

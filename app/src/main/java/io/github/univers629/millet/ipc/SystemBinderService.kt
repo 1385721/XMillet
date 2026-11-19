@@ -112,7 +112,7 @@ class SystemBinderService : Binder() {
 
                 MilletIpcContract.TX_TRIGGER_INIT_CHECK -> {
                     data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-                    reloadHandler.post {
+                    postReloadTask {
                         BroadcastAndDozeHooks.applyStartupSync()
                     }
                     reply?.writeNoException()
@@ -296,7 +296,7 @@ class SystemBinderService : Binder() {
             return
         }
         if (clientName == MilletIpcContract.CLIENT_POWER_KEEPER && SystemState.isGreezeReady) {
-            reloadHandler.post {
+            postReloadTask {
                 BroadcastAndDozeHooks.applyStartupSync()
             }
         }
@@ -329,9 +329,9 @@ class SystemBinderService : Binder() {
 
     private fun handlePrefChanged(changedKey: String) {
         // 1. 延迟 200ms 在 system_server 单线程 Handler 上重载对应配置组（等待文件落盘完成）
-        reloadHandler.postDelayed({
+        postReloadTask(200L) {
             PrefReader.reloadSystemByKey(changedKey)
-        }, 200L)
+        }
 
         // 2. 转发给 com.miui.powerkeeper 客户端同步重载
         sendToClient(MilletIpcContract.CLIENT_POWER_KEEPER, changedKey)
@@ -357,34 +357,72 @@ class SystemBinderService : Binder() {
         private var activeService: SystemBinderService? = null
 
         /**
-         * 导出 powerkeeper 的注册信息，供热重载时跨代传递。
+         * 导出已连接的客户端注册信息，供热重载时跨代传递。
          *
          * 热重载会换掉模块的类加载器，连带 `clientCallbacks` 一起清空；而 powerkeeper 往往在
          * 新一代装好之前已完成握手（相差约 50ms），于是它报的账本还在，但连接已断开。
          * 这里只填框架类型（IBinder / String），不携带任何模块类加载器创建的实例。
          */
         fun exportRegistrationSnapshot(): Array<Any?>? {
-            val callback = clientCallbacks[MilletIpcContract.CLIENT_POWER_KEEPER]?.binder ?: return null
-            return arrayOf(callback, powerKeeperHooksReport, powerKeeperCapsReport, powerKeeperCloudLists)
+            val pkCallback = clientCallbacks[MilletIpcContract.CLIENT_POWER_KEEPER]?.binder
+            val appCallback = clientCallbacks[MilletIpcContract.CLIENT_XMILLET_APP]?.binder
+            if (pkCallback == null && appCallback == null) return null
+            return arrayOf(pkCallback, powerKeeperHooksReport, powerKeeperCapsReport, powerKeeperCloudLists, appCallback)
         }
 
-        /** 把上一代导出的注册信息装回新一代；回调已失效就丢掉，等 powerkeeper 自己重连。 */
+        /**
+         * 把上一代导出的注册信息装回新一代，并通知仍持有旧代 `SystemBinderService` 代理的客户端
+         * 重新通过 S1 握手绑定新一代 Binder，确保旧代 Binder 与 ClassLoader 可以被 GC 回收。
+         */
         fun restoreRegistrationSnapshot(snapshot: Array<*>?) {
             if (snapshot == null) return
-            val callback = snapshot.getOrNull(0) as? IBinder ?: return
-            val alive = runCatching { callback.isBinderAlive }.getOrDefault(false)
-            if (!alive) {
-                Logger.alwaysWarn("XMillet 热重载：powerkeeper 回调已失效，等它重新注册")
-                return
+            val service = activeService ?: return
+
+            val pkCallback = snapshot.getOrNull(0) as? IBinder
+            if (pkCallback != null) {
+                val alive = runCatching { pkCallback.isBinderAlive }.getOrDefault(false)
+                if (!alive) {
+                    Logger.alwaysWarn("XMillet 热重载：powerkeeper 回调已失效，等它重新注册")
+                } else {
+                    service.registerClient(
+                        pkCallback,
+                        MilletIpcContract.CLIENT_POWER_KEEPER,
+                        snapshot.getOrNull(1) as? String,
+                        snapshot.getOrNull(2) as? String,
+                        snapshot.getOrNull(3) as? String
+                    )
+                    sendToClient(MilletIpcContract.CLIENT_POWER_KEEPER, MilletIpcContract.MSG_REBIND_SYSTEM_BINDER)
+                    Logger.alwaysWarn("XMillet 热重载：已恢复 powerkeeper 注册并下发重绑通知")
+                }
             }
-            activeService?.registerClient(
-                callback,
-                MilletIpcContract.CLIENT_POWER_KEEPER,
-                snapshot.getOrNull(1) as? String,
-                snapshot.getOrNull(2) as? String,
-                snapshot.getOrNull(3) as? String
-            )
-            Logger.alwaysWarn("XMillet 热重载：已恢复 powerkeeper 注册")
+
+            val appCallback = snapshot.getOrNull(4) as? IBinder
+            if (appCallback != null && runCatching { appCallback.isBinderAlive }.getOrDefault(false)) {
+                service.registerClient(appCallback, MilletIpcContract.CLIENT_XMILLET_APP)
+                sendToClient(MilletIpcContract.CLIENT_XMILLET_APP, MilletIpcContract.MSG_REBIND_SYSTEM_BINDER)
+            }
+        }
+
+        /**
+         * 热重载卸载前解除全部客户端 DeathRecipient 绑定、清空频道映射并退出后台线程。
+         */
+        fun onHotReloading() {
+            isShuttingDown = true
+            activeService = null
+            binderMap.clear()
+            for (key in clientCallbacks.keys.toList()) {
+                val removed = clientCallbacks.remove(key) ?: continue
+                runCatching { removed.binder.unlinkToDeath(removed.deathRecipient, 0) }
+            }
+            clearPowerKeeperReports()
+            val thread: HandlerThread?
+            synchronized(reloadThreadLock) {
+                reloadHandlerInstance?.removeCallbacksAndMessages(null)
+                reloadHandlerInstance = null
+                thread = reloadThread
+                reloadThread = null
+            }
+            thread?.quitSafely()
         }
 
         /** 存放 system_server 暴露给外部进程的 Binder 表（由 S1 塞入返回 Intent 的 extras） */
@@ -434,10 +472,39 @@ class SystemBinderService : Binder() {
         @Volatile
         private var powerKeeperCloudLists: String = ""
 
-        private val reloadHandler: Handler by lazy {
-            val thread = HandlerThread("XMillet-PrefReload", Process.THREAD_PRIORITY_BACKGROUND)
-            thread.start()
-            Handler(thread.looper)
+        private val reloadThreadLock = Any()
+
+        @Volatile
+        private var reloadThread: HandlerThread? = null
+
+        @Volatile
+        private var reloadHandlerInstance: Handler? = null
+
+        @Volatile
+        private var isShuttingDown: Boolean = false
+
+        private fun ensureReloadHandler(): Handler? {
+            if (isShuttingDown) return null
+            reloadHandlerInstance?.let { return it }
+            synchronized(reloadThreadLock) {
+                if (isShuttingDown) return null
+                reloadHandlerInstance?.let { return it }
+                val thread = HandlerThread("XMillet-PrefReload", Process.THREAD_PRIORITY_BACKGROUND)
+                thread.start()
+                val handler = Handler(thread.looper)
+                reloadThread = thread
+                reloadHandlerInstance = handler
+                return handler
+            }
+        }
+
+        private fun postReloadTask(delayMs: Long = 0L, block: () -> Unit) {
+            val handler = ensureReloadHandler() ?: return
+            if (delayMs > 0L) {
+                handler.postDelayed(block, delayMs)
+            } else {
+                handler.post(block)
+            }
         }
 
         /**
@@ -459,8 +526,8 @@ class SystemBinderService : Binder() {
             if (whiteApps.isEmpty()) return
             val present = NoRestrictSync.split(incomingSnapshot)
             if (whiteApps.all { it in present }) return
-            reloadHandler.post {
-                val ctx = SystemState.systemContext ?: return@post
+            postReloadTask {
+                val ctx = SystemState.systemContext ?: return@postReloadTask
                 val latestWhiteApps = PrefReader.activePrefs().whiteAppSet
                 if (NoRestrictSync.sync(ctx, latestWhiteApps)) {
                     noRestrictAppsSnapshot = NoRestrictSync.readSystemList(ctx).joinToString(", ")

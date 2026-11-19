@@ -43,6 +43,15 @@ object LsposedHelper {
     }.getOrDefault(false)
 
     /**
+     * 通过 `XposedService.getScope()` 判断框架作用域里是否已同时勾选系统框架与电量与性能。
+     */
+    fun hasExpectedScope(frameworkState: XposedPrefsBridge.XposedFrameworkState): Boolean {
+        return frameworkState.isServiceConnected &&
+            frameworkState.hasSystemScope &&
+            frameworkState.hasPowerKeeperScope
+    }
+
+    /**
      * 拉起 LSPosed 寄生管理器的模块列表页。
      *
      * @return true 表示已发出触发请求；框架未安装时系统不会给出可判定结果，因此不做存在性断言

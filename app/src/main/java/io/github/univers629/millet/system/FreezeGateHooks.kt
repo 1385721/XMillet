@@ -182,6 +182,7 @@ object FreezeGateHooks {
         NONE,
         WHITE_LIST,
         DEFAULT_IME,
+        ACCESSIBILITY_SERVICE,
         FOREGROUND_SERVICE
     }
 
@@ -196,6 +197,9 @@ object FreezeGateHooks {
         if (ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, prefs)) {
             return FreezeExemption.DEFAULT_IME
         }
+        if (ActiveImeTracker.isProtectedAccessibilityApp(SystemState.systemContext, pkg, prefs)) {
+            return FreezeExemption.ACCESSIBILITY_SERVICE
+        }
         if (checkFgs &&
             pkg !in prefs.forceFreezeSet &&
             pkg in prefs.notFreezeWhenHasFgsSet &&
@@ -206,11 +210,30 @@ object FreezeGateHooks {
         return FreezeExemption.NONE
     }
 
-    private fun isImeThawProtected(pkg: String?, prefs: PrefsSnapshot): Boolean =
+    private fun isSystemServiceThawProtected(pkg: String?, prefs: PrefsSnapshot): Boolean =
         pkg != null &&
             pkg !in prefs.blockThawSet &&
             pkg !in prefs.ignoreNetworkWakeSet &&
-            ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, prefs)
+            ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs)
+
+    /**
+     * 亮屏解冻豁免判断：
+     * - 核心系统 UID（`< 10000`）与用户「免冻白名单 (`whiteAppSet`)」始终随亮屏放行；
+     * - 当前正位于屏幕前台/可见的应用（含 `Activity Start` 记账与实时 `AMS` 前台兜底）放行；
+     * - 系统默认输入法、已启用的无障碍服务以及拥有活跃前台服务的 `notFreezeWhenHasFgsSet` 应用放行。
+     */
+    private fun isScreenOnThawExempt(uid: Int, pkg: String?, prefs: PrefsSnapshot): Boolean {
+        if (uid in 0 until 10000) return true
+        if (pkg.isNullOrEmpty()) return false
+        if (pkg in prefs.whiteAppSet) return true
+        if (SystemState.isPackageCurrentlyForeground(pkg)) return true
+        if (pkg in prefs.blockThawSet || pkg in prefs.ignoreNetworkWakeSet) return false
+        if (ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs)) return true
+        return uid >= 10000 &&
+            pkg !in prefs.forceFreezeSet &&
+            pkg in prefs.notFreezeWhenHasFgsSet &&
+            SystemState.checkAppFgService(uid)
+    }
 
     /**
      * S6（PA(5)）：GreezeManagerService#freezeUids(int[], long, int, String, boolean)
@@ -242,7 +265,10 @@ object FreezeGateHooks {
                 val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
                 if (exemption != FreezeExemption.NONE) {
                     blocked = true
-                    if (prefs.freezeStats && uid >= 10000 && exemption != FreezeExemption.DEFAULT_IME) {
+                    if (prefs.freezeStats && uid >= 10000 &&
+                        exemption != FreezeExemption.DEFAULT_IME &&
+                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE
+                    ) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
                     Logger.info("freezeUids 跳过受保护应用[$exemption]: $pkg uid=$uid reason=$reason")
@@ -377,6 +403,10 @@ object FreezeGateHooks {
                     Logger.info("FAH判断:${pkg}为当前默认输入法，免予冻结")
                     param.blockSafely()
                 }
+                FreezeExemption.ACCESSIBILITY_SERVICE -> {
+                    Logger.info("FAH判断:${pkg}为已启用无障碍服务，免予冻结")
+                    param.blockSafely()
+                }
                 FreezeExemption.FOREGROUND_SERVICE -> {
                     if (prefs.freezeStats && uid >= 10000) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
@@ -437,7 +467,7 @@ object FreezeGateHooks {
                     }
                 }
                 param.blockSafely()
-            } else if (exemption == FreezeExemption.DEFAULT_IME) {
+            } else if (exemption == FreezeExemption.DEFAULT_IME || exemption == FreezeExemption.ACCESSIBILITY_SERVICE) {
                 param.blockSafely()
             }
         }
@@ -592,8 +622,8 @@ object FreezeGateHooks {
                 SystemState.lastToFrontPackage = pkg
             }
 
-            // 亮屏时恢复前台最后交互应用，或该 UID 当前本来就处于未冻结态 -> 直接放行
-            if (isScreenOnThawReason(reason) && SystemState.lastToFrontPackage == pkg) {
+            // 亮屏时恢复当前前台/白名单/系统关键服务，或该 UID 当前处于未冻结态 -> 直接放行
+            if (isScreenOnThawReason(reason) && isScreenOnThawExempt(uid, pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000 &&
                     !FreezeStatsRecorder.isDispatchThawEventActive &&
                     FreezeStatsRecorder.isUidTrackedFrozen(uid) &&
@@ -641,7 +671,7 @@ object FreezeGateHooks {
             // 插充电器这条路径在 OS1/OS2 上并不是 powerkeeper 的 MilletBrightHandler what=16，
             // 而是 Greezer 自己逐个 uid 调 thawUid(reason="battery charging")，所以只挂 P10 拦不住，
             // 必须在闸门这里一并拒掉，否则「禁止插电时全量解冻」在旧版本上等于没开。
-            if (prefs.disableCharge && isChargeThawReason(reason) && !isImeThawProtected(pkg, prefs)) {
+            if (prefs.disableCharge && isChargeThawReason(reason) && !isSystemServiceThawProtected(pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000) {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_CHARGE_THAW, reason, pkg)
                 }
@@ -650,9 +680,8 @@ object FreezeGateHooks {
                 return@HookSpec
             }
 
-            // 规则 2.7：可选「亮屏时保持冻结」——只拦 screen on，
-            // 前台拉起（activity start / toFront）等其余合法理由及默认输入法照常放行。
-            if (prefs.disableScreenOnThaw && isScreenOnThawReason(reason) && !isImeThawProtected(pkg, prefs)) {
+            // 规则 2.7：可选「亮屏时保持冻结」——豁免对象已提前放行，仅拦普通后台的 screen on。
+            if (prefs.disableScreenOnThaw && isScreenOnThawReason(reason)) {
                 if (prefs.freezeStats && uid >= 10000) {
                     FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_SCREEN_ON_THAW, reason, pkg)
                 }
@@ -661,8 +690,8 @@ object FreezeGateHooks {
                 return@HookSpec
             }
 
-            // 规则 3：未勾选「强力压制」(blockThawSet)，或者默认输入法/合法解冻理由白名单 -> 放行
-            if (pkg !in prefs.blockThawSet || isAllowedThawReason(reason) || isImeThawProtected(pkg, prefs)) {
+            // 规则 3：未勾选「强力压制」(blockThawSet)，或者默认输入法/无障碍服务/合法解冻理由白名单 -> 放行
+            if (pkg !in prefs.blockThawSet || isAllowedThawReason(reason) || isSystemServiceThawProtected(pkg, prefs)) {
                 if (prefs.freezeStats && uid >= 10000 && !FreezeStatsRecorder.isDispatchThawEventActive) {
                     FreezeStatsRecorder.recordThaw(uid, reason, pkg)
                 }
@@ -736,16 +765,12 @@ object FreezeGateHooks {
             val kept = ArrayList<Int>(uids.size)
             for (uid in uids) {
                 val pkg = SystemState.getPackageNameForUid(uid)
-                val imeProtected = isImeThawProtected(pkg, prefs)
-                val interceptRule: InterceptRule? = if (pkg != null && !imeProtected) {
-                    when {
-                        chargeThaw -> InterceptRule.NO_CHARGE_THAW
-                        screenOnThaw && pkg != SystemState.lastToFrontPackage -> InterceptRule.NO_SCREEN_ON_THAW
-                        networkThaw && pkg in ignoreSet -> InterceptRule.IGNORE_NETWORK
-                        else -> null
-                    }
-                } else {
-                    null
+                val sysServiceProtected = isSystemServiceThawProtected(pkg, prefs)
+                val interceptRule: InterceptRule? = when {
+                    chargeThaw && pkg != null && !sysServiceProtected -> InterceptRule.NO_CHARGE_THAW
+                    screenOnThaw && !isScreenOnThawExempt(uid, pkg, prefs) -> InterceptRule.NO_SCREEN_ON_THAW
+                    networkThaw && pkg != null && !sysServiceProtected && pkg in ignoreSet -> InterceptRule.IGNORE_NETWORK
+                    else -> null
                 }
                 if (interceptRule != null) {
                     blocked = true
@@ -832,7 +857,10 @@ object FreezeGateHooks {
                 val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
                 if (exemption != FreezeExemption.NONE) {
                     blocked = true
-                    if (prefs.freezeStats && uid >= 10000 && exemption != FreezeExemption.DEFAULT_IME) {
+                    if (prefs.freezeStats && uid >= 10000 &&
+                        exemption != FreezeExemption.DEFAULT_IME &&
+                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE
+                    ) {
                         val seen = protectedUids ?: HashSet<Int>().also { protectedUids = it }
                         if (seen.add(uid)) {
                             val r = protectReason ?: (
@@ -1053,9 +1081,10 @@ object FreezeGateHooks {
             val screenOnThaw = prefs.disableScreenOnThaw && isScreenOnThawReason(reason)
             if (!chargeThaw && !screenOnThaw) return@HookSpec
             val uid = param.args.filterIsInstance<Int>()
-                .firstOrNull { it >= 10000 } ?: -1
+                .firstOrNull { it >= 0 } ?: -1
             val pkg = if (uid >= 0) SystemState.getPackageNameForUid(uid) else null
-            if (isImeThawProtected(pkg, prefs)) return@HookSpec
+            if (chargeThaw && isSystemServiceThawProtected(pkg, prefs)) return@HookSpec
+            if (screenOnThaw && isScreenOnThawExempt(uid, pkg, prefs)) return@HookSpec
             if (prefs.freezeStats && uid >= 10000) {
                 val rule = if (chargeThaw) InterceptRule.NO_CHARGE_THAW else InterceptRule.NO_SCREEN_ON_THAW
                 FreezeStatsRecorder.recordIntercept(uid, rule, reason, pkg)
@@ -1070,8 +1099,8 @@ object FreezeGateHooks {
      * S27: GreezeManagerService#thawAll
      *
      * 真正的「全量解冻」入口（开机完成、插电、切换省电模式时会被调用）。
-     * 只拦充电理由：其它理由（开机、用户操作）必须原样放行，否则会把系统自己的
-     * 恢复流程一起掐掉。
+     * 当因「亮屏保持冻结」拦下全量 `screen on` 时，同步扫一遍已冻结 UID，
+     * 把前台应用 / 白名单 / 默认输入法 / 已启用无障碍服务逐个保底唤醒。
      */
     fun buildS27ThawAllHook(): HookSpec = HookSpec(
         id = "S27",
@@ -1100,8 +1129,24 @@ object FreezeGateHooks {
             val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
             Logger.warn("--系统[解冻uid]:$label(thawAll),拒绝[$reason]全量解冻")
             param.blockSafely()
+            if (screenOnThaw) {
+                thawScreenOnExemptedUidsAsync(reason, prefs)
+            }
         }
     )
+
+    private fun thawScreenOnExemptedUidsAsync(reason: String, prefs: PrefsSnapshot) {
+        val greeze = SystemState.greezeService ?: return
+        Logger.postIoTask {
+            val frozenUids = SystemState.getFrozenUidsArray()
+            for (uid in frozenUids) {
+                val pkg = SystemState.getPackageNameForUid(uid)
+                if (isScreenOnThawExempt(uid, pkg, prefs)) {
+                    runCatching { XReflect.callMethod(greeze, "thawUid", uid, 1000, reason) }
+                }
+            }
+        }
+    }
 
     /**
      * S22: ProcessManager#kill(ProcessConfig)

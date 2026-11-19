@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.univers629.millet"
         minSdk = 33
         targetSdk = 34
-        versionCode = 1100
-        versionName = "1.1.0"
+        versionCode = 1210
+        versionName = "1.2.1"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -38,6 +38,17 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    packaging {
+        resources {
+            merges += "META-INF/xposed/*"
+        }
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = false
     }
 }
 

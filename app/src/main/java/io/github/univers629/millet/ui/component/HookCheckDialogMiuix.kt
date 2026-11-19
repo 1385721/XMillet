@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.VersionGate
+import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.HookCoverage
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -91,7 +92,8 @@ data class HookDiagnosticEntry(
  */
 fun generateHookDiagnostics(
     runtimeStatus: PowerKeeperBinderClient.RuntimeStatusSnapshot,
-    kernelFreezer: RootHelper.KernelFreezer = RootHelper.KernelFreezer.UNKNOWN
+    kernelFreezer: RootHelper.KernelFreezer = RootHelper.KernelFreezer.UNKNOWN,
+    frameworkState: XposedPrefsBridge.XposedFrameworkState = XposedPrefsBridge.XposedFrameworkState()
 ): List<HookDiagnosticEntry> {
     val entries = ArrayList<HookDiagnosticEntry>()
     val coverage = runtimeStatus.hookCoverage
@@ -121,6 +123,52 @@ fun generateHookDiagnostics(
         )
     )
 
+    // 0.5 LibXposed 框架服务能力、作用域与热重载状态
+    if (frameworkState.isServiceConnected) {
+        val missingScopes = frameworkState.missingScopes
+        val staleTargets = frameworkState.staleTargets
+        val fwLevel = when {
+            !frameworkState.supportsRemotePrefs -> HookDiagnosticLevel.FAILED
+            missingScopes.isNotEmpty() || staleTargets.isNotEmpty() -> HookDiagnosticLevel.WARNING
+            else -> HookDiagnosticLevel.PASSED
+        }
+        val capsSummary = buildString {
+            append("${frameworkState.frameworkName} ${frameworkState.frameworkVersion} (API ${frameworkState.apiVersion})")
+            append(" | 远程配置=${if (frameworkState.supportsRemotePrefs) "支持" else "不支持"}")
+            append(", 系统作用域=${if (frameworkState.supportsSystemHook) "支持" else "不支持"}")
+            append(", 作用域=${if (frameworkState.scope.isEmpty()) "空" else frameworkState.scope.joinToString(",")}")
+            if (frameworkState.runningTargets.isNotEmpty()) {
+                val targetDesc = frameworkState.runningTargets.joinToString(", ") { t ->
+                    "${t.processName}:${t.state.name}(v${t.loadedVersionCode})"
+                }
+                append(" | 目标状态: $targetDesc")
+            }
+        }
+        val fwSuggestion = when {
+            !frameworkState.supportsRemotePrefs -> "当前 Xposed 框架未开启 PROP_CAP_REMOTE，无法下发 RemotePreferences 设置"
+            missingScopes.isNotEmpty() -> "作用域缺少 ${missingScopes.joinToString("、")}，可点击下方「授权作用域」"
+            staleTargets.isNotEmpty() -> "检测到 ${staleTargets.size} 个目标进程仍运行旧代代码，可点击下方「热重载」无需重启更新"
+            else -> null
+        }
+        entries.add(
+            HookDiagnosticEntry(
+                id = "libxposed_service",
+                title = "LibXposed 框架服务",
+                targetClassOrMethod = "XposedService (API ${frameworkState.apiVersion})",
+                level = fwLevel,
+                summaryText = when {
+                    !frameworkState.supportsRemotePrefs -> "缺少远程配置能力"
+                    missingScopes.isNotEmpty() -> "作用域缺失 ${missingScopes.size} 项"
+                    staleTargets.isNotEmpty() -> "${staleTargets.size} 个进程待热重载"
+                    else -> "能力与作用域正常"
+                },
+                detailText = capsSummary,
+                suggestion = fwSuggestion,
+                optional = fwLevel != HookDiagnosticLevel.FAILED
+            )
+        )
+    }
+
     // 1. System Server 核心服务
     val sysLevel = when {
         runtimeStatus.binderAlive && runtimeStatus.greezeReady -> HookDiagnosticLevel.PASSED
@@ -141,9 +189,19 @@ fun generateHookDiagnostics(
             detailText = when (sysLevel) {
                 HookDiagnosticLevel.PASSED -> "已成功拦截 AMS 广播注册链路并挂载 SystemBinderService，核心逻辑全部就绪。"
                 HookDiagnosticLevel.WARNING -> "SystemBinderService 已就绪并建立通信通道，正在等待系统 Greeze 服务完成初始化。"
-                HookDiagnosticLevel.FAILED -> "无法连接至 system_server。请检查 LSPosed 中是否已勾选 XMillet 的「系统框架 (system)」作用域并重启系统。"
+                HookDiagnosticLevel.FAILED -> if (frameworkState.isServiceConnected && !frameworkState.hasSystemScope) {
+                    "XposedService 报告作用域尚未勾选「system（系统框架）」。请先授权作用域并重启系统。"
+                } else {
+                    "无法连接至 system_server。请检查 LSPosed 中是否已勾选 XMillet 的「系统框架 (system)」作用域并重启系统。"
+                }
             },
-            suggestion = if (sysLevel == HookDiagnosticLevel.FAILED) "请在 LSPosed 作用域中确认勾选「系统框架」" else null
+            suggestion = if (sysLevel == HookDiagnosticLevel.FAILED) {
+                if (frameworkState.isServiceConnected && !frameworkState.hasSystemScope) {
+                    "可点击下方「授权作用域」后重启系统"
+                } else {
+                    "请在 LSPosed 作用域中确认勾选「系统框架」"
+                }
+            } else null
         )
     )
 
@@ -184,19 +242,27 @@ fun generateHookDiagnostics(
                     else ->
                         "已与「电量与性能」建立双向 Binder 回调；具体接管了哪些点位见下方安装点覆盖。"
                 }
-                HookDiagnosticLevel.WARNING ->
+                HookDiagnosticLevel.WARNING -> if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
+                    "XposedService 报告作用域尚未勾选「com.miui.powerkeeper」，授权后强行停止电量与性能即可接入。"
+                } else {
                     "系统服务已就绪，但「电量与性能」尚未完成双向 Binder 回调注册。亮灭屏一次或强行停止电量与性能即可自动握手。"
+                }
                 HookDiagnosticLevel.FAILED ->
                     "未能连接至 com.miui.powerkeeper。请在 LSPosed 中确认勾选「电量与性能」作用域。"
             },
             suggestion = when (pkLevel) {
-                HookDiagnosticLevel.WARNING -> "请按电源键灭屏并亮屏一次，或在设置中结束「电量与性能」"
+                HookDiagnosticLevel.WARNING -> if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
+                    "可点击下方「授权作用域」"
+                } else {
+                    "请按电源键灭屏并亮屏一次，或在设置中结束「电量与性能」"
+                }
                 HookDiagnosticLevel.FAILED -> "请在 LSPosed 作用域中勾选「电量与性能」"
                 else -> null
             },
             // 系统服务已就绪、只是 powerkeeper 还没被拉起完成握手时，属于可选能力，
-            // 不计入就绪度：它自己会在下一次亮灭屏或推送时补上。
-            optional = pkLevel == HookDiagnosticLevel.WARNING
+            // 不计入就绪度：该项在下一次亮灭屏或推送时补齐；作用域明确未勾选时计入失败/待修。
+            optional = pkLevel == HookDiagnosticLevel.WARNING &&
+                (!frameworkState.isServiceConnected || frameworkState.hasPowerKeeperScope)
         )
     )
 
@@ -393,6 +459,9 @@ fun HookCheckDialogMiuix(
     show: Boolean,
     runtimeStatus: PowerKeeperBinderClient.RuntimeStatusSnapshot,
     kernelFreezer: RootHelper.KernelFreezer = RootHelper.KernelFreezer.UNKNOWN,
+    frameworkState: XposedPrefsBridge.XposedFrameworkState = XposedPrefsBridge.XposedFrameworkState(),
+    onRequestScope: (() -> Unit)? = null,
+    onHotReloadStale: (() -> Unit)? = null,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -407,8 +476,8 @@ fun HookCheckDialogMiuix(
     } else {
         (screenHeight * 0.68f).coerceIn(260.dp, 620.dp)
     }
-    val diagnostics = remember(runtimeStatus, kernelFreezer) {
-        generateHookDiagnostics(runtimeStatus, kernelFreezer)
+    val diagnostics = remember(runtimeStatus, kernelFreezer, frameworkState) {
+        generateHookDiagnostics(runtimeStatus, kernelFreezer, frameworkState)
     }
     // 可选项（可选能力）不参与就绪度统计，避免开机瞬间电源管理未拉起时整页变黄。
     val requiredDiagnostics = diagnostics.filterNot { it.optional }
@@ -457,6 +526,37 @@ fun HookCheckDialogMiuix(
                 }
 
                 Spacer(Modifier.height(14.dp))
+
+                // 2.5 按需显示 LibXposed 快捷修复操作（缺失作用域授权 / 过期目标进程热重载）
+                val showRequestScopeAction = onRequestScope != null &&
+                    frameworkState.isServiceConnected &&
+                    frameworkState.missingScopes.isNotEmpty()
+                val showHotReloadAction = onHotReloadStale != null &&
+                    frameworkState.isServiceConnected &&
+                    frameworkState.staleTargets.isNotEmpty()
+                if (showRequestScopeAction || showHotReloadAction) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (showRequestScopeAction) {
+                            TextButton(
+                                text = "授权作用域",
+                                onClick = onRequestScope,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (showHotReloadAction) {
+                            TextButton(
+                                text = "热重载 (${frameworkState.staleTargets.size})",
+                                onClick = onHotReloadStale,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
 
                 // 3. 底部操作栏
                 Row(

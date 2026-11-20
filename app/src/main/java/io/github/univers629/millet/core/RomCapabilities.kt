@@ -145,7 +145,9 @@ object RomCapabilities {
     fun describeHost(context: Context?, loader: ClassLoader?): String {
         val sb = StringBuilder("宿主能力: ")
         sb.append("SDK=").append(VersionGate.sdkInt)
-        val rom = VersionGate.miOsVersionName.takeIf { it.isNotBlank() } ?: "unknown"
+        val rom = VersionGate.miOsVersionName.takeIf { it.isNotBlank() }
+            ?: VersionGate.miuiVersionName.takeIf { it.isNotBlank() }
+            ?: "unknown"
         sb.append(", ROM=").append(rom)
         if (context != null) {
             val version = runCatching {

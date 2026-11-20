@@ -28,7 +28,7 @@ import io.github.univers629.millet.ipc.PowerKeeperBinderClient
  * - P1 : PowerKeeperApplication#onCreate() (before) —— 建立跨进程 Binder 双向链路
  * - P2 : MilletPolicy#<init>(Context) (after) —— 捕获实例、清 musicApp、union 重放 6 张内部白名单
  * - P3 : MilletPolicy#dealCloudWhiteList() (replace) —— 整方法替换直接返回 null（云白名单第一刀）
- * - P4 : MilletPolicy#onCloudWhiteListChanged() (before, 仅 OS1.0) —— 置 null 拦截热更新（云白名单第二刀）
+ * - P4 : MilletPolicy#onCloudWhiteListChanged() (before, 仅 OS1.0 / MIUI 14) —— 拦截云白名单热更新
  * - P5 : MilletPolicy#dealNoRestrictApp() (after) —— 重放白名单 + 推送 MILLET_NO_RESTRICT_APP 给 system_server
  * - P6 : MilletPolicy#dealSleepModeWhiteList(List, boolean) (before) —— 无条件置 null（真机与 PA:111 实为 MilletPolicy）
  * - P7 : CommonAdapter#addPowerSaveWhitelistApps(IDeviceIdleController, String[]) (before) —— 只拦不改
@@ -276,7 +276,7 @@ object PowerKeeperHooks {
 
     /**
      * P4（FreezeDecision(1)）：MilletPolicy#onCloudWhiteListChanged()
-     * 【云白名单第二刀】：仅在 HyperOS 1.0（`ro.mi.os.version.name == "OS1.0"`）安装，拦截运行期云控热更新回调。
+     * 仅在澎湃 OS1.0 与 MIUI 14 通过版本门控；目标方法存在时拦截运行期云控热更新回调。
      */
     private fun buildP4OnCloudWhiteListChangedHook(): HookSpec = HookSpec(
         id = "P4",
@@ -285,7 +285,7 @@ object PowerKeeperHooks {
         methodName = "onCloudWhiteListChanged",
         paramTypes = emptyList(),
         mode = HookMode.BEFORE,
-        gate = { VersionGate.isHyperOs1 },
+        gate = { VersionGate.isLegacyMilletStack },
         before = { param ->
             Logger.alwaysInfo("拦截云名单变化")
             param.result = null

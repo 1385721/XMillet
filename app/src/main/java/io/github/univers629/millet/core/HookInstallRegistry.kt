@@ -20,7 +20,7 @@ object HookInstallRegistry {
         /** 本 ROM 版本没有该目标类/方法，按能力矩阵跳过 */
         SKIPPED_UNSUPPORTED,
 
-        /** 目标存在，但版本门控（例如仅 OS1.0 生效）不满足 */
+        /** 目标存在，但版本门控（例如仅在 OS1.0 / MIUI 14 安装）不满足 */
         SKIPPED_GATED,
 
         /** 目标存在且门控通过，但安装时抛异常 */

@@ -104,7 +104,7 @@ fun generateHookDiagnostics(
         HookDiagnosticEntry(
             id = "run_env",
             title = "运行环境",
-            targetClassOrMethod = "ro.mi.os.version.name",
+            targetClassOrMethod = "ro.mi.os.version.name / ro.miui.ui.version.name",
             level = if (VersionGate.romTier == null) {
                 HookDiagnosticLevel.WARNING
             } else {
@@ -112,13 +112,17 @@ fun generateHookDiagnostics(
             },
             summaryText = VersionGate.describeRom(),
             detailText = when (VersionGate.romTier) {
+                VersionGate.RomTier.MIUI14 ->
+                    "MIUI 14 按旧版 Millet 路径适配，P4 云名单热更新 Hook 使用与澎湃 OS1 相同的版本门控。" +
+                        "双开相关 notifyExcuteServices 与 updateTargetList Hook 按宿主方法和能力条件安装；" +
+                        "各点位的安装结果见覆盖情况。"
                 VersionGate.RomTier.OS1, VersionGate.RomTier.OS2 ->
                     "澎湃 OS 早期版本保留 com.miui.powerkeeper.millet 子系统，云控白名单、灭屏清理与无限制名单均在该子系统内接管。"
                 VersionGate.RomTier.OS3 ->
                     "澎湃 OS3 已移除 com.miui.powerkeeper.millet 与 com.miui.process 整块子系统，" +
                         "模块改用 KillProcessController 等新入口接管清理与冻结；缺失的旧点位属于版本差异，不是安装失败。"
                 null ->
-                    "未能读取 ro.mi.os.version.name，无法判断宿主是 OS1 / OS2 / OS3；下面的条目按运行时探测结果展示。"
+                    "未能读取 ro.mi.os.version.name 与 ro.miui.ui.version.name，无法判断宿主版本；下面的条目按运行时探测结果展示。"
             }
         )
     )

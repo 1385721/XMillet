@@ -25,38 +25,35 @@ object VersionGate {
     val androidRelease: String
         get() = Build.VERSION.RELEASE ?: "unknown"
 
-    /** 澎湃 OS 版本名称（如 "OS1.0"、"OS2.0"、"OS3.0"） */
+    /** 澎湃 OS 版本名称（如 "OS1.0"、"OS2.0"、"OS3.0"）；未定义时为空 */
     val miOsVersionName: String by lazy {
         getSystemProperty("ro.mi.os.version.name", "")
     }
 
-    /**
-     * P4（MilletPolicy#onCloudWhiteListChanged）安装门控：
-     * 原规格中 AbstractC0207.isSystemProcess() 实际判断 "OS1.0".equals(ro.mi.os.version.name)。
-     */
-    val isHyperOs1: Boolean
-        get() = "OS1.0" == miOsVersionName
+    /** MIUI 版本名称（如 "V140"、"V125"）；澎湃 OS 上同样有值，仅作 MIUI 14 的识别补充 */
+    val miuiVersionName: String by lazy {
+        getSystemProperty("ro.miui.ui.version.name", "")
+    }
 
-    /**
-     * 宿主 ROM 的版本档位，只区分澎湃 OS1 / OS2 / OS3。
-     *
-     * 各代的宿主子系统差异很大（OS1/OS2 有 `com.miui.powerkeeper.millet`，
-     * OS3 起整块移除），文案与诊断必须按档位区分，不能再用一套固定描述。
-     */
+    /** MIUI 14 判定：澎湃 OS 属性为空，且 MIUI 版本属性以 V14 开头。 */
+    val isMiui14: Boolean
+        get() = miOsVersionName.isBlank() && miuiVersionName.startsWith("V14", ignoreCase = true)
+
+    /** 宿主 ROM 的版本档位：MIUI 14 与澎湃 OS1 / OS2 / OS3。 */
     enum class RomTier(val major: Int) {
+        MIUI14(14),
         OS1(1),
         OS2(2),
         OS3(3)
     }
 
     /**
-     * 依据 `ro.mi.os.version.name` 判断档位。
-     *
-     * 读不到或格式不认识时返回 null：调用方必须按「不做假设」处理，
-     * 而不是把未知环境猜成某一代。
+     * 先按 `ro.miui.ui.version.name` 识别 MIUI 14，再按 `ro.mi.os.version.name` 识别澎湃 OS。
+     * 无法识别时返回 null。
      */
     val romTier: RomTier?
         get() {
+            if (isMiui14) return RomTier.MIUI14
             val osName = miOsVersionName
             if (!osName.startsWith("OS", ignoreCase = true)) return null
             val major = osName.substring(2).substringBefore('.').toIntOrNull() ?: return null
@@ -68,12 +65,22 @@ object VersionGate {
             }
         }
 
-    /** 形如 `澎湃 OS3.0 (Android 16 · SDK 36)` 的一行环境描述 */
+    /** MIUI 14 与澎湃 OS1 使用旧版 Millet 安装门控；目标成员由能力探测确认。 */
+    val isLegacyMilletStack: Boolean
+        get() = when (romTier) {
+            RomTier.MIUI14, RomTier.OS1 -> true
+            else -> false
+        }
+
+    /** 形如 `澎湃 OS3.0 (Android 16 · SDK 36)`、`MIUI 14 (Android 13 · SDK 33)` 的一行环境描述 */
     fun describeRom(): String {
-        val osLabel = miOsVersionName.takeIf { it.isNotBlank() }
-            ?.let { "澎湃 $it" }
-            ?: "未知 ROM"
-        return "$osLabel (Android $androidRelease · SDK $sdkInt)"
+        val romLabel = when {
+            isMiui14 -> "MIUI 14"
+            miOsVersionName.isNotBlank() -> "澎湃 $miOsVersionName"
+            miuiVersionName.isNotBlank() -> "MIUI $miuiVersionName"
+            else -> "未知 ROM"
+        }
+        return "$romLabel (Android $androidRelease · SDK $sdkInt)"
     }
 
     /**

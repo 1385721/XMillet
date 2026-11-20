@@ -28,7 +28,7 @@ enum class HookMode {
  * @property paramResolver 可选的运行期动态参数解析器（如 S5 ProcessErrorStateRecord#appNotResponding）
  * @property mode 拦截时机（BEFORE / AFTER / BEFORE_AND_AFTER / REPLACE）
  * @property priority 优先级（默认 50）
- * @property gate 安装期门控条件（默认恒真；如 S9/S10 按 SDK_INT、S16–S18 按 simplifyLog、P4 按 OS1.0）
+ * @property gate 安装期门控条件（默认恒真；如 S9/S10 按 SDK_INT、S16–S18 按 simplifyLog、P4 按 OS1.0 / MIUI 14）
  * @property successLog 安装成功后输出的日志文案（null 表示原规格无成功回执文案）
  * @property failureHint 安装失败时的补充告警文案
  * @property before 前置回调实现

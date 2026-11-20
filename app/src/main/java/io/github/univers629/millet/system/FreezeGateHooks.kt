@@ -1260,9 +1260,9 @@ object FreezeGateHooks {
     )
 
     /**
-     * S31（仅 OS1）：AurogonImmobulusMode#updateTargetList(int)
-     * OS1 无 `isUidValid` 方法，在此写死 `uid > 19999` 直接 return；放行后双开 UID 可纳入
-     * Aurogon `mImmobulusTargetList` 并参与 LaunchMode / 亮屏自动冻结。
+     * S31（OS1 / MIUI 14）：AurogonImmobulusMode#updateTargetList(int)
+     * 仅在目标类没有 `isUidValid` 时安装；启用双开冻结后，将双开 UID 加入
+     * Aurogon `mImmobulusTargetList`，并跳过原方法。
      */
     fun buildS31AurogonUpdateTargetListHook(classLoader: ClassLoader): HookSpec = HookSpec(
         id = "S31",

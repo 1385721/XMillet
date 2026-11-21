@@ -1,6 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// 本 fork 的 release 签名配置（密钥放在仓库外的 ~/.config，不进版本库）。
+// 找不到配置时 release 仍可编译（退化为 unsigned），避免换机器编译时因缺密钥失败。
+val forkKeystoreProps = file("${System.getProperty("user.home")}/.config/xmillet-fork/keystore.properties")
+val forkSigningProps = if (forkKeystoreProps.exists()) {
+    Properties().apply { forkKeystoreProps.inputStream().use { load(it) } }
+} else {
+    null
 }
 
 android {
@@ -24,6 +35,17 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        if (forkSigningProps != null) {
+            create("fork") {
+                storeFile = file(forkSigningProps.getProperty("storeFile"))
+                storePassword = forkSigningProps.getProperty("storePassword")
+                keyAlias = forkSigningProps.getProperty("keyAlias")
+                keyPassword = forkSigningProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -32,6 +54,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (forkSigningProps != null) {
+                signingConfig = signingConfigs.getByName("fork")
+            }
         }
     }
 

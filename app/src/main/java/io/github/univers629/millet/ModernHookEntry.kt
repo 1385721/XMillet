@@ -150,16 +150,15 @@ class ModernHookEntry : XposedModule() {
         }
     }
 
-    /** system_server 侧装配：Binder 通道 → 配置快照 → 日志轮转 → 全部 Hook。 */
+    /** system_server 侧装配：Binder 通道 → 配置快照 → 全部 Hook。 */
     private fun bootstrapSystemServer(classLoader: ClassLoader, scene: String) {
         ModernBridge.xposedModule = this
         try {
             // 1. 注册 system_server 侧跨进程 Binder 服务端实例
             SystemBinderService.registerToChannel(MilletIpcContract.BINDER_KEY_SYSTEM)
 
-            // 2. 初始化并加载 system_server 侧配置快照，轮转本地日志文件并恢复墓碑统计
+            // 2. 初始化并加载 system_server 侧配置快照，恢复墓碑统计
             PrefReader.initSystemPrefs(this)
-            Logger.initSystemLogRotation()
             FreezeStatsRecorder.init()
 
             // 3. 输出装配启动标志日志

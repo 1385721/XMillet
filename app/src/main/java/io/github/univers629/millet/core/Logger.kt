@@ -4,10 +4,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
-import java.io.File
-import java.io.FileWriter
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 /**
@@ -18,7 +14,8 @@ import java.util.Locale
  * 2. 标准事件格式：`[级别] 事件 | 包名 | uid | 原因`
  * 3. 安装期日志（`开始XMillet Hook`、`xxx成功`、`共屏蔽N处应用无响应`、安装失败错误）不受 `isLog` 限制直接输出。
  * 4. 运行期干预日志受 `isLog`（或 Doze 专属 `dozeLog`）门控。
- * 5. 本地文件落盘统一投递至单线程 Handler（`XMillet-LogIo`），不在 Hook 回调线程内执行文件 IO。
+ * 5. 日志等级可选「关闭(OFF)」：选中后完全不输出任何日志（含 alwaysWarn/error）。
+ * 6. 不做本地文件落盘：日志仅输出到 Modern LibXposed / Android Logcat，避免文件 IO。
  */
 object Logger {
 
@@ -31,11 +28,13 @@ object Logger {
         DEBUG("D", 1),
         INFO("I", 2),
         WARN("W", 3),
-        ERROR("E", 4);
+        ERROR("E", 4),
+        OFF("-", 5);
 
         companion object {
             fun fromConfig(name: String?): Level {
                 return when (name?.lowercase(Locale.ROOT)) {
+                    "off", "o" -> OFF
                     "debug", "d" -> DEBUG
                     "info", "i", "verbose", "v" -> INFO
                     "warn", "w" -> WARN
@@ -66,11 +65,6 @@ object Logger {
     @Volatile
     private var cachedMinLevel: Level = Level.DEBUG
 
-    // 优化 #3：复用日期格式与常开 FileWriter（仅在单线程 XMillet-LogIo Handler 内访问，无线程安全问题）
-    private val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA)
-    private var localWriter: FileWriter? = null
-    private var localWriterPath: String? = null
-
     private fun ensureIoHandler(): Handler? {
         if (hotReloading) return null
         ioHandler?.let { return it }
@@ -97,7 +91,6 @@ object Logger {
             thread = ioThread
             ioThread = null
         }
-        closeLocalWriter()
         thread?.quitSafely()
     }
 
@@ -179,49 +172,21 @@ object Logger {
     }
 
     /**
-     * system_server 启动时将上一次的 `/data/system/XMillet/log` 轮转为 `last.log`。
-     */
-    fun initSystemLogRotation() {
-        postIoTask {
-            try {
-                // 轮转会 rename log→last.log，常开 writer 仍指向旧 inode；先关闭，下次写入时重建。
-                closeLocalWriter()
-                val dir = File(LOCAL_LOG_DIR)
-                if (!dir.exists()) {
-                    dir.mkdirs()
-                }
-                val lastFile = File(LOCAL_LAST_LOG_PATH)
-                val logFile = File(LOCAL_LOG_PATH)
-                if (lastFile.exists()) {
-                    lastFile.delete()
-                }
-                if (logFile.exists()) {
-                    logFile.renameTo(lastFile)
-                }
-                if (!logFile.exists()) {
-                    logFile.createNewFile()
-                }
-            } catch (_: Throwable) {
-            }
-        }
-    }
-
-    /**
-     * 装配期/无条件 Info 日志（不受 `isLog` 限制，用于安装成功回执等，始终尝试落盘）。
+     * 装配期/无条件 Info 日志（不受 `isLog` 限制，用于安装成功回执等）。
      */
     fun alwaysInfo(message: String) {
-        emit(Level.INFO, message, currentSnapshot(), forceLocal = true)
+        emit(Level.INFO, message, currentSnapshot())
     }
 
     /**
-     * 装配期/无条件 Warn 日志（用于 `开始XMillet Hook`、`共屏蔽N处应用无响应`、每个成功项等，始终尝试落盘）。
+     * 装配期/无条件 Warn 日志（用于 `开始XMillet Hook`、`共屏蔽N处应用无响应`、每个成功项等）。
      */
     fun alwaysWarn(message: String) {
-        emit(Level.WARN, message, currentSnapshot(), forceLocal = true)
+        emit(Level.WARN, message, currentSnapshot())
     }
 
     /**
-     * 错误日志（无条件输出，附带异常摘要，始终尝试落盘）。
+     * 错误日志（无条件输出，附带异常摘要）。
      */
     fun error(message: String, throwable: Throwable? = null) {
         val fullMsg = if (throwable != null) {
@@ -229,11 +194,11 @@ object Logger {
         } else {
             message
         }
-        emit(Level.ERROR, fullMsg, currentSnapshot(), forceLocal = true)
+        emit(Level.ERROR, fullMsg, currentSnapshot())
     }
 
     /**
-     * 后台单线程异步任务投递入口（供 `/proc` 读取、文件落盘等非阻塞操作复用）。
+     * 后台单线程异步任务投递入口（供 `/proc` 读取等非阻塞操作复用）。
      */
     fun postIoTask(task: () -> Unit) {
         val handler = ensureIoHandler() ?: return
@@ -262,16 +227,16 @@ object Logger {
     private fun emit(
         level: Level,
         body: String,
-        prefs: PrefsSnapshot,
-        forceLocal: Boolean = false
+        prefs: PrefsSnapshot
     ) {
         val minLevel = resolveMinLevel(prefs.logLevel)
+        // OFF：完全关闭日志，含 alwaysWarn/error。ERROR 的穿透逻辑也不能越过此门。
+        if (minLevel == Level.OFF) return
         if (level.priority < minLevel.priority && level != Level.ERROR) {
             return
         }
 
-        // 优化 #1：移除原先未使用的 formattedLine 拼接，省掉每次一条无用字符串分配。
-        // 1. 输出到 Modern LibXposed；框架未注入时退回 Android Logcat
+        // 输出到 Modern LibXposed；框架未注入时退回 Android Logcat
         var loggedToXposed = false
         if (prefs.logType != "file") {
             try {
@@ -281,6 +246,7 @@ object Logger {
                         Level.INFO -> Log.INFO
                         Level.WARN -> Log.WARN
                         Level.ERROR -> Log.ERROR
+                        Level.OFF -> return
                     }
                     ModernBridge.xposedModule?.log(priority, TAG, "[${level.code}] $body")
                     loggedToXposed = true
@@ -295,52 +261,8 @@ object Logger {
                 Level.INFO -> Log.i(TAG, "[${level.code}] $body")
                 Level.WARN -> Log.w(TAG, "[${level.code}] $body")
                 Level.ERROR -> Log.e(TAG, "[${level.code}] $body")
+                Level.OFF -> Unit
             }
         }
-
-        // 2. 如需写入本地文件，统一投递到单线程 IO Handler
-        if (prefs.isLog || prefs.logToLocal || prefs.logType == "file" || forceLocal) {
-            postIoTask {
-                appendLineToLocalFile(level, body)
-            }
-        }
-    }
-
-    private fun appendLineToLocalFile(level: Level, body: String) {
-        try {
-            val dir = File(LOCAL_LOG_DIR)
-            if (!dir.exists()) {
-                dir.mkdirs()
-            }
-            // 复用常开 writer：避免每条日志都 new FileWriter + open/close fd。
-            // 日志轮转（initSystemLogRotation 把 log 改名 last.log）后，路径 inode 变化，
-            // 这里通过比对路径并在必要时重建 writer（时间戳单调兜底）来适配。
-            val writer = ensureLocalWriter()
-            val timestamp = timestampFormat.format(Date())
-            writer.append("$timestamp [${level.code}] $body\n")
-            writer.flush()
-        } catch (_: Throwable) {
-            // 本地文件写入失败静默降级，不抛异常
-            closeLocalWriter()
-        }
-    }
-
-    /** 取当前常开 writer；文件被轮转/删除或首次使用时重建。仅在 IO Handler 线程调用。 */
-    private fun ensureLocalWriter(): FileWriter {
-        val cached = localWriter
-        if (cached != null && localWriterPath == LOCAL_LOG_PATH && File(LOCAL_LOG_PATH).exists()) {
-            return cached
-        }
-        cached?.let { runCatching { it.close() } }
-        val fresh = FileWriter(LOCAL_LOG_PATH, true)
-        localWriter = fresh
-        localWriterPath = LOCAL_LOG_PATH
-        return fresh
-    }
-
-    private fun closeLocalWriter() {
-        localWriter?.let { runCatching { it.close() } }
-        localWriter = null
-        localWriterPath = null
     }
 }

@@ -1,6 +1,6 @@
 # XMillet 优化说明（本 fork 相对上游 univers629/XMillet 的改动）
 
-本分支 `optimize/hotpath` 聚焦**热路径性能**与**稳健性**优化，不动 UI 与核心 hook 行为，改动集中在 4 个文件。
+本分支 `optimize/hotpath` 聚焦**热路径性能**与**稳健性**优化，并在日志设置上做了功能性调整（新增 OFF 等级、去除落盘），改动集中在若干文件。
 
 ## 已实施改动
 
@@ -14,10 +14,16 @@
 - 新增快路径：`BEFORE` 且 `before == null`、`BEFORE_AND_AFTER` 且 `before == null && after == null` 时直接 `chain.proceed()`，省掉两次分配。
 - 注：libxposed API 102 的 `Chain.getArgs()` 返回 `List<Object>`，有回调时这两次转换仍必需，未删。
 
-### 优化 #3 — 日志落盘复用 writer（`core/Logger.kt`）
-- 原实现每条日志 `new SimpleDateFormat` + `FileWriter(...).use{}` 开/关 fd。
-- 改为单线程 `XMillet-LogIo` Handler 内复用 `SimpleDateFormat` 与常开 `FileWriter`，每条 `flush()`。
-- 处理日志轮转：`initSystemLogRotation()` rename `log→last.log` 前先 `closeLocalWriter()`，下次写入按路径存在性自动重建 writer；热重载 `onHotReloading()` 也关闭 writer。
+### 优化 #3 — 已撤销：日志落盘（原「复用 writer」，`core/Logger.kt`）
+- 原实现每条日志 `new SimpleDateFormat` + `FileWriter(...).use{}` 开/关 fd；本分支一度改为单线程 `XMillet-LogIo` Handler 内复用 `SimpleDateFormat` 与常开 `FileWriter`。
+- 按最新需求**完全移除日志落盘**：删除 `LOCAL_LOG_PATH`/`LOCAL_LAST_LOG_PATH` 写入、`appendLineToLocalFile()`/`ensureLocalWriter()`/`closeLocalWriter()`、`initSystemLogRotation()` 及 `emit()` 的落盘分支；日志只输出到 Modern LibXposed / Android Logcat，彻底避免文件 IO。
+- `LOCAL_LOG_DIR` 常量保留（`BugreportHelper` 用它拼 `freeze_stats.json` 路径）；`postIoTask()` 与 Handler 基础设施保留（供 `/proc` 等非阻塞读取复用）。
+- `ModernHookEntry.bootstrapSystemServer()` 同步去掉 `initSystemLogRotation()` 调用；`BugreportHelper` 不再收集 `xmillet_log.txt`/`xmillet_last.log`。
+
+### 功能 — 日志等级新增「关闭(OFF)」（`core/Logger.kt` / `ui/screen/SettingsScreenMiuix.kt`）
+- `Level` 新增 `OFF("-", 5)`（优先级高于 ERROR），`fromConfig` 识别 `off`/`o`。
+- `emit()` 开头显式 `if (minLevel == OFF) return`——因 ERROR 有 `level != ERROR` 穿透逻辑，仅靠优先级无法拦截 ERROR，必须靠此门保证 OFF 时**含 alwaysWarn/error 在内完全不输出**。
+- 设置页日志卡片新增「日志等级」下拉（关闭/仅错误/警告/信息/调试）：选「关闭」同步写 `IS_LOG=false`，避免 hook 侧 `if (!prefs.isLog)` 门控与等级不一致；等级与开关双向联动。
 
 ### 优化 #4 — RootShell 哨兵随机化（`core/RootShell.kt`）
 - 原哨兵为固定前缀 + 可预测递增序号，命令输出理论上可伪造/撞车提前结束读取。

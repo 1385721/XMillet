@@ -22,8 +22,8 @@ import java.util.zip.GZIPOutputStream
 /**
  * 诊断报告与配置备份文件生成工具。
  *
- * 将设备与系统属性、XMillet 运行状态快照、当前配置、模块本地日志 (`/data/system/XMillet/log`)、
- * `logcat`、`dmesg`、进程列表及 `dumpsys` 快照统一打包为 `bugreport-yyyyMMdd-HHmmss.tar.gz`，
+ * 将设备与系统属性、XMillet 运行状态快照、当前配置、`logcat`、`dmesg`、进程列表及 `dumpsys`
+ * 快照统一打包为 `bugreport-yyyyMMdd-HHmmss.tar.gz`，
  * 置于应用 `cacheDir` 下，供 `FileProvider` 分享或 SAF 导出。
  */
 object BugreportHelper {
@@ -164,8 +164,6 @@ object BugreportHelper {
     private fun collectRootDiagnostics(dir: File) {
         val dirPath = dir.absolutePath
         val script = """
-            cat ${Logger.LOCAL_LOG_PATH} > "$dirPath/xmillet_log.txt" 2>/dev/null || rm -f "$dirPath/xmillet_log.txt"
-            cat ${Logger.LOCAL_LAST_LOG_PATH} > "$dirPath/xmillet_last.log" 2>/dev/null || rm -f "$dirPath/xmillet_last.log"
             cat ${Logger.LOCAL_LOG_DIR}/freeze_stats.json > "$dirPath/freeze_stats.json" 2>/dev/null || rm -f "$dirPath/freeze_stats.json"
             logcat -b all -v uid -d > "$dirPath/logcat.txt" 2>&1
             dmesg -r > "$dirPath/dmesg.txt" 2>&1

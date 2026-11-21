@@ -138,6 +138,10 @@ fun SettingsScreenMiuix(
     var isLog by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.IS_LOG))
     }
+    // 日志等级：off/error/warn/info/debug，与「开启详细运行日志」开关联动。
+    var logLevel by remember(configVersion) {
+        mutableStateOf(sp.getString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL) ?: PrefsDefaults.LOG_LEVEL)
+    }
     var simplifyLog by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SIMPLIFY_LOG))
     }
@@ -526,17 +530,59 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "开启详细运行日志",
-                            summary = "记录运行拦截、电量统计与 Doze 日志并写入本地目录",
+                            summary = "记录运行拦截、电量统计与 Doze 日志（输出到 Xposed / Logcat，不写文件）",
                             checked = isLog,
                             onCheckedChange = { enabled ->
                                 isLog = enabled
+                                // 关闭时切到 OFF，开启时恢复默认等级，保持开关与等级一致。
+                                val level = if (enabled) PrefsDefaults.LOG_LEVEL else "off"
+                                logLevel = level
                                 PrefReader.editAllAndNotify(sp) {
                                     putBoolean(PrefsKeys.IS_LOG, enabled)
                                     putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
                                     putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
                                     putBoolean(PrefsKeys.DOZE_LOG, enabled)
-                                    putString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL)
+                                    putString(PrefsKeys.LOG_LEVEL, level)
                                     putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
+                                }
+                            }
+                        )
+                        OverlayDropdownPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.BugReport,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "日志等级",
+                            summary = "关闭后不输出任何日志（含错误）",
+                            items = listOf("关闭", "仅错误", "警告", "信息", "调试"),
+                            selectedIndex = when (logLevel.lowercase()) {
+                                "off", "o" -> 0
+                                "error", "e" -> 1
+                                "warn", "w" -> 2
+                                "info", "i", "verbose", "v" -> 3
+                                else -> 4
+                            },
+                            onSelectedIndexChange = { index ->
+                                val level = when (index) {
+                                    0 -> "off"
+                                    1 -> "error"
+                                    2 -> "warn"
+                                    3 -> "info"
+                                    else -> "debug"
+                                }
+                                // 选「关闭」时同步关闭 isLog，避免 hook 侧门控与等级不一致。
+                                val enabled = index != 0
+                                logLevel = level
+                                isLog = enabled
+                                PrefReader.editAllAndNotify(sp) {
+                                    putString(PrefsKeys.LOG_LEVEL, level)
+                                    putBoolean(PrefsKeys.IS_LOG, enabled)
                                 }
                             }
                         )

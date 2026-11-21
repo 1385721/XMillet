@@ -451,7 +451,7 @@ private fun buildCoverageEntry(
         level = level,
         summaryText = "$installed/$total 个安装点生效",
         detailText = detail,
-        suggestion = if (failed.isEmpty()) null else "查看本地日志 /data/system/XMillet/log 中对应点位的失败原因"
+        suggestion = if (failed.isEmpty()) null else "查看 Xposed / Logcat（SM-LOG）中对应点位的失败原因"
     )
 }
 

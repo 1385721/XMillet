@@ -49,17 +49,19 @@ object RootHelper {
      * 冻结方式与内核等待通道（WCHAN）枚举（1:1 复刻原版 SMillet EnumC0222 与 EnumC0697）。
      */
     enum class FreezerType(val label: String, val colorHex: Long) {
-        /** cgroup v2 freezer（橙色 #FF8C00，内核 wchan 命中 do_freezer_trap / get_signal / freezable_schedule） */
+        /** cgroup v2 freezer（橙色 #FF8C00）。 */
         V2("V2", 0xFFFF8C00),
 
         /** cgroup v1 freezer（蓝色 #0C82FD，内核 wchan 命中 __refrigerator） */
         V1("V1", 0xFF0C82FD),
 
-        /** do_signal_stop 暂停/终止（绿色 #3CB371，内核 wchan 命中 do_signal_stop） */
+        /** 信号停止状态（绿色 #3CB371），不表示进程终止。 */
         KILL("Kill", 0xFF3CB371),
 
         UNKNOWN("", 0L)
     }
+
+    enum class FreezeState { FROZEN, RUNNING, UNKNOWN }
 
     data class ProcessRawEntry(
         val uid: Int,
@@ -73,7 +75,8 @@ object RootHelper {
         val packageName: String,
         val status: String,
         val freezerType: FreezerType,
-        val services: List<String> = emptyList()
+        val services: List<String> = emptyList(),
+        val freezeState: FreezeState = if (freezerType != FreezerType.UNKNOWN) FreezeState.FROZEN else FreezeState.UNKNOWN
     )
 
     /**
@@ -92,7 +95,7 @@ object RootHelper {
      * 详情页统一的进程排序：冻结中的排前面，其次按内存降序，最后按进程名稳定排序。
      */
     fun sortProcessEntries(entries: List<ProcessRawEntry>): List<ProcessRawEntry> = entries.sortedWith(
-        compareByDescending<ProcessRawEntry> { it.freezerType != FreezerType.UNKNOWN }
+        compareByDescending<ProcessRawEntry> { it.freezeState == FreezeState.FROZEN }
             .thenByDescending { it.rssKb }
             .thenBy { it.processName }
     )

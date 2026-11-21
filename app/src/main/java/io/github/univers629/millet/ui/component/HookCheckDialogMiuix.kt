@@ -39,11 +39,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.VersionGate
 import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.HookCoverage
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
+import io.github.univers629.millet.ui.theme.isInDarkTheme
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -78,11 +80,8 @@ data class HookDiagnosticEntry(
     val detailText: String,
     val suggestion: String? = null,
     /**
-     * 是否属于「可选能力」。
-     *
-     * 可选项不计入顶部「N 项检测中已就绪 M 项」与整体状态：它们只影响便利性，
-     * 不影响模块本体是否工作。例如「电量与性能尚未完成握手」「有 Root 管理器但未授权」——
-     * 这两项在开机瞬间、或用户从未授权过时都会短暂出现，不能因此把整页判成未就绪。
+     * 是否属于辅助信息。可选项不计入顶部通过数与整体状态；
+     * 官方策略链路、安装账本与真实冻结证据不能作为可选项排除。
      */
     val optional: Boolean = false
 )
@@ -93,10 +92,18 @@ data class HookDiagnosticEntry(
 fun generateHookDiagnostics(
     runtimeStatus: PowerKeeperBinderClient.RuntimeStatusSnapshot,
     kernelFreezer: RootHelper.KernelFreezer = RootHelper.KernelFreezer.UNKNOWN,
-    frameworkState: XposedPrefsBridge.XposedFrameworkState = XposedPrefsBridge.XposedFrameworkState()
+    frameworkState: XposedPrefsBridge.XposedFrameworkState = XposedPrefsBridge.XposedFrameworkState(),
+    kernelEvidenceConfirmed: Boolean = false,
+    kernelEvidenceSource: String = "UNCONFIRMED",
+    milletBackendState: String = "UNCONFIRMED"
 ): List<HookDiagnosticEntry> {
     val entries = ArrayList<HookDiagnosticEntry>()
     val coverage = runtimeStatus.hookCoverage
+    // 注册结果与宿主类能力位分开；旧模块未上报时保持未确认。
+    val greezeRegistered = coverage.capability("greeze_registered")
+    val milletRegistered = coverage.capability("millet_registered")
+    val controllerRegistered = coverage.capability("controller_registered")
+    val bothSidesReported = hasPositiveCoverage(coverage.sys) && hasPositiveCoverage(coverage.pk)
 
     // 0. 运行环境：宿主 ROM 决定了哪些点位本来就存在，必须先摆出来，
     //    否则用户会把「本版本没有这个子系统」误读成「模块装坏了」。
@@ -117,13 +124,13 @@ fun generateHookDiagnostics(
                         "双开相关 notifyExcuteServices 与 updateTargetList Hook 按宿主方法和能力条件安装；" +
                         "各点位的安装结果见覆盖情况。"
                 VersionGate.RomTier.OS1, VersionGate.RomTier.OS2 ->
-                    "澎湃 OS 早期版本保留 com.miui.powerkeeper.millet 子系统，云控白名单、灭屏清理与无限制名单均在该子系统内接管。"
+                    "澎湃 OS 早期版本按 com.miui.powerkeeper.millet 子系统适配云控白名单、灭屏清理与无限制名单；本机注册结果见下方检测项。"
                 VersionGate.RomTier.OS3 ->
-                    "澎湃 OS3 已移除 com.miui.powerkeeper.millet 与 com.miui.process 整块子系统，" +
-                        "模块改用 KillProcessController 等新入口接管清理与冻结；缺失的旧点位属于版本差异，不是安装失败。"
+                    "澎湃 OS3 的适配路径使用 KillProcessController 等新入口，不要求已移除的 com.miui.powerkeeper.millet 与 com.miui.process 旧点位；" +
+                        "具体宿主能力与注册结果仍以本机上报为准。"
                 null ->
                     "未能读取 ro.mi.os.version.name 与 ro.miui.ui.version.name，无法判断宿主版本；下面的条目按运行时探测结果展示。"
-            }
+            } + "版本属性不能证明官方冻结链路已注册或内核冻结已完成。"
         )
     )
 
@@ -175,7 +182,8 @@ fun generateHookDiagnostics(
 
     // 1. System Server 核心服务
     val sysLevel = when {
-        runtimeStatus.binderAlive && runtimeStatus.greezeReady -> HookDiagnosticLevel.PASSED
+        runtimeStatus.binderAlive && runtimeStatus.greezeReady && greezeRegistered == true &&
+            hasPositiveCoverage(coverage.sys) -> HookDiagnosticLevel.PASSED
         runtimeStatus.binderAlive -> HookDiagnosticLevel.WARNING
         else -> HookDiagnosticLevel.FAILED
     }
@@ -186,13 +194,13 @@ fun generateHookDiagnostics(
             targetClassOrMethod = "android / ActivityManagerService & GreezeManagerService",
             level = sysLevel,
             summaryText = when (sysLevel) {
-                HookDiagnosticLevel.PASSED -> "已激活"
-                HookDiagnosticLevel.WARNING -> "Binder 服务在线，Greeze 核心待捕获"
+                HookDiagnosticLevel.PASSED -> "服务与官方 Hook 已注册"
+                HookDiagnosticLevel.WARNING -> "Binder 在线，官方链路待确认"
                 HookDiagnosticLevel.FAILED -> "未连接系统服务"
             },
             detailText = when (sysLevel) {
-                HookDiagnosticLevel.PASSED -> "已成功拦截 AMS 广播注册链路并挂载 SystemBinderService，核心逻辑全部就绪。"
-                HookDiagnosticLevel.WARNING -> "SystemBinderService 已就绪并建立通信通道，正在等待系统 Greeze 服务完成初始化。"
+                HookDiagnosticLevel.PASSED -> "SystemBinderService 在线，Greeze 实例与关键 Hook 注册结果已上报；本项不证明冻结成功。"
+                HookDiagnosticLevel.WARNING -> "SystemBinderService 已建立通信通道，但 Greeze 实例或关键 Hook 注册结果未确认。Binder 在线不等同于冻结链路可用。"
                 HookDiagnosticLevel.FAILED -> if (frameworkState.isServiceConnected && !frameworkState.hasSystemScope) {
                     "XposedService 报告作用域尚未勾选「system（系统框架）」。请先授权作用域并重启系统。"
                 } else {
@@ -213,7 +221,16 @@ fun generateHookDiagnostics(
     //    目标子系统随 ROM 版本不同：OS3 起 millet 已移除，仍宣称 MilletPolicy 会误导用户。
     val capMillet = coverage.capability(HookCoverage.CAP_MILLET)
     val capController = coverage.capability(HookCoverage.CAP_CONTROLLER)
+    val policyRegistered = when {
+        milletRegistered == true || controllerRegistered == true -> true
+        milletRegistered == false && controllerRegistered == false -> false
+        else -> null
+    }
+    val officialChainConfirmed = bothSidesReported && greezeRegistered == true &&
+        policyRegistered == true && runtimeStatus.greezeReady && runtimeStatus.powerKeeperConnected
     val pkTarget = when {
+        milletRegistered == true -> "com.miui.powerkeeper.millet.MilletPolicy & FreezeBinder"
+        controllerRegistered == true -> "com.miui.powerkeeper.controller.FrozenAppController"
         capMillet == true -> "com.miui.powerkeeper.millet.MilletPolicy & FreezeBinder"
         capMillet == false && capController == true ->
             "com.miui.powerkeeper.controller.KillProcessController & FrozenAppController"
@@ -221,7 +238,8 @@ fun generateHookDiagnostics(
         else -> "com.miui.powerkeeper（宿主能力位未上报）"
     }
     val pkLevel = when {
-        runtimeStatus.powerKeeperConnected -> HookDiagnosticLevel.PASSED
+        runtimeStatus.binderAlive && officialChainConfirmed -> HookDiagnosticLevel.PASSED
+        runtimeStatus.powerKeeperConnected -> HookDiagnosticLevel.WARNING
         runtimeStatus.binderAlive -> HookDiagnosticLevel.WARNING
         else -> HookDiagnosticLevel.FAILED
     }
@@ -232,21 +250,27 @@ fun generateHookDiagnostics(
             targetClassOrMethod = pkTarget,
             level = pkLevel,
             summaryText = when (pkLevel) {
-                HookDiagnosticLevel.PASSED -> "已连接"
-                HookDiagnosticLevel.WARNING -> "等待双向握手"
+                HookDiagnosticLevel.PASSED -> "官方策略链路已注册"
+                HookDiagnosticLevel.WARNING -> if (runtimeStatus.powerKeeperConnected) "已握手，官方链路未确认" else "等待双向握手"
                 HookDiagnosticLevel.FAILED -> "未连接"
             },
             detailText = when (pkLevel) {
                 HookDiagnosticLevel.PASSED -> when {
-                    capMillet == true ->
-                        "云控白名单屏蔽、灭屏清理拦截与无限制名单同步均已在该版本存在的 millet 子系统上接管。"
-                    capMillet == false ->
-                        "该版本没有 millet 子系统，清理与冻结已改由 KillProcessController 等点位接管；" +
-                            "下面「Hook 安装点覆盖」列出的是本机真实装上的点位。"
+                    milletRegistered == true ->
+                        "Millet 关键 Hook 注册结果与两侧安装账本已上报，PowerKeeper 已握手；冻结行为仍须由真实进程证据确认。"
+                    controllerRegistered == true ->
+                        "controller 替代路径的关键 Hook 注册结果与两侧账本已上报。此处不要求已移除的旧 Millet 点位，也不证明冻结成功。"
                     else ->
                         "已与「电量与性能」建立双向 Binder 回调；具体接管了哪些点位见下方安装点覆盖。"
                 }
-                HookDiagnosticLevel.WARNING -> if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
+                HookDiagnosticLevel.WARNING -> if (runtimeStatus.powerKeeperConnected) {
+                    when {
+                        !bothSidesReported -> "PowerKeeper 已握手，但两侧有效安装账本未齐备，不能确认官方冻结链路。"
+                        greezeRegistered == false || policyRegistered == false ->
+                            "PowerKeeper 已握手，但关键官方 Hook 未注册或不受当前宿主支持。缺失与版本门控原因见安装点覆盖；类存在和握手不能替代注册结果。"
+                        else -> "PowerKeeper 已握手，但官方 Greeze / 策略链路的注册结果或实例尚未确认；旧模块缺少注册字段时不按通过处理。"
+                    }
+                } else if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
                     "XposedService 报告作用域尚未勾选「com.miui.powerkeeper」，授权后强行停止电量与性能即可接入。"
                 } else {
                     "系统服务已就绪，但「电量与性能」尚未完成双向 Binder 回调注册。亮灭屏一次或强行停止电量与性能即可自动握手。"
@@ -255,18 +279,16 @@ fun generateHookDiagnostics(
                     "未能连接至 com.miui.powerkeeper。请在 LSPosed 中确认勾选「电量与性能」作用域。"
             },
             suggestion = when (pkLevel) {
-                HookDiagnosticLevel.WARNING -> if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
+                HookDiagnosticLevel.WARNING -> if (runtimeStatus.powerKeeperConnected) {
+                    "核对两侧安装账本与关键 Hook 注册结果，不能仅凭握手判断冻结可用"
+                } else if (frameworkState.isServiceConnected && !frameworkState.hasPowerKeeperScope) {
                     "可点击下方「授权作用域」"
                 } else {
                     "请按电源键灭屏并亮屏一次，或在设置中结束「电量与性能」"
                 }
                 HookDiagnosticLevel.FAILED -> "请在 LSPosed 作用域中勾选「电量与性能」"
                 else -> null
-            },
-            // 系统服务已就绪、只是 powerkeeper 还没被拉起完成握手时，属于可选能力，
-            // 不计入就绪度：该项在下一次亮灭屏或推送时补齐；作用域明确未勾选时计入失败/待修。
-            optional = pkLevel == HookDiagnosticLevel.WARNING &&
-                (!frameworkState.isServiceConnected || frameworkState.hasPowerKeeperScope)
+            }
         )
     )
 
@@ -274,18 +296,22 @@ fun generateHookDiagnostics(
     entries.add(buildCoverageEntry(runtimeStatus))
 
     // 4. 小米 Greeze 墓碑驱动服务
-    val greezeLevel = if (runtimeStatus.greezeReady) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.FAILED
+    val greezeLevel = when {
+        runtimeStatus.greezeReady && greezeRegistered == true && hasPositiveCoverage(coverage.sys) -> HookDiagnosticLevel.PASSED
+        runtimeStatus.binderAlive -> HookDiagnosticLevel.WARNING
+        else -> HookDiagnosticLevel.FAILED
+    }
     entries.add(
         HookDiagnosticEntry(
             id = "greeze_service",
             title = "小米 Greeze 墓碑驱动服务",
             targetClassOrMethod = "com.miui.server.greeze.GreezeManagerService",
             level = greezeLevel,
-            summaryText = if (greezeLevel == HookDiagnosticLevel.PASSED) "运行中" else "未捕获",
+            summaryText = if (greezeLevel == HookDiagnosticLevel.PASSED) "句柄与 Hook 已注册" else "官方服务未确认",
             detailText = if (greezeLevel == HookDiagnosticLevel.PASSED)
-                "GreezeManagerService 句柄已正常持有，底层 AIDL 驱动接口正常，支持 freezeAction 与 thawUid 压制。"
+                "GreezeManagerService 实例已捕获，关键 Hook 注册结果已上报；句柄存在不能证明驱动冻结成功，也不说明具体内核机制。"
             else
-                "未检测到 GreezeManagerService 实例。请确认当前设备为小米官方澎湃 OS（OS1 / OS2 / OS3）。"
+                "GreezeManagerService 实例或关键 Hook 注册结果尚未确认。请核对本机安装账本；不依据第三方内核名称或 ROM 属性判定冻结能力。"
         )
     )
 
@@ -305,9 +331,9 @@ fun generateHookDiagnostics(
             level = aurogonLevel,
             summaryText = if (aurogonLevel == HookDiagnosticLevel.PASSED) "已就绪" else "待捕获",
             detailText = if (aurogonLevel == HookDiagnosticLevel.PASSED)
-                "Aurogon 实例已捕获，前台服务状态检测与消息应用豁免联动正常。"
+                "Aurogon 实例已捕获；本项仅反映句柄就绪，不证明前台感知、豁免或冻结行为已验证。"
             else
-                "Aurogon 实例尚未初始化，音视频播放与前台服务免冻感知将由系统默认逻辑兜底。"
+                "Aurogon 实例尚未捕获；本项未验证音视频与前台服务免冻行为。"
         )
     )
 
@@ -325,66 +351,100 @@ fun generateHookDiagnostics(
             title = "Doze 状态机与省电优化白名单",
             targetClassOrMethod = "com.android.server.DeviceIdleController",
             level = dozeLevel,
-            summaryText = if (dozeLevel == HookDiagnosticLevel.PASSED) "已接管" else "待捕获",
+            summaryText = if (dozeLevel == HookDiagnosticLevel.PASSED) "实例已捕获" else "待捕获",
             detailText = if (dozeLevel == HookDiagnosticLevel.PASSED)
-                "DeviceIdleController 实例已就绪，Doze 状态迁移监听与电池优化白名单/黑名单同步链路通畅。"
+                "DeviceIdleController 实例已捕获；本项不证明状态迁移或名单同步行为已验证，也不能替代冻结证据。"
             else
                 "DeviceIdleController 待捕获。"
         )
     )
 
-    // 7. 内核冻结器（cgroup v2 / v1）—— 仅描述内核能力，不是功能前提
-    val hasKernelFreezer = kernelFreezer == RootHelper.KernelFreezer.CGROUP_V2 ||
-        kernelFreezer == RootHelper.KernelFreezer.CGROUP_V1
-    val cgroupLevel = if (hasKernelFreezer) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.WARNING
+    // 后端运行状态独立于模块 Hook 安装结果和启动加速冻结证据，始终是必要项。
+    entries.add(
+        HookDiagnosticEntry(
+            id = "millet_backend",
+            title = "官方 Millet 后端运行状态",
+            targetClassOrMethod = "GreezeManagerService / Millet 配置与 monitor 注册",
+            level = when (milletBackendState) {
+                "READY" -> HookDiagnosticLevel.PASSED
+                "DISABLED", "MONITORS_UNREADY" -> HookDiagnosticLevel.FAILED
+                else -> HookDiagnosticLevel.WARNING
+            },
+            summaryText = when (milletBackendState) {
+                "READY" -> "官方冻结路径已启用，所需 monitors 已注册"
+                "DISABLED" -> "官方 Millet 后端未启用"
+                "MONITORS_UNREADY" -> "所需 monitors 尚未完整注册"
+                else -> "官方 Millet 后端运行状态未确认"
+            },
+            detailText = "按需读取 ROM 的 Millet 总开关、PowerMillet/传统 Greeze 独立路径开关及 mRegisteredMonitor 与 MILLET_MONITOR_ALL 掩码。" +
+                "确认路径要求 Millet 与 PowerMillet 启用且所需 monitors 完整注册；不要求传统 Greeze 开关同时开启。" +
+                "只有传统 Greeze 开关开启不能证明官方后台策略已运行，未核实的替代路径保持未确认。" +
+                "缺字段、类型不符、旧端未上报或读取失败均不能通过；模块 Hook 安装、服务实例存在或启动加速能够冻结不能替代本项。" +
+                "monitor 注册是用户空间运行状态，不宣称内核握手成功或后续调度必然生效；真实冻结能力仍须另项确认。"
+        )
+    )
+
+    // 7. 内核证据须由检测器关联官方记账中的同一应用 PID；类型字段与注册结果不能替代证据。
+    val confirmedKernelFreezer = kernelEvidenceConfirmed && when (kernelFreezer) {
+        RootHelper.KernelFreezer.CGROUP_V2 -> kernelEvidenceSource in setOf("CGROUP_V2_FROZEN", "WCHAN_V2")
+        RootHelper.KernelFreezer.CGROUP_V1 -> kernelEvidenceSource in setOf("CGROUP_V1_FROZEN", "WCHAN_V1")
+        else -> false
+    }
+    val cgroupLevel = if (confirmedKernelFreezer) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.WARNING
     entries.add(
         HookDiagnosticEntry(
             id = "kernel_freezer",
-            title = "内核冻结器 (CGroup v2 / v1)",
+            title = "官方记账关联的内核冻结证据",
             targetClassOrMethod = when (kernelFreezer) {
-                RootHelper.KernelFreezer.CGROUP_V2 -> "/sys/fs/cgroup/apps/cgroup.freeze (cgroup2)"
-                RootHelper.KernelFreezer.CGROUP_V1 -> "/sys/fs/cgroup/freezer (freezer.state)"
-                else -> "未发现 cgroup.freeze / freezer 挂载点"
+                RootHelper.KernelFreezer.CGROUP_V2 -> "cgroup.events:frozen / do_freezer_trap"
+                RootHelper.KernelFreezer.CGROUP_V1 -> "freezer.state:FROZEN / __refrigerator"
+                else -> "成员 cgroup 完成状态 / 精确 freezer wchan"
             },
             level = cgroupLevel,
-            summaryText = when (kernelFreezer) {
-                RootHelper.KernelFreezer.CGROUP_V2 -> "支持 (CGroup v2)"
-                RootHelper.KernelFreezer.CGROUP_V1 -> "支持 (CGroup v1)"
-                RootHelper.KernelFreezer.NONE -> "内核未提供 cgroup 冻结器"
-                RootHelper.KernelFreezer.UNKNOWN -> "未能探测"
+            summaryText = when {
+                confirmedKernelFreezer -> "已读取官方记账关联的冻结证据 ($kernelEvidenceSource)"
+                kernelFreezer == RootHelper.KernelFreezer.NONE -> "未发现接口，冻结能力未确认"
+                else -> "真实冻结能力未确认"
             },
-            detailText = when (kernelFreezer) {
-                RootHelper.KernelFreezer.CGROUP_V2 ->
-                    "内核已启用 CGroup v2 Freezer（freezer 控制器下放到 apps / system 子树，冻结粒度 apps/uid_<uid>/pid_<pid>），冻结的进程在 wchan 上表现为 do_freezer_trap，图标标为 V2。"
-                RootHelper.KernelFreezer.CGROUP_V1 ->
-                    "内核只提供旧版 CGroup v1 Freezer，冻结的进程在 wchan 上表现为 __refrigerator，图标标为 V1。这是正常能力差异，不影响墓碑冻结。"
-                RootHelper.KernelFreezer.NONE ->
-                    "本机内核没有可用的 cgroup 冻结器，墓碑冻结由小米 Greeze 服务自行实现，进程 wchan 会落到 do_signal_stop（图标标为 Kill）。该项不影响功能。"
-                RootHelper.KernelFreezer.UNKNOWN ->
-                    "冻结器类型由模块在 system_server 内探测（/sys/fs/cgroup 与 /proc/<pid>/wchan 的读权限都在框架侧），" +
-            "当前未拿到结果，请确认模块已加载后重新检测。"
+            detailText = when {
+                confirmedKernelFreezer ->
+                    "模块只读 Greeze 当前冻结记账中的应用 UID，核对同一 PID 的 UID、启动时刻与成员 cgroup；来源=$kernelEvidenceSource。" +
+                        "这仅确认官方记账与该进程真实冻结状态共现，不证明冻结由 Millet 触发、后续会自动调度或所有目标应用已冻结；未进行主动冻结测试。"
+                kernelFreezer == RootHelper.KernelFreezer.NONE ->
+                    "类型报告未发现接口，但不能据此证明内核不支持或 Greeze 存在替代机制。本项没有可确认的真实冻结证据。"
+                else ->
+                    "本次未收到与 Greeze 官方冻结记账 UID 及同一应用 PID 关联的完成冻结状态或精确 freezer wchan。" +
+                        "无关联样本、读取权限受限、采样未覆盖与旧模块缺少证据字段均保持未确认；不相关 AOSP 缓存应用冻结或内核线程不能替代关联证据；" +
+                        "目录、控制文件存在及 cgroup.freeze=1 请求值不算冻结成功，也不能判定内核必然不支持。"
             },
-            suggestion = if (hasKernelFreezer) null else "该检测只用于说明冻结机制类型，不是功能前提，可忽略"
+            suggestion = if (confirmedKernelFreezer) null else "核对模块报告与已有进程快照；不通过主动冻结真实应用检测"
         )
     )
 
     // 8. 当前墓碑冻结 UID 监测
-    val frozenCount = runtimeStatus.frozenUids.size
+    val frozenCount = runtimeStatus.frozenUids.distinct().size
     entries.add(
         HookDiagnosticEntry(
             id = "frozen_monitor",
-            title = "实时墓碑冻结状态",
+            title = "Greeze 冻结记账",
             targetClassOrMethod = "GreezeManagerService#getFrozenUids",
-            level = HookDiagnosticLevel.PASSED,
-            summaryText = "${frozenCount} 个应用已冻结",
+            level = if (runtimeStatus.greezeReady) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.WARNING,
+            summaryText = "$frozenCount 个 UID 在记账中",
             detailText = if (frozenCount > 0)
-                "当前共有 $frozenCount 个应用处于 Greeze 墓碑冻结状态，CPU 占用降为 0%，等待快速唤醒。"
+                "Greeze 返回 $frozenCount 个记账 UID，不等同于已确认冻结的应用数；本项未测量 CPU。实际进程状态以快照为准。"
             else
-                "当前没有处于冻结状态的应用。后台应用满足闲置与空闲条件时将自动进入墓碑。"
+                "当前记账列表为空；不能据此判断后台进程未冻结或系统冻结功能异常。"
         )
     )
 
     return entries
+}
+
+private fun hasPositiveCoverage(wire: HookInstallRegistry.Wire): Boolean {
+    val uninstalled = wire.unsupported + wire.gated + wire.failed
+    return wire.hasData && wire.installed > 0 && wire.total >= wire.installed &&
+        uninstalled.size == uninstalled.toSet().size &&
+        wire.installed.toLong() + uninstalled.size == wire.total.toLong()
 }
 
 /**
@@ -414,7 +474,8 @@ private fun buildCoverageEntry(
     val total = coverage.totalCount
     val installed = coverage.installedCount
     val failed = coverage.failedIds
-    val level = if (failed.isEmpty()) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.WARNING
+    val bothSidesReported = hasPositiveCoverage(coverage.sys) && hasPositiveCoverage(coverage.pk)
+    val level = if (bothSidesReported && failed.isEmpty()) HookDiagnosticLevel.PASSED else HookDiagnosticLevel.WARNING
 
     val detail = buildString {
         if (coverage.sys.hasData) {
@@ -439,8 +500,11 @@ private fun buildCoverageEntry(
         if (failed.isNotEmpty()) {
             append("。安装时报错：").append(failed.joinToString("、"))
         }
-        if (unsupported.isEmpty() && gated.isEmpty() && failed.isEmpty()) {
-            append("。全部点位均已装上。")
+        if (bothSidesReported && installed == total && unsupported.isEmpty() && gated.isEmpty() && failed.isEmpty()) {
+            append("。上报点位均已注册，尚未验证各项运行行为。")
+        }
+        if (!bothSidesReported) {
+            append("。两侧账本未齐备、数量无效或有效注册数为零，不能按全部通过处理。")
         }
     }
 
@@ -449,9 +513,13 @@ private fun buildCoverageEntry(
         title = "Hook 安装点覆盖",
         targetClassOrMethod = "HookInstallRegistry (system_server + powerkeeper)",
         level = level,
-        summaryText = "$installed/$total 个安装点生效",
+        summaryText = "$installed/$total 个安装点已注册",
         detailText = detail,
-        suggestion = if (failed.isEmpty()) null else "查看本地日志 /data/system/XMillet/log 中对应点位的失败原因"
+        suggestion = when {
+            failed.isNotEmpty() -> "查看本地日志 /data/system/XMillet/log 中对应点位的失败原因"
+            !bothSidesReported -> "核对系统侧与电量与性能侧的完整安装账本"
+            else -> null
+        }
     )
 }
 
@@ -467,7 +535,10 @@ fun HookCheckDialogMiuix(
     onRequestScope: (() -> Unit)? = null,
     onHotReloadStale: (() -> Unit)? = null,
     onRefresh: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    kernelEvidenceConfirmed: Boolean = false,
+    kernelEvidenceSource: String = "UNCONFIRMED",
+    milletBackendState: String = "UNCONFIRMED"
 ) {
     val configuration = LocalConfiguration.current
     val screenHeight = configuration.screenHeightDp.dp
@@ -480,10 +551,10 @@ fun HookCheckDialogMiuix(
     } else {
         (screenHeight * 0.68f).coerceIn(260.dp, 620.dp)
     }
-    val diagnostics = remember(runtimeStatus, kernelFreezer, frameworkState) {
-        generateHookDiagnostics(runtimeStatus, kernelFreezer, frameworkState)
+    val diagnostics = remember(runtimeStatus, kernelFreezer, frameworkState, kernelEvidenceConfirmed, kernelEvidenceSource, milletBackendState) {
+        generateHookDiagnostics(runtimeStatus, kernelFreezer, frameworkState, kernelEvidenceConfirmed, kernelEvidenceSource, milletBackendState)
     }
-    // 可选项（可选能力）不参与就绪度统计，避免开机瞬间电源管理未拉起时整页变黄。
+    // 仅辅助框架信息可选；官方策略链路与真实冻结证据始终参与总览。
     val requiredDiagnostics = diagnostics.filterNot { it.optional }
     val passedCount = requiredDiagnostics.count { it.level == HookDiagnosticLevel.PASSED }
     val totalCount = requiredDiagnostics.size
@@ -597,10 +668,11 @@ private fun OverallStatusHeader(
     passedCount: Int,
     totalCount: Int
 ) {
+    val dark = isInDarkTheme()
     val containerColor = when (level) {
-        HookDiagnosticLevel.PASSED -> Color(0xFF1B3B24)
-        HookDiagnosticLevel.WARNING -> Color(0xFF3E2F1B)
-        HookDiagnosticLevel.FAILED -> Color(0xFF381515)
+        HookDiagnosticLevel.PASSED -> if (dark) Color(0xFF1B3B24) else Color(0xFFE4F8E9)
+        HookDiagnosticLevel.WARNING -> if (dark) Color(0xFF3E2F1B) else Color(0xFFFFF2DC)
+        HookDiagnosticLevel.FAILED -> if (dark) Color(0xFF381515) else Color(0xFFFDE4E4)
     }
 
     val iconColor = when (level) {
@@ -609,16 +681,28 @@ private fun OverallStatusHeader(
         HookDiagnosticLevel.FAILED -> Color(0xFFFF3B30)
     }
 
+    // 浅色模式下深色卡片会显得突兀，正文改用与底色配套的深色调。
+    val titleColor = if (dark) {
+        Color.White
+    } else {
+        when (level) {
+            HookDiagnosticLevel.PASSED -> Color(0xFF164A29)
+            HookDiagnosticLevel.WARNING -> Color(0xFF7A4A00)
+            HookDiagnosticLevel.FAILED -> Color(0xFF8C1D18)
+        }
+    }
+    val subtitleColor = titleColor.copy(alpha = 0.75f)
+
     val titleText = when (level) {
-        HookDiagnosticLevel.PASSED -> "所有服务运行正常"
-        HookDiagnosticLevel.WARNING -> "部分服务待就绪"
-        HookDiagnosticLevel.FAILED -> "XMillet 核心服务未连接"
+        HookDiagnosticLevel.PASSED -> "必要检测项均已确认"
+        HookDiagnosticLevel.WARNING -> "存在未确认或未支持项"
+        HookDiagnosticLevel.FAILED -> "存在检测失败项"
     }
 
     val tagText = when (level) {
-        HookDiagnosticLevel.PASSED -> "全部生效"
-        HookDiagnosticLevel.WARNING -> "部分就绪"
-        HookDiagnosticLevel.FAILED -> "未激活"
+        HookDiagnosticLevel.PASSED -> "检测通过"
+        HookDiagnosticLevel.WARNING -> "待确认"
+        HookDiagnosticLevel.FAILED -> "需核对"
     }
 
     Box(
@@ -655,7 +739,7 @@ private fun OverallStatusHeader(
                         text = titleText,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = titleColor
                     )
                     StatusTagMiuix(
                         label = tagText,
@@ -667,9 +751,9 @@ private fun OverallStatusHeader(
                 Spacer(Modifier.height(2.dp))
 
                 Text(
-                    text = "$totalCount 项检测中已就绪 $passedCount 项",
+                    text = "$totalCount 项必要检测中通过 $passedCount 项；辅助项单独列示，不代表所有应用已冻结",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.75f)
+                    color = subtitleColor
                 )
             }
         }

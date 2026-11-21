@@ -4,6 +4,7 @@ import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.ServiceRoleProtection
 import io.github.univers629.millet.core.XReflect
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,14 +28,14 @@ object ForceFreezeBridge {
     private const val FROM_WHO_MILLET = 1
     private const val FORCE_FREEZE_REASON = "XMillet force freeze"
 
-    /** 同一个名单只下发一次，名单变化时重置。 */
+    /** 已完成下发裁决的名单；前台暂缓与原生拒绝不记为完成。 */
     @Volatile
     private var lastApplied: Set<String> = emptySet()
 
     private val applying = AtomicBoolean(false)
 
     private sealed interface FreezeOutcome {
-        data class Done(val frozenNow: Boolean) : FreezeOutcome
+        data class Done(val accepted: Boolean) : FreezeOutcome
         data class Failed(val error: Throwable) : FreezeOutcome
     }
 
@@ -57,8 +58,9 @@ object ForceFreezeBridge {
                         lastApplied = emptySet()
                         break
                     }
-                    lastApplied = target
-                    applyNow(target)
+                    if (applyNow(target)) {
+                        lastApplied = target
+                    }
                     // 执行期间名单再次变化则追赶一轮，避免丢最后一次更新
                     if (PrefReader.systemPrefs.forceFreezeSet == target) break
                 }
@@ -70,55 +72,74 @@ object ForceFreezeBridge {
         }, "XMillet-ForceFreeze").start()
     }
 
-    private fun applyNow(target: Set<String>) {
-        val service = SystemState.greezeService ?: return
+    private fun applyNow(target: Set<String>): Boolean {
+        val service = SystemState.greezeService ?: return false
         val invoker = resolveInvoker(service.javaClass)
         if (invoker == null) {
             Logger.warn("强制冻结跳过: ${service.javaClass.name} 未找到兼容的 freezeUids/freezeUid 方法")
-            return
+            return false
         }
 
         var frozen = 0
         var skipped = 0
+        var complete = true
         val prefs = PrefReader.systemPrefs
-        val whiteApps = prefs.whiteAppSet
-        for (pkg in target) {
-            if (pkg in whiteApps) {
+        for (policyTarget in target) {
+            val (pkg, userId) = AppUidUtils.decodeQueryTarget(policyTarget)
+            if (pkg !in AppUidUtils.policyPackagesForUser(target, userId)) {
                 skipped++
                 continue
             }
-            val uid = SystemState.getPackageUid(pkg)
-            val candidates = ArrayList<Int>(2)
-            if (AppUidUtils.isManagedAppUid(uid, includeDualApp = false)) {
-                candidates.add(uid)
-            }
-            if (prefs.freezeDualApp) {
-                val dualUid = SystemState.getDualPackageUid(pkg)
-                if (AppUidUtils.isDualAppUid(dualUid)) {
-                    candidates.add(dualUid)
-                }
-            }
-            if (candidates.isEmpty()) {
+            if (userId == AppUidUtils.DUAL_APP_USER_ID && !prefs.freezeDualApp) {
                 skipped++
                 continue
             }
-            for (targetUid in candidates) {
-                if (SystemState.isUidFrozen(targetUid)) {
-                    skipped++
-                    continue
+            val uid = if (userId == AppUidUtils.DUAL_APP_USER_ID) {
+                SystemState.getDualPackageUid(pkg)
+            } else {
+                SystemState.getPackageUid(pkg)
+            }
+            if (!AppUidUtils.isManagedAppUid(uid) || AppUidUtils.userIdOf(uid) != userId) {
+                complete = false
+                Logger.info("强制冻结 $policyTarget 未解析到目标用户UID")
+                continue
+            }
+            if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
+                SystemState.isSystemAppUid(uid) ||
+                SystemState.isUidFrozen(uid)
+            ) {
+                skipped++
+                continue
+            }
+            val protection = ActiveImeTracker.resolveServiceRoleProtection(SystemState.systemContext, pkg, uid)
+            if (protection.blocksFreeze) {
+                if (protection == ServiceRoleProtection.UNKNOWN) complete = false
+                skipped++
+                continue
+            }
+            if (SystemState.isPackageCurrentlyForeground(pkg)) {
+                complete = false
+                skipped++
+                continue
+            }
+            when (val outcome = invoker(service, uid, FORCE_FREEZE_REASON, false)) {
+                is FreezeOutcome.Done -> if (outcome.accepted) {
+                    frozen++
+                } else {
+                    complete = false
+                    Logger.info("强制冻结 $policyTarget($uid) 未被原生接口接受")
                 }
-                when (val outcome = invoker(service, targetUid, FORCE_FREEZE_REASON, false)) {
-                    is FreezeOutcome.Done -> if (outcome.frozenNow) frozen++ else skipped++
-                    is FreezeOutcome.Failed -> {
-                        val err = outcome.error
-                        Logger.warn("强制冻结 $pkg($targetUid) 失败:${err.javaClass.simpleName}:${err.message}")
-                    }
+                is FreezeOutcome.Failed -> {
+                    complete = false
+                    val err = outcome.error
+                    Logger.warn("强制冻结 $policyTarget($uid) 失败:${err.javaClass.simpleName}:${err.message}")
                 }
             }
         }
         if (frozen > 0 || skipped > 0) {
-            Logger.alwaysInfo("强制冻结下发完成: 已冻结=$frozen, 跳过=$skipped, 名单=${target.size}")
+            Logger.alwaysInfo("强制冻结下发: 原生确认=$frozen, 跳过=$skipped, 名单=${target.size}, 完成=$complete")
         }
+        return complete
     }
 
     /**
@@ -150,21 +171,22 @@ object ForceFreezeBridge {
                         skipDetails.add("$uid:pkgNull")
                         continue
                     }
-                    if (pkg in latestPrefs.whiteAppSet ||
-                        ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, latestPrefs)
+                    if (AppUidUtils.containsPolicyTarget(latestPrefs.whiteAppSet, pkg, uid) ||
+                        ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, latestPrefs, uid) ||
+                        SystemState.isPackageCurrentlyForeground(pkg)
                     ) {
                         skipped++
                         skipDetails.add("$uid($pkg):exempt")
                         continue
                     }
-                    val inForce = pkg in latestPrefs.forceFreezeSet
-                    if (!inForce && SystemState.isSystemAppUid(uid)) {
+                    val inForce = AppUidUtils.containsPolicyTarget(latestPrefs.forceFreezeSet, pkg, uid)
+                    if (SystemState.isSystemAppUid(uid)) {
                         skipped++
                         skipDetails.add("$uid($pkg):system")
                         continue
                     }
                     if (!inForce &&
-                        pkg in latestPrefs.notFreezeWhenHasFgsSet &&
+                        AppUidUtils.containsPolicyTarget(latestPrefs.notFreezeWhenHasFgsSet, pkg, uid) &&
                         SystemState.checkAppFgService(uid)
                     ) {
                         skipped++
@@ -173,7 +195,7 @@ object ForceFreezeBridge {
                     }
                     when (val outcome = invoker(service, uid, "XMillet DualScrOff", !inForce)) {
                         is FreezeOutcome.Done -> {
-                            if (outcome.frozenNow) {
+                            if (outcome.accepted) {
                                 frozen++
                             } else {
                                 skipped++
@@ -226,19 +248,14 @@ object ForceFreezeBridge {
         )?.let { method ->
             return { service, uid, reason, checkFg ->
                 invokeFreezeMethod {
-                    when (val res: Any? = method.invoke(
+                    freezeResult(method.invoke(
                         service,
                         intArrayOf(uid),
                         0L,
                         FROM_WHO_MILLET,
                         reason,
                         checkFg
-                    )) {
-                        null -> false
-                        is Collection<*> -> uid in res
-                        is Boolean -> res
-                        else -> true
-                    }
+                    ), uid)
                 }
             }
         }
@@ -260,12 +277,19 @@ object ForceFreezeBridge {
                 return { service, uid, reason, _ ->
                     invokeFreezeMethod {
                         val res = method.invoke(service, uid, 0L, FROM_WHO_MILLET, reason, tailVal)
-                        res as? Boolean ?: true
+                        freezeResult(res, uid)
                     }
                 }
             }
         }
         return null
+    }
+
+    private fun freezeResult(result: Any?, uid: Int): Boolean = when (result) {
+        is Boolean -> result
+        is Collection<*> -> uid in result
+        is IntArray -> uid in result
+        else -> throw UnsupportedOperationException("Unconfirmed freeze return type: ${result?.javaClass?.name ?: "void/null"}")
     }
 
     private inline fun invokeFreezeMethod(block: () -> Boolean): FreezeOutcome =

@@ -1,22 +1,23 @@
 package io.github.univers629.millet.ui
 
 import android.content.Context
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.util.Locale
 
 /**
  * 模块配置 JSON 备份导出、导入恢复与重置工具。
- *
- * 修正原模块缺陷：
- * 1. 原模块在恢复空集合或拆分字符串时未过滤空串，导致 `StringSet` 被塞入 `""` 空包名；
- *    本实现统一过滤 `it.isNotEmpty()`。
- * 2. 重置默认配置时严格使用 [PrefsDefaults] 单一常量表（修正缺陷 #6），确保 `disableKill = true`
- *    与 `messageAppSet = {"com.tencent.mm"}` 在重置后与 Hook 侧默认值完全一致。
+ * 导入先校验全部配置，重置仅写入 [PrefsDefaults] 定义的核心键。
  */
 object BackupRestoreHelper {
+
+    private const val SCHEMA_KEY = "schemaVersion"
+    private const val SCHEMA_VERSION = 1
 
     private val BOOLEAN_KEYS: List<String> = listOf(
         PrefsKeys.IS_LOG,
@@ -51,6 +52,7 @@ object BackupRestoreHelper {
     fun exportToJson(context: Context): String {
         val sp = PrefReader.openUiPrefs(context)
         val root = JSONObject()
+        root.put(SCHEMA_KEY, SCHEMA_VERSION)
 
         for (key in BOOLEAN_KEYS) {
             root.put(key, PrefReader.readUiBoolean(sp, key))
@@ -74,51 +76,101 @@ object BackupRestoreHelper {
     }
 
     /**
-     * 从 JSON 字符串恢复配置（同时兼容 JSONArray 与原版逗号分隔字符串格式，自动剔除空串 `""`）。
+     * 完整校验后恢复配置；无版本备份兼容旧逗号分隔字符串格式。
      */
     fun importFromJson(context: Context, jsonText: String) {
-        val root = JSONObject(jsonText)
-        val sp = PrefReader.openUiPrefs(context)
+        val tokener = JSONTokener(jsonText)
+        val root = tokener.nextValue()
+        require(root is JSONObject) { "Invalid backup JSON" }
+        while (tokener.more()) {
+            require(tokener.next() in " \t\r\n") { "Trailing backup JSON content" }
+        }
+        val version = if (root.has(SCHEMA_KEY)) {
+            val value = root.get(SCHEMA_KEY)
+            require(value is Int && value == SCHEMA_VERSION) { "Unsupported backup schema" }
+            value
+        } else {
+            0
+        }
+        val keys = root.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            require(key == SCHEMA_KEY || key in PrefsKeys.ALL_KEYS) { "Unknown backup key: $key" }
+        }
 
-        PrefReader.editAllAndNotify(sp, clearFirst = false) {
-            for (key in BOOLEAN_KEYS) {
-                if (root.has(key)) {
-                    putBoolean(key, root.optBoolean(key, PrefsDefaults.booleanDefault(key)))
-                }
-            }
-
-            for (key in STRING_SET_KEYS) {
-                if (!root.has(key)) continue
-                val parsedSet = LinkedHashSet<String>()
-                val rawValue = root.opt(key)
-                when (rawValue) {
-                    is JSONArray -> {
-                        for (i in 0 until rawValue.length()) {
-                            val item = rawValue.optString(i, "").trim()
-                            if (item.isNotEmpty()) {
-                                parsedSet.add(item)
-                            }
-                        }
-                    }
-                    is String -> {
-                        // 兼容旧版 "[pkg1, pkg2]" 或逗号分隔格式，严格过滤空字符串
-                        rawValue.removeSurrounding("[", "]")
-                            .split(",")
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() }
-                            .forEach { parsedSet.add(it) }
-                    }
-                }
-                putStringSet(key, parsedSet)
-            }
-
-            if (root.has(PrefsKeys.LOG_TYPE)) {
-                putString(PrefsKeys.LOG_TYPE, root.optString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE))
-            }
-            if (root.has(PrefsKeys.LOG_LEVEL)) {
-                putString(PrefsKeys.LOG_LEVEL, root.optString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL))
+        val booleans = LinkedHashMap<String, Boolean>()
+        val sets = LinkedHashMap<String, Set<String>>()
+        val strings = LinkedHashMap<String, String>()
+        for (key in BOOLEAN_KEYS) {
+            if (root.has(key)) {
+                val value = root.get(key)
+                require(value is Boolean) { "Expected Boolean for $key" }
+                booleans[key] = value
             }
         }
+        for (key in STRING_SET_KEYS) {
+            if (root.has(key)) sets[key] = parsePolicySet(key, root.get(key), version)
+        }
+        if (root.has(PrefsKeys.LOG_TYPE)) {
+            val value = root.get(PrefsKeys.LOG_TYPE)
+            require(value is String && value in setOf("xposed", "file")) { "Invalid logType" }
+            strings[PrefsKeys.LOG_TYPE] = value
+        }
+        if (root.has(PrefsKeys.LOG_LEVEL)) {
+            val value = root.get(PrefsKeys.LOG_LEVEL)
+            require(value is String) { "Expected String for logLevel" }
+            strings[PrefsKeys.LOG_LEVEL] = when (value.lowercase(Locale.ROOT)) {
+                "debug", "d" -> "debug"
+                "info", "i", "verbose", "v" -> "info"
+                "warn", "w" -> "warn"
+                "error", "e" -> "error"
+                else -> throw IllegalArgumentException("Invalid logLevel")
+            }
+        }
+        require(booleans.isNotEmpty() || sets.isNotEmpty() || strings.isNotEmpty()) { "Empty backup" }
+
+        val sp = PrefReader.openUiPrefs(context)
+        val white = sets[PrefsKeys.WHITE_APP_SET] ?: PrefReader.readUiStringSet(sp, PrefsKeys.WHITE_APP_SET)
+        val force = sets[PrefsKeys.FORCE_FREEZE_SET] ?: PrefReader.readUiStringSet(sp, PrefsKeys.FORCE_FREEZE_SET)
+        require(white.none { it in force }) { "Conflicting whiteAppSet and forceFreezeSet targets" }
+
+        PrefReader.editAllAndNotify(sp, clearFirst = false) {
+            for ((key, value) in booleans) putBoolean(key, value)
+            for ((key, value) in sets) putStringSet(key, value)
+            for ((key, value) in strings) putString(key, value)
+        }
+    }
+
+    private fun parsePolicySet(key: String, raw: Any, version: Int): Set<String> {
+        val result = LinkedHashSet<String>()
+        when (raw) {
+            is JSONArray -> {
+                for (index in 0 until raw.length()) {
+                    val target = raw.get(index)
+                    require(target is String && AppUidUtils.validPolicyTarget(target)) {
+                        "Invalid policy target for $key at index $index"
+                    }
+                    result.add(target)
+                }
+            }
+            is String -> {
+                require(version == 0) { "Expected string array for $key" }
+                var body = raw.trim()
+                if (body.startsWith("[") || body.endsWith("]")) {
+                    require(body.startsWith("[") && body.endsWith("]")) { "Invalid legacy set for $key" }
+                    body = body.substring(1, body.length - 1).trim()
+                }
+                if (body.isNotEmpty()) {
+                    for (item in body.split(',')) {
+                        val target = item.trim()
+                        require(AppUidUtils.validPolicyTarget(target)) { "Invalid policy target for $key" }
+                        result.add(target)
+                    }
+                }
+            }
+            else -> throw IllegalArgumentException("Expected string array for $key")
+        }
+        return result
     }
 
     /**
@@ -126,7 +178,7 @@ object BackupRestoreHelper {
      */
     fun resetToDefaults(context: Context) {
         val sp = PrefReader.openUiPrefs(context)
-        PrefReader.editAllAndNotify(sp, clearFirst = true) {
+        PrefReader.editAllAndNotify(sp, clearFirst = false) {
             for (key in BOOLEAN_KEYS) {
                 putBoolean(key, PrefsDefaults.booleanDefault(key))
             }

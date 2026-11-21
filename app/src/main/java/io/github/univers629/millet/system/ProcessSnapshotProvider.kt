@@ -8,6 +8,7 @@ import android.system.Os
 import android.system.OsConstants
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
+import io.github.univers629.millet.core.ProcessFreezeReader
 import java.io.File
 
 /**
@@ -19,22 +20,20 @@ import java.io.File
  *
  * 数据来源与判据：
  * - 进程集合：`/proc/<pid>/status` 的 `Uid:` 落在 10000–19999（应用进程）；
- * - 进程名：`/proc/<pid>/cmdline`（被截断的 `Name:` 只作兜底），包名取冒号前部分；
+ * - 进程名：`/proc/<pid>/cmdline`（被截断的 `Name:` 只作兜底）；
+ * - 所属包：系统进程的 `pkgList` 与实际 UID 的安装包列表，不将自定义进程名当作包名；
  * - 内存：优先读取 `/proc/<pid>/smaps_rollup` 的 `Pss:`（按比例分摊共享页的真实物理内存，
  *   避免多进程对同一份系统/框架/APK 映射页重复计算造成数倍虚高），读不到时退回 `/proc/<pid>/statm`；
  * - 运行时长：`/proc/<pid>/stat` 第 22 字段 starttime（100Hz）与 `/proc/uptime` 之差；
- * - 冻结：优先读 cgroup 真值（v2 `cgroup.freeze`、v1 `freezer.state=FROZEN`），
- *   读不到时退回 wchan 判据；
+ * - 冻结：读取实际挂载下的 v2 `cgroup.events frozen`、v1 `freezer.state`；
+ *   读不到时仅接受明确的冻结等待入口或信号停止状态；
  * - 服务：`ActivityManager#getRunningServices`（system_server 以 SYSTEM_UID 调用，
  *   权限检查直接放行），按 pid 归并。
  */
 object ProcessSnapshotProvider {
 
     /** 快照协议版本，App 侧据此拒绝不认识的格式。 */
-    const val SNAPSHOT_VERSION = "v1"
-
-    private const val MIN_APP_UID = 10000
-    private const val MAX_APP_UID = 19999
+    const val SNAPSHOT_VERSION = "v2"
 
     /** 同一进程内 1.5 秒内的重复请求直接复用，避免 App 刷新把 system_server 拖慢。 */
     private const val CACHE_WINDOW_MS = 1_500L
@@ -58,18 +57,20 @@ object ProcessSnapshotProvider {
     /** 返回序列化快照（首行是版本号，其后每行一个进程，字段用 `|` 分隔）。 */
     fun snapshot(): String {
         val now = SystemClock.uptimeMillis()
-        if (now - cachedAt in 0..CACHE_WINDOW_MS) return cachedPayload
+        if (cachedPayload.isNotEmpty() && now - cachedAt in 0..CACHE_WINDOW_MS) return cachedPayload
         synchronized(lock) {
             val refreshedAt = SystemClock.uptimeMillis()
-            if (refreshedAt - cachedAt in 0..CACHE_WINDOW_MS) return cachedPayload
+            if (cachedPayload.isNotEmpty() && refreshedAt - cachedAt in 0..CACHE_WINDOW_MS) return cachedPayload
             val payload = try {
                 build()
             } catch (t: Throwable) {
                 Logger.error("构建进程快照失败", t)
                 ""
             }
-            cachedPayload = payload
-            cachedAt = refreshedAt
+            if (payload.isNotEmpty()) {
+                cachedPayload = payload
+                cachedAt = refreshedAt
+            }
             return payload
         }
     }
@@ -78,10 +79,14 @@ object ProcessSnapshotProvider {
         val pageSizeKb = (Os.sysconf(OsConstants._SC_PAGESIZE) / 1024L).coerceAtLeast(4L)
         val uptimeSec = readUptimeSeconds()
         val servicesByPid = collectServicesByPid()
+        val processesByPid = collectProcessesByPid()
+        val packagesByUid = HashMap<Int, List<String>?>()
         val builder = StringBuilder(16 * 1024)
-        builder.append(SNAPSHOT_VERSION).append('\n')
+        builder.append(SNAPSHOT_VERSION).append('|').append(SystemClock.uptimeMillis()).append('\n')
 
-        val pidNames = File("/proc").list() ?: return builder.toString()
+        val pidNames = File("/proc").list() ?: throw java.io.IOException("无法枚举应用进程")
+        val mountInfo = readText("/proc/self/mountinfo").orEmpty()
+        val mounts = ProcessFreezeReader.mounts(mountInfo)
 
         var rowCount = 0
         var withServices = 0
@@ -95,6 +100,9 @@ object ProcessSnapshotProvider {
             val stat = readText("/proc/$pid/stat") ?: continue
             val processName = readCmdline(pid).ifEmpty { parseName(status) }
             if (processName.isEmpty()) continue
+            if (!packagesByUid.containsKey(uid)) packagesByUid[uid] = readPackagesForUid(uid)
+            val processInfo = processesByPid[pid]?.takeIf { it.uid == uid && it.processName == processName }
+            val packageName = resolvePackageName(processName, packagesByUid[uid], processInfo?.pkgList?.toList()).orEmpty()
             val (state, startSec) = parseStat(stat)
             val elapsedSec = if (uptimeSec > 0.0 && startSec > 0.0) {
                 (uptimeSec - startSec).toLong().coerceAtLeast(0L)
@@ -104,7 +112,10 @@ object ProcessSnapshotProvider {
             val (vszKb, statmRssKb) = parseStatm(readText("/proc/$pid/statm").orEmpty(), pageSizeKb)
             val memKb = readPssKb(pid) ?: statmRssKb
             val wchan = readText("/proc/$pid/wchan")?.trim().orEmpty()
-            val freezerType = readFrozenType(pid).ifEmpty { freezerTypeFromWchan(wchan) }
+            val evidence = ProcessFreezeReader.inspect(readText("/proc/$pid/cgroup"), state, wchan, mounts, ::readText)
+            val statAfter = readText("/proc/$pid/stat") ?: continue
+            if (parseStat(statAfter).second != startSec) continue
+            val freezerType = evidence.type.takeUnless { it == io.github.univers629.millet.core.RootHelper.FreezerType.UNKNOWN }?.name.orEmpty()
             val services = servicesByPid[pid].orEmpty()
 
             builder.append(pid).append('|')
@@ -114,10 +125,11 @@ object ProcessSnapshotProvider {
                 .append(sanitize(wchan)).append('|')
                 .append(elapsedSec).append('|')
                 .append(sanitize(processName)).append('|')
-                .append(sanitize(processName.substringBefore(':'))).append('|')
+                .append(sanitize(packageName)).append('|')
                 .append(sanitize(state)).append('|')
                 .append(freezerType).append('|')
                 .append(services.joinToString(";") { sanitize(it) })
+                .append('|').append(evidence.state.name)
                 .append('\n')
             rowCount++
             if (services.isNotEmpty()) withServices++
@@ -139,7 +151,48 @@ object ProcessSnapshotProvider {
         Logger.alwaysInfo("进程快照: 应用进程 $rows 个，其中带挂载服务 $withServices 个")
     }
 
-    // ==================== 服务归并 ====================
+    // ==================== 进程归属与服务归并 ====================
+
+    private fun collectProcessesByPid(): Map<Int, ActivityManager.RunningAppProcessInfo> {
+        val context = SystemState.systemContext ?: return emptyMap()
+        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return emptyMap()
+        val token = Binder.clearCallingIdentity()
+        return try {
+            manager.getRunningAppProcesses().orEmpty().associateBy { it.pid }
+        } catch (_: Throwable) {
+            emptyMap()
+        } finally {
+            Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    private fun readPackagesForUid(uid: Int): List<String>? {
+        val manager = SystemState.systemContext?.packageManager ?: return null
+        val token = Binder.clearCallingIdentity()
+        return try {
+            manager.getPackagesForUid(uid)?.toList()
+        } catch (_: Throwable) {
+            null
+        } finally {
+            Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    /** 优先使用进程归属；共享 UID 无法消歧时返回未知，不选择任意安装包。 */
+    internal fun resolvePackageName(
+        processName: String,
+        uidPackages: Collection<String>?,
+        processPackages: Collection<String>?,
+    ): String? {
+        val installed = uidPackages?.filter { it.isNotBlank() }?.toSet()
+        val owners = processPackages.orEmpty()
+            .filter { it.isNotBlank() && (installed == null || it in installed) }.toSet()
+        owners.singleOrNull()?.let { return it }
+        val namedPackage = processName.substringBefore(':')
+        val candidates = owners.ifEmpty { installed.orEmpty() }
+        if (namedPackage in candidates) return namedPackage
+        return if (owners.isEmpty()) installed?.singleOrNull() else null
+    }
 
     /**
      * 读取系统当前运行中的服务，按进程号归并成「pid -> 服务类名列表」。
@@ -242,38 +295,6 @@ object ProcessSnapshotProvider {
     }
 
     private fun readPssKb(pid: Int): Long? = parsePssKb(readText("/proc/$pid/smaps_rollup"))
-
-    /**
-     * 读 cgroup 冻结真值：v2 看 `cgroup.freeze` 是否为 1，v1 看 `freezer.state` 是否为 FROZEN。
-     * @return "V1" / "V2"；读不到或未冻结返回空串。
-     */
-    private fun readFrozenType(pid: Int): String {
-        val cgroup = readText("/proc/$pid/cgroup") ?: return ""
-        for (line in cgroup.lineSequence()) {
-            if (line.startsWith("0::")) {
-                val path = line.substring(3).trim().trimEnd('/')
-                if (path.isEmpty() || path == "/") continue
-                val value = readText("/sys/fs/cgroup$path/cgroup.freeze")?.trim() ?: continue
-                if (value == "1") return "V2"
-            } else if (line.contains(":freezer:")) {
-                val path = line.substringAfter(":freezer:").trim().trimEnd('/')
-                val value = readText("/sys/fs/cgroup/freezer$path/freezer.state")?.trim() ?: continue
-                if (value.equals("FROZEN", ignoreCase = true)) return "V1"
-            }
-        }
-        return ""
-    }
-
-    private fun freezerTypeFromWchan(wchan: String): String {
-        val lower = wchan.lowercase()
-        return when {
-            lower.contains("do_freezer_trap") || lower.contains("get_signal") ||
-                lower.contains("freezable_schedule") -> "V2"
-            lower.contains("__refrigerator") -> "V1"
-            lower.contains("do_signal_stop") -> "KILL"
-            else -> ""
-        }
-    }
 
     /** 协议用 `|` 分隔字段、`;` 分隔服务，字段内不允许出现这两个字符。 */
     private fun sanitize(value: String): String = value

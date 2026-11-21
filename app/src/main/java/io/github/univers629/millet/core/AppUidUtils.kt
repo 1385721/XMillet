@@ -39,6 +39,31 @@ object AppUidUtils {
     fun encodeQueryTarget(packageName: String, uid: Int): String =
         if (isDualAppUid(uid)) "$packageName#$DUAL_APP_USER_ID" else packageName
 
+    private val POLICY_PACKAGE_PATTERN = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*")
+
+    fun validPolicyTarget(raw: String): Boolean {
+        val (packageName, userId) = decodeQueryTarget(raw)
+        return POLICY_PACKAGE_PATTERN.matches(packageName) &&
+            (userId == PRIMARY_USER_ID || userId == DUAL_APP_USER_ID) &&
+            raw == if (userId == DUAL_APP_USER_ID) "$packageName#$DUAL_APP_USER_ID" else packageName
+    }
+
+    fun containsPolicyTarget(targets: Set<String>, packageName: String, uid: Int): Boolean {
+        if (!isManagedAppUid(uid) || !POLICY_PACKAGE_PATTERN.matches(packageName)) return false
+        return encodeQueryTarget(packageName, uid) in targets
+    }
+
+    fun policyPackagesForUser(targets: Set<String>, userId: Int): Set<String> {
+        if (userId != PRIMARY_USER_ID && userId != DUAL_APP_USER_ID) return emptySet()
+        val packages = LinkedHashSet<String>()
+        for (target in targets) {
+            if (!validPolicyTarget(target)) continue
+            val (packageName, targetUserId) = decodeQueryTarget(target)
+            if (targetUserId == userId) packages.add(packageName)
+        }
+        return packages
+    }
+
     fun decodeQueryTarget(raw: String): Pair<String, Int> {
         val suffix = "#$DUAL_APP_USER_ID"
         return if (raw.endsWith(suffix) && raw.length > suffix.length) {

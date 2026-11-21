@@ -128,7 +128,14 @@ object RomCapabilities {
      * 由 App 侧按「任一进程为真即可用」合并。
      */
     fun buildCapabilityWireFormat(loader: ClassLoader?): String {
-        return capabilityMap(loader).entries.joinToString(",") { (key, value) ->
+        val installed = HookInstallRegistry.snapshot()
+            .filter { it.state == HookInstallRegistry.State.INSTALLED }
+            .map { it.id }.toSet()
+        val capabilities = capabilityMap(loader) + mapOf(
+            "millet_registered" to installed.containsAll(setOf("P2", "P9", "P10", "P17")),
+            "controller_registered" to ("P23_FROZEN_DECISION" in installed)
+        )
+        return capabilities.entries.joinToString(",") { (key, value) ->
             "$key=${if (value) 1 else 0}"
         }
     }

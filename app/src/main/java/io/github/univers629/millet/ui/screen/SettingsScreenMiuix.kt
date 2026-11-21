@@ -386,7 +386,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "亮屏时保持冻结",
-                            summary = "拦截 Greezer 的 screen on 解冻；前台拉起仍会正常唤醒",
+                            summary = "屏幕亮起时，不让系统批量解冻后台应用。此项不控制手机进入深度睡眠",
                             checked = disableScreenOnThaw,
                             onCheckedChange = {
                                 disableScreenOnThaw = it
@@ -428,7 +428,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "控制双开应用冻结",
-                            summary = "绕过系统对双开空间 (UID 999xxxx) 的冻结限制，复用主应用策略",
+                            summary = "接管双开空间（用户 999）的冻结，应用策略单独设置；原生包名级名单仍可能共享",
                             checked = freezeDualApp,
                             onCheckedChange = {
                                 freezeDualApp = it
@@ -460,7 +460,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "启用 Doze 省电控制增强",
-                            summary = "接管 DeviceIdleController，息屏10秒后自动推入 Deep Doze",
+                            summary = "息屏且未充电时，约 10 秒后尝试进入深度睡眠。亮屏或充电时，退出本模块开启的强制睡眠",
                             checked = enableDoze,
                             onCheckedChange = {
                                 enableDoze = it

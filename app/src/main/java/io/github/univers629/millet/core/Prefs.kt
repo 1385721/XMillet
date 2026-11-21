@@ -35,7 +35,7 @@ object PrefsKeys {
     const val FREEZE_STATS = "freezeStats"
     const val FREEZE_DUAL_APP = "freezeDualApp"
 
-    // 2. 八个 Set<String> 应用包名集合
+    // 2. 七个 Set<String> 策略目标集合：主用户包名或双开包名#999
     const val WHITE_APP_SET = "whiteAppSet"
     const val MESSAGE_APP_SET = "messageAppSet"
     const val FORCE_FREEZE_SET = "forceFreezeSet"
@@ -221,7 +221,7 @@ data class PrefsSnapshot(
     val skipStateCheck: Boolean = PrefsDefaults.SKIP_STATE_CHECK,
     val disableMotionListener: Boolean = PrefsDefaults.DISABLE_MOTION_LISTENER,
 
-    // 7 个应用策略集合
+    // 7 个应用策略集合；无后缀条目仅属于主用户
     val whiteAppSet: Set<String> = PrefsDefaults.WHITE_APP_SET,
     val messageAppSet: Set<String> = PrefsDefaults.MESSAGE_APP_SET,
     val forceFreezeSet: Set<String> = PrefsDefaults.FORCE_FREEZE_SET,

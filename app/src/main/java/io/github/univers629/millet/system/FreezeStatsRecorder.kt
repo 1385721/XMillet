@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.FreezeStatsCodec
+import io.github.univers629.millet.core.StatsEventOrigin
 import io.github.univers629.millet.core.FreezeStatsSnapshotData
 import io.github.univers629.millet.core.AppFreezeStatsData
 import io.github.univers629.millet.core.InterceptRule
@@ -39,7 +40,7 @@ import kotlin.math.abs
  * 纯 JVM 可测的墓碑统计核心聚合引擎。
  *
  * 设计要点：
- * 1. 所有热路径方法严格零文件 IO、零 PackageManager、零 PowerManager 调用；
+ * 1. 原始通知累加为纯内存；完整 UID 证据仅在既有入口按需、有界采样；
  * 2. 所有内存集合均设上限（7 天窗口、24 小时柱、最多 256 应用/桶、每应用最多 16 条原始理由并取 Top 5、
  *    最近动态 256 条固定环形缓冲区），确保 system_server 常驻内存可控；
  * 3. `ReentrantLock` 仅作纯内存叶锁使用，绝不在持锁期间回调外部系统服务或磁盘 IO，防止死锁。
@@ -69,7 +70,28 @@ class FreezeStatsEngine(
 
         private val WAKE_CATEGORY_COUNT = WakeCategory.entries.size
         private val INTERCEPT_RULE_COUNT = InterceptRule.entries.size
-        private const val ONE_WEEK_MILLIS = 7L * 86_400_000L
+    private const val ONE_WEEK_MILLIS = 7L * 86_400_000L
+    private const val MIN_WALL_CLOCK_MILLIS = 946_684_800_000L
+
+    /**
+     * 「已冻结」状态最多认作一个冻结 episode 的时长。
+     * 冻结器会对同一批应用每几秒重发一次 freeze 调用（check binder 扫描），
+     * 只要中间没有观测到解冻，就都属于同一次冻结；超过该时长仍无解冻记录则视为状态陈旧，
+     * 允许重新计入一次冻结，避免漏掉 hook 未能捕捉的解冻。
+     */
+    private const val FREEZE_EPISODE_STALE_MS = 30L * 60_000L
+
+    /**
+     * 短于该时长的冻结视为抖动：应用在稳定前即被唤醒，冻结未真正生效。
+     * 这类冻结不计入冻结次数，对应最近记录一并撤回；解冻仍按真实唤醒计数。
+     */
+    private const val FREEZE_JITTER_MS = 10_000L
+
+    /**
+     * 抖动型冻解循环（冻结不到 [FREEZE_JITTER_MS] 即被包唤醒、随后再次冻结）会以十几秒一轮重复产生记录，
+     * 同一应用在 2 分钟内（[WAKE_BURST_WINDOW_MS]）的后续抖动唤醒合并为一次；超过窗口或长冻结被唤醒不受影响。
+     */
+    private const val WAKE_BURST_WINDOW_MS = 2 * 60_000L
     }
 
     private class AppAccumulator(val uid: Int) {
@@ -177,8 +199,19 @@ class FreezeStatsEngine(
 
     private class BootBucket : ScopeBucket()
 
+    private data class DeferredRestore(
+        val state: FreezeStatsCodec.PersistedStatsState?,
+        val wallOrigin: Long,
+        val elapsedOrigin: Long,
+        val minimumWallTime: Long,
+        val bootId: String,
+    )
+
     private val lock = ReentrantLock()
     private val ioLock = Any()
+
+
+
 
     @Volatile
     var isScreenOn: Boolean = true
@@ -186,6 +219,8 @@ class FreezeStatsEngine(
 
     private var screenOffSinceMillis: Long = 0L
     private val activeFrozenSinceByUid = HashMap<Int, Long>()
+    private val freezeEpisodeStartByUid = HashMap<Int, Long>()
+    private val lastBurstWakeAtByUid = HashMap<Int, Long>()
     private val uidToPackage = ConcurrentHashMap<Int, String>()
     private val packageToUid = ConcurrentHashMap<String, Int>()
 
@@ -202,19 +237,25 @@ class FreezeStatsEngine(
 
     private var dirty = false
     private var mutationSeq = 0L
+    private var deferredRestore: DeferredRestore? = null
+    private var restoreHandled = false
 
     init {
         val now = clock()
-        baselineSinceMillis = now
-        bootSinceMillis = now
-        lastDayKey = epochDay(now)
+        val initialTime = now.coerceAtLeast(MIN_WALL_CLOCK_MILLIS)
+        if (now < MIN_WALL_CLOCK_MILLIS) {
+            deferredRestore = DeferredRestore(null, initialTime, elapsedClock(), MIN_WALL_CLOCK_MILLIS, "")
+        }
+        baselineSinceMillis = initialTime
+        bootSinceMillis = initialTime
+        lastDayKey = epochDay(initialTime)
         days[lastDayKey] = DayBucket(lastDayKey)
     }
 
     // ==================== 屏幕状态 ====================
 
     fun initScreenState(screenOn: Boolean) {
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             ensureCurrentDayLocked(now)
             isScreenOn = screenOn
@@ -223,7 +264,7 @@ class FreezeStatsEngine(
     }
 
     fun onScreenStateChanged(screenOn: Boolean) {
-        val now = clock()
+        val now = statsTime()
         var shouldSaveOnScreenOff = false
         lock.withLock {
             ensureCurrentDayLocked(now)
@@ -245,7 +286,7 @@ class FreezeStatsEngine(
     }
 
     fun onEnabledChanged(enabled: Boolean) {
-        val now = clock()
+        val now = statsTime()
         var shouldSave = false
         lock.withLock {
             ensureCurrentDayLocked(now)
@@ -294,16 +335,16 @@ class FreezeStatsEngine(
         reason: String,
         packageNameHint: String? = null,
         onlyIfNotFrozen: Boolean = false,
+        origin: StatsEventOrigin = StatsEventOrigin.UNKNOWN,
     ) {
         if (!isTrackableAppUid(uid) || !enabledProvider()) return
         if (!packageNameHint.isNullOrEmpty()) {
             cachePackageName(uid, packageNameHint)
         }
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
-            if (onlyIfNotFrozen && activeFrozenSinceByUid.containsKey(uid)) return
             val today = ensureCurrentDayLocked(now)
-            recordFreezeSingleLocked(today, uid, reason, now)
+            recordFreezeSingleLocked(today, uid, reason, now, origin, onlyIfNotFrozen)
         }
     }
 
@@ -311,9 +352,10 @@ class FreezeStatsEngine(
         uids: List<Int>,
         reason: String,
         onlyIfNotFrozen: Boolean = true,
+        origin: StatsEventOrigin = StatsEventOrigin.UNKNOWN,
     ) {
         if (uids.isEmpty() || !enabledProvider()) return
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             var prevUid = Int.MIN_VALUE
@@ -330,9 +372,8 @@ class FreezeStatsEngine(
                     }
                 }
                 if (duplicate) continue
-                if (onlyIfNotFrozen && activeFrozenSinceByUid.containsKey(uid)) continue
                 prevUid = uid
-                recordFreezeSingleLocked(today, uid, reason, now)
+                recordFreezeSingleLocked(today, uid, reason, now, origin, onlyIfNotFrozen)
             }
         }
     }
@@ -342,10 +383,17 @@ class FreezeStatsEngine(
         uid: Int,
         reason: String,
         now: Long,
+        origin: StatsEventOrigin,
+        onlyIfNotFrozen: Boolean,
     ) {
-        if (!activeFrozenSinceByUid.containsKey(uid)) {
-            activeFrozenSinceByUid[uid] = now
+        val frozenSince = activeFrozenSinceByUid[uid]
+        if (onlyIfNotFrozen && frozenSince != null && now - frozenSince < FREEZE_EPISODE_STALE_MS) {
+            // 冻结器周期性重发同一批 uid 的冻结请求：仍在同一次冻结区间内，不重复计数。
+            return
         }
+        // 新的一次冻结（或状态陈旧、疑似漏记解冻）：重新起算区间。
+        activeFrozenSinceByUid[uid] = now
+        freezeEpisodeStartByUid[uid] = now
         today.freezeCount++
         today.getOrCreateApp(uid).freezeCount++
         bootBucket.freezeCount++
@@ -357,27 +405,41 @@ class FreezeStatsEngine(
                 uid = uid,
                 packageName = uidToPackage[uid].orEmpty(),
                 kind = StatsEventKind.FREEZE,
+                origin = origin,
                 rawReason = reason,
             )
         )
         markDirtyLocked()
     }
 
-    fun recordThaw(uid: Int, reason: String, packageNameHint: String? = null) {
+    fun recordThaw(uid: Int, reason: String, packageNameHint: String? = null,
+        origin: StatsEventOrigin = StatsEventOrigin.UNKNOWN) {
         if (!isTrackableAppUid(uid) || !enabledProvider()) return
         if (!packageNameHint.isNullOrEmpty()) {
             cachePackageName(uid, packageNameHint)
         }
-        val category = FreezeReasonClassifier.classifyWakeCategory(reason)
+        val category = if (origin == StatsEventOrigin.MODULE) WakeCategory.MODULE_OPERATION
+            else FreezeReasonClassifier.classifyWakeCategory(reason)
         val screenOnNow = isScreenOn
-        val now = clock()
+        val now = statsTime()
         val hour = hourOfDay(now)
 
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             val frozenSince = activeFrozenSinceByUid.remove(uid)
-            if (frozenSince != null && now > frozenSince) {
+            val episodeStart = freezeEpisodeStartByUid.remove(uid)
+            val jittered = episodeStart != null && now - episodeStart in 0 until FREEZE_JITTER_MS
+            if (frozenSince != null && !jittered && now > frozenSince) {
                 addFrozenDurationLocked(uid, frozenSince, now)
+            }
+            if (jittered && episodeStart != null) {
+            rollbackJitterFreezeLocked(today, uid, episodeStart)
+                val lastBurst = lastBurstWakeAtByUid[uid]
+                if (lastBurst != null && now - lastBurst in 0 until WAKE_BURST_WINDOW_MS) {
+                    // 抖动循环仍在持续：本次唤醒并入上一个批次，不重复计数、不写最近记录。
+                    return@withLock
+                }
+                lastBurstWakeAtByUid[uid] = now
             }
 
             today.wakeByCategory[category.ordinal]++
@@ -405,6 +467,7 @@ class FreezeStatsEngine(
                     uid = uid,
                     packageName = uidToPackage[uid].orEmpty(),
                     kind = StatsEventKind.THAW,
+                    origin = origin,
                     category = category,
                     rawReason = reason,
                 )
@@ -423,7 +486,7 @@ class FreezeStatsEngine(
         if (!packageNameHint.isNullOrEmpty()) {
             cachePackageName(uid, packageNameHint)
         }
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             today.interceptByRule[rule.ordinal]++
@@ -452,7 +515,7 @@ class FreezeStatsEngine(
 
     fun recordSystemIntercept(rule: InterceptRule, reason: String) {
         if (!enabledProvider()) return
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             today.interceptByRule[rule.ordinal]++
@@ -476,7 +539,7 @@ class FreezeStatsEngine(
         if (!packageNameHint.isNullOrEmpty()) {
             cachePackageName(uid, packageNameHint)
         }
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             today.protectedCount++
@@ -503,7 +566,7 @@ class FreezeStatsEngine(
         if (!packageNameHint.isNullOrEmpty()) {
             cachePackageName(uid, packageNameHint)
         }
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
             val today = ensureCurrentDayLocked(now)
             today.killBlockedCount++
@@ -529,12 +592,11 @@ class FreezeStatsEngine(
 
     fun buildSnapshot(window: StatsWindow): FreezeStatsSnapshotData {
         val enabled = enabledProvider()
-        val preFetchTime = clock()
+        val preFetchTime = statsTime()
         val liveFrozenUids = if (enabled) frozenUidsProvider() else null
         val dispatchActive = dispatchThawEventActiveProvider()
-
         val rawCopy = lock.withLock {
-            val now = clock()
+            val now = statsTime()
             val todayKey = epochDay(now)
             ensureCurrentDayLocked(now)
             if (enabled) {
@@ -699,12 +761,16 @@ class FreezeStatsEngine(
             )
         }
 
-        // 在锁外延迟解析包名（零死锁风险、零热路径开销）
+        // 在锁外解析当前归属，同一快照的每个完整 UID 仅查询一次。
+        val packagesByUid = HashMap<Int, String>()
+        fun resolveSnapshotPackage(uid: Int): String =
+            packagesByUid.getOrPut(uid) { resolvePackageAtExport(uid) }
+
         val resolvedApps = rawCopy.apps
             .map { raw ->
                 AppFreezeStatsData(
                     uid = raw.uid,
-                    packageName = resolvePackageAtExport(raw.uid),
+                    packageName = resolveSnapshotPackage(raw.uid),
                     freezeCount = raw.freezeCount,
                     wakeByCategory = raw.wakeByCategory,
                     interceptByRule = raw.interceptByRule,
@@ -722,10 +788,10 @@ class FreezeStatsEngine(
             )
 
         val resolvedRecent = rawCopy.recent.map { ev ->
-            if (ev.packageName.isNotEmpty() || !isTrackableAppUid(ev.uid)) {
+            if (!isTrackableAppUid(ev.uid)) {
                 ev
             } else {
-                ev.copy(packageName = resolvePackageAtExport(ev.uid))
+                ev.copy(packageName = resolveSnapshotPackage(ev.uid))
             }
         }
 
@@ -753,8 +819,9 @@ class FreezeStatsEngine(
     }
 
     fun reset(): Boolean {
-        val now = clock()
+        val now = statsTime()
         lock.withLock {
+            if (deferredRestore != null) return false
             days.clear()
             lastDayKey = epochDay(now)
             days[lastDayKey] = DayBucket(lastDayKey)
@@ -783,7 +850,8 @@ class FreezeStatsEngine(
 
     fun saveIfDirty(forceFlush: Boolean = false): Boolean {
         val snapshotPair = lock.withLock {
-            val now = clock()
+            val now = statsTime()
+            if (deferredRestore != null) return false
             ensureCurrentDayLocked(now)
             if (forceFlush) {
                 flushOngoingDurationsLocked(now, null)
@@ -808,6 +876,7 @@ class FreezeStatsEngine(
     fun saveSync(): Boolean = saveIfDirty(forceFlush = true)
 
     fun restoreFromDisk(): Boolean {
+        if (lock.withLock { restoreHandled }) return true
         val file = storageFile ?: return false
         val raw = synchronized(ioLock) {
             if (!file.exists() || !file.canRead()) return false
@@ -818,12 +887,125 @@ class FreezeStatsEngine(
         val nowElapsed = elapsedClock()
         val currentBootId = bootIdProvider()
         lock.withLock {
-            applyRestoredStateLocked(parsed, now, nowElapsed, currentBootId)
+            if (restoreHandled) return true
+            if (now < maxOf(MIN_WALL_CLOCK_MILLIS, parsed.savedAtMillis)) {
+                val sameBoot = currentBootId.isNotEmpty() && currentBootId == parsed.bootId
+                val elapsedGap = if (sameBoot) (nowElapsed - parsed.bootElapsedMillis).coerceAtLeast(0L) else 0L
+                val origin = maxOf(MIN_WALL_CLOCK_MILLIS, parsed.savedAtMillis) + elapsedGap
+                deferredRestore = DeferredRestore(
+                    parsed, origin, nowElapsed, maxOf(MIN_WALL_CLOCK_MILLIS, parsed.savedAtMillis), currentBootId,
+                )
+                baselineSinceMillis = origin
+                bootSinceMillis = origin
+                lastDayKey = epochDay(origin)
+                days.clear()
+                days[lastDayKey] = DayBucket(lastDayKey)
+                if (sameBoot) {
+                    for ((uid, since) in parsed.activeFrozenSinceByUid) {
+                        if (isTrackableAppUid(uid) && since <= parsed.savedAtMillis) {
+                            activeFrozenSinceByUid.putIfAbsent(uid, parsed.savedAtMillis)
+                        }
+                    }
+                }
+                if (!isScreenOn) screenOffSinceMillis = origin
+            } else {
+                applyRestoredStateLocked(parsed, now, nowElapsed, currentBootId)
+            }
+            restoreHandled = true
         }
         return true
     }
 
     // ==================== 内部工具方法 ====================
+
+    private fun statsTime(): Long = lock.withLock {
+        val now = clock()
+        val pending = deferredRestore ?: return now
+        val elapsedNow = elapsedClock()
+        val provisional = pending.wallOrigin + (elapsedNow - pending.elapsedOrigin).coerceAtLeast(0L)
+        if (now < pending.minimumWallTime) return provisional
+
+        // 校时前只按单调时钟累计，不把墙钟跳跃算作冻结或息屏时长。
+        ensureCurrentDayLocked(provisional)
+        flushOngoingDurationsLocked(provisional, null)
+        val delta = bootBucket
+        val active = HashMap(activeFrozenSinceByUid)
+        val recent = (0 until recentCount).mapNotNull { offset ->
+            recentRing[(recentNextIdx - recentCount + offset + MAX_RECENT_EVENTS) % MAX_RECENT_EVENTS]
+        }
+        val offSince = screenOffSinceMillis
+        val deltaBootSince = bootSinceMillis
+        val shift = now - provisional
+        val restoredSameBoot = pending.state != null && pending.bootId.isNotEmpty() &&
+            pending.bootId == pending.state.bootId
+        if (restoredSameBoot) {
+            // 同一次开机恢复：parsed 里带有可信的冻结起点，未知墙钟期间按单调时钟累计的
+            // 冻结时长与之后按墙钟重算的区间重叠，必须先扣掉，否则同一段冻结会被算两遍。
+            var overlapped = 0L
+            for ((uid, app) in delta.apps) {
+                if (!activeFrozenSinceByUid.containsKey(uid)) continue
+                overlapped += app.frozenMillis
+                app.frozenMillis = 0L
+            }
+            delta.frozenMillisTotal = (delta.frozenMillisTotal - overlapped).coerceAtLeast(0L)
+        }
+        val state = pending.state
+        if (state != null) {
+            applyRestoredStateLocked(state, now, elapsedNow, pending.bootId)
+        } else {
+            days.clear()
+            lastDayKey = epochDay(now)
+            days[lastDayKey] = DayBucket(lastDayKey)
+            baselineSinceMillis = (baselineSinceMillis + shift).coerceAtMost(now)
+            bootBucket = BootBucket()
+            recentRing.fill(null)
+            recentNextIdx = 0
+            recentCount = 0
+        }
+        // 未知墙钟期间的启动事件归入校时日，不伪造小时分布。
+        mergeScopeLocked(days.getOrPut(epochDay(now)) { DayBucket(epochDay(now)) }, delta)
+        mergeScopeLocked(bootBucket, delta)
+        val sameBoot = state != null && pending.bootId.isNotEmpty() && pending.bootId == state.bootId
+        if (!sameBoot) bootSinceMillis = (deltaBootSince + shift).coerceAtMost(now)
+        val restoredPins = if (pending.state != null) HashMap(activeFrozenSinceByUid) else HashMap()
+        activeFrozenSinceByUid.clear()
+        for ((uid, since) in restoredPins) activeFrozenSinceByUid[uid] = since
+        for ((uid, since) in active) activeFrozenSinceByUid.putIfAbsent(uid, (since + shift).coerceAtMost(now))
+        screenOffSinceMillis = if (offSince > 0L && !isScreenOn) (offSince + shift).coerceAtMost(now) else 0L
+        val minRecentTime = startOfDayMillis(epochDay(now) - (MAX_DAYS - 1))
+        for (event in recent) {
+            val corrected = event.copy(timeMillis = event.timeMillis + shift)
+            if (corrected.timeMillis in minRecentTime..now) appendRecentLocked(corrected)
+        }
+        deferredRestore = null
+        markDirtyLocked()
+        now
+    }
+
+    private fun mergeScopeLocked(target: ScopeBucket, source: ScopeBucket) {
+        target.freezeCount += source.freezeCount
+        target.screenOffWakeCount += source.screenOffWakeCount
+        target.screenOffMillis += source.screenOffMillis
+        target.protectedCount += source.protectedCount
+        target.killBlockedCount += source.killBlockedCount
+        target.frozenMillisTotal += source.frozenMillisTotal
+        for (i in 0 until WAKE_CATEGORY_COUNT) target.wakeByCategory[i] += source.wakeByCategory[i]
+        for (i in 0 until INTERCEPT_RULE_COUNT) target.interceptByRule[i] += source.interceptByRule[i]
+        for ((uid, sourceApp) in source.apps) {
+            val app = target.getOrCreateApp(uid)
+            app.freezeCount += sourceApp.freezeCount
+            app.frozenMillis += sourceApp.frozenMillis
+            app.protectedCount += sourceApp.protectedCount
+            app.killBlockedCount += sourceApp.killBlockedCount
+            for (i in 0 until WAKE_CATEGORY_COUNT) app.wakeByCategory[i] += sourceApp.wakeByCategory[i]
+            for (i in 0 until INTERCEPT_RULE_COUNT) app.interceptByRule[i] += sourceApp.interceptByRule[i]
+            for ((reason, count) in sourceApp.rawReasons) {
+                if (reason in app.rawReasons || app.rawReasons.size < MAX_RAW_REASONS_PER_APP) {
+                    app.rawReasons[reason] = (app.rawReasons[reason] ?: 0) + count
+                }
+            }
+        }
+    }
 
     private fun triggerAsyncSaveIfDirty() {
         val hasDirty = lock.withLock { dirty }
@@ -1124,6 +1306,42 @@ class FreezeStatsEngine(
         bootBucket.getOrCreateApp(uid).frozenMillis += totalSlice
     }
 
+    /**
+     * 冻结在 [FREEZE_JITTER_MS] 内就被解冻：撤销这次冻结计数和对应的最近记录，
+     * 避免把「冻一下马上被唤醒」的抖动算成一次有效冻结。
+     */
+    private fun rollbackJitterFreezeLocked(today: DayBucket, uid: Int, frozenSince: Long) {
+        if (today.freezeCount > 0) today.freezeCount--
+        val todayApp = today.getOrCreateApp(uid)
+        if (todayApp.freezeCount > 0) todayApp.freezeCount--
+        if (bootBucket.freezeCount > 0) bootBucket.freezeCount--
+        val bootApp = bootBucket.getOrCreateApp(uid)
+        if (bootApp.freezeCount > 0) bootApp.freezeCount--
+        removeRecentFreezeLocked(uid, frozenSince)
+        markDirtyLocked()
+    }
+
+    private fun removeRecentFreezeLocked(uid: Int, since: Long) {
+        var matched = false
+        val kept = ArrayList<StatsRecentEventData>(recentCount)
+        for (offset in 0 until recentCount) {
+            val idx = (recentNextIdx - recentCount + offset + MAX_RECENT_EVENTS) % MAX_RECENT_EVENTS
+            val event = recentRing[idx] ?: continue
+            if (!matched && event.kind == StatsEventKind.FREEZE &&
+                event.uid == uid && event.timeMillis == since
+            ) {
+                matched = true
+                continue
+            }
+            kept.add(event)
+        }
+        if (!matched) return
+        recentRing.fill(null)
+        recentNextIdx = 0
+        recentCount = 0
+        for (event in kept) appendRecentLocked(event)
+    }
+
     private fun clampSpanStart(startMs: Long, endMs: Long): Long {
         if (startMs >= endMs) return endMs
         val sevenDaysAgo = startOfDayMillis(epochDay(endMs) - (MAX_DAYS - 1))
@@ -1182,10 +1400,8 @@ class FreezeStatsEngine(
 
     private fun resolvePackageAtExport(uid: Int): String {
         if (!isTrackableAppUid(uid)) return "uid:$uid"
-        uidToPackage[uid]?.let { return it }
         val resolved = runCatching {
-            packageResolver(uid)?.takeIf { it.isNotEmpty() }
-                ?: if (uid >= 100_000) packageResolver(uid % 100_000)?.takeIf { it.isNotEmpty() } else null
+            packageResolver(uid)?.takeIf { it.isNotBlank() && !it.startsWith("uid:") }
         }.getOrNull()
         if (resolved != null) {
             cachePackageName(uid, resolved)
@@ -1333,13 +1549,13 @@ object FreezeStatsRecorder {
         elapsedClock = { SystemClock.elapsedRealtime() },
         bootIdProvider = { cachedBootId },
         enabledProvider = { PrefReader.systemPrefs.freezeStats },
-        packageResolver = { uid -> SystemState.getPackageNameForUid(uid) },
+        packageResolver = { uid -> SystemState.getUniquePackageNameForStatsUid(uid) },
         frozenUidsProvider = {
             val service = SystemState.greezeService
             if (SystemState.isGreezeReady && service != null &&
                 RomCapabilities.hasMethod(service.javaClass.name, "getFrozenUids", service.javaClass.classLoader)
             ) {
-                SystemState.getFrozenUidsArray().toHashSet()
+                SystemState.getFrozenUidsArrayOrNull()?.toHashSet()
             } else {
                 null
             }
@@ -1402,6 +1618,32 @@ object FreezeStatsRecorder {
 
     fun isUidTrackedFrozen(uid: Int): Boolean = engine.isUidTrackedFrozen(uid)
 
+    private val sourceContext = ThreadLocal<StatsEventOrigin?>()
+    private val moduleBatchContext = ThreadLocal<Boolean>()
+    fun isModuleBatchActive(): Boolean = moduleBatchContext.get() == true
+    fun currentOrigin(reason: String): StatsEventOrigin = sourceContext.get()
+        ?: if (reason.trim().equals("LAUNCH_MODE", true)) StatsEventOrigin.LAUNCH_MODE else StatsEventOrigin.NATIVE
+
+    fun <T> withModuleOrigin(action: () -> T): T {
+        val previous = sourceContext.get()
+        sourceContext.set(StatsEventOrigin.MODULE)
+        return try { action() } finally {
+            if (previous == null) sourceContext.remove() else sourceContext.set(previous)
+        }
+    }
+
+    fun <T> withModuleBatch(uids: Collection<Int>, action: (MutableSet<Int>) -> T): T = withModuleOrigin {
+        val accepted = HashSet<Int>()
+        val previous = moduleBatchContext.get()
+        moduleBatchContext.set(true)
+        try {
+            action(accepted)
+        } finally {
+            if (previous == null) moduleBatchContext.remove() else moduleBatchContext.set(previous)
+        }
+    }
+
+
     fun cachePackageHint(uid: Int, packageName: String) {
         engine.cachePackageHint(uid, packageName)
     }
@@ -1416,7 +1658,7 @@ object FreezeStatsRecorder {
         packageNameHint: String? = null,
         onlyIfNotFrozen: Boolean = false,
     ) {
-        engine.recordFreeze(uid, reason, packageNameHint, onlyIfNotFrozen)
+        engine.recordFreeze(uid, reason, packageNameHint, onlyIfNotFrozen, currentOrigin(reason))
     }
 
     fun recordFreezeBatch(
@@ -1424,11 +1666,11 @@ object FreezeStatsRecorder {
         reason: String,
         onlyIfNotFrozen: Boolean = true,
     ) {
-        engine.recordFreezeBatch(uids, reason, onlyIfNotFrozen)
+        engine.recordFreezeBatch(uids, reason, onlyIfNotFrozen, currentOrigin(reason))
     }
 
     fun recordThaw(uid: Int, reason: String, packageNameHint: String? = null) {
-        engine.recordThaw(uid, reason, packageNameHint)
+        engine.recordThaw(uid, reason, packageNameHint, currentOrigin(reason))
     }
 
     fun recordIntercept(

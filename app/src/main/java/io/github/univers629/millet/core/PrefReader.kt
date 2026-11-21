@@ -55,7 +55,7 @@ object PrefReader {
         if (modernModule != null) {
             ModernBridge.xposedModule = modernModule
         }
-        val rawMap = readRawMapFromRemotePrefs()
+        val rawMap = readRawMapFromRemotePrefs() ?: return systemPrefs
         systemPrefs = buildFullSnapshot(rawMap)
         return systemPrefs
     }
@@ -68,7 +68,7 @@ object PrefReader {
         if (modernModule != null) {
             ModernBridge.xposedModule = modernModule
         }
-        val rawMap = readRawMapFromRemotePrefs()
+        val rawMap = readRawMapFromRemotePrefs() ?: return powerKeeperPrefs
         powerKeeperPrefs = buildFullSnapshot(rawMap)
         return powerKeeperPrefs
     }
@@ -77,7 +77,7 @@ object PrefReader {
      * 按变更的键名增量重载 system_server 侧配置。
      */
     fun reloadSystemByKey(changedKey: String) {
-        val rawMap = readRawMapFromRemotePrefs()
+        val rawMap = readRawMapFromRemotePrefs() ?: return
         val prev = systemPrefs
         val group = PrefGroup.fromKey(changedKey)
         val updated = if (group == null) {
@@ -116,6 +116,11 @@ object PrefReader {
                 dispatchSystemReloadCallback(PrefsKeys.FREEZE_DUAL_APP, PrefGroup.MILLET_FLAGS, updated)
             }
         }
+        if (group == null || group == PrefGroup.DOZE_FLAGS) {
+            if (changedKey == PrefsKeys.ENABLE_DOZE || prev.enableDoze != updated.enableDoze) {
+                dispatchSystemReloadCallback(PrefsKeys.ENABLE_DOZE, PrefGroup.DOZE_FLAGS, updated)
+            }
+        }
         if (group == null || group == PrefGroup.APP_SETS) {
             if (changedKey == PrefsKeys.MESSAGE_APP_SET || prev.messageAppSet != updated.messageAppSet) {
                 dispatchSystemReloadCallback(PrefsKeys.MESSAGE_APP_SET, PrefGroup.APP_SETS, updated)
@@ -141,7 +146,7 @@ object PrefReader {
      * 按变更的键名增量重载 powerkeeper 侧配置。
      */
     fun reloadPowerKeeperByKey(changedKey: String) {
-        val rawMap = readRawMapFromRemotePrefs()
+        val rawMap = readRawMapFromRemotePrefs() ?: return
         val prev = powerKeeperPrefs
         val group = PrefGroup.fromKey(changedKey)
         val updated = if (group == null) {
@@ -194,21 +199,19 @@ object PrefReader {
     /**
      * 读取完整键值表（通过 Modern LibXposed getRemotePreferences 读取）。
      */
-    private fun readRawMapFromRemotePrefs(): Map<String, Any?> {
-        val modernModule = ModernBridge.xposedModule
-        if (modernModule != null) {
-            try {
-                val remotePrefs = modernModule.getRemotePreferences(PrefsKeys.PREFS_FILE_NAME)
-                val all = remotePrefs.all
-                if (!all.isNullOrEmpty()) {
-                    return HashMap(all)
-                }
-            } catch (_: Throwable) {
-            }
+    private fun readRawMapFromRemotePrefs(): Map<String, Any?>? {
+        val modernModule = ModernBridge.xposedModule ?: run {
+            Logger.alwaysWarn("配置读取未确认：框架未注入，保留现有快照")
+            return null
         }
-
-        // 框架未注入或 RemotePreferences 尚未就绪时返回空表，由默认值常量表兜底
-        return emptyMap()
+        return try {
+            val all = modernModule.getRemotePreferences(PrefsKeys.PREFS_FILE_NAME).all
+                ?: return null.also { Logger.alwaysWarn("配置读取未确认：远程配置不可用，保留现有快照") }
+            HashMap(all)
+        } catch (t: Throwable) {
+            Logger.error("远程配置读取失败，保留现有快照", t)
+            null
+        }
     }
 
     private fun buildFullSnapshot(raw: Map<String, Any?>): PrefsSnapshot {
@@ -274,9 +277,8 @@ object PrefReader {
         if (value is Collection<*>) {
             val result = LinkedHashSet<String>()
             for (item in value) {
-                val str = (item as? String)?.trim()
-                if (!str.isNullOrEmpty()) {
-                    result.add(str)
+                if (item is String && AppUidUtils.validPolicyTarget(item)) {
+                    result.add(item)
                 }
             }
             return result
@@ -315,24 +317,21 @@ object PrefReader {
         val stored = prefs.getStringSet(key, defaultSet) ?: defaultSet
         val copy = LinkedHashSet<String>()
         for (item in stored) {
-            val trimmed = item.trim()
-            if (trimmed.isNotEmpty()) {
-                copy.add(trimmed)
+            if (AppUidUtils.validPolicyTarget(item)) {
+                copy.add(item)
             }
         }
         return copy
     }
 
     /**
-     * 归一化并去空白，确保写入 Settings 与 RemotePreferences 的集合语义一致。
+     * 校验策略目标并复制集合，保持本地与远程配置的编码一致。
      */
     fun sanitizeStringSet(values: Set<String>): LinkedHashSet<String> {
         val cleanCopy = LinkedHashSet<String>()
-        for (pkg in values) {
-            val trimmed = pkg.trim()
-            if (trimmed.isNotEmpty()) {
-                cleanCopy.add(trimmed)
-            }
+        for (target in values) {
+            require(AppUidUtils.validPolicyTarget(target)) { "Invalid policy target: $target" }
+            cleanCopy.add(target)
         }
         return cleanCopy
     }

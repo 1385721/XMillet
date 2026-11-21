@@ -12,9 +12,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 当前激活默认输入法追踪器（供 system_server 与 PowerKeeper 共用）。
  *
- * 仅依据 `Settings.Secure.DEFAULT_INPUT_METHOD` 识别系统当前真正启用的默认输入法包名，
- * 不放行未启用的预装冗余输入法；同时若用户主动将该输入法加入 `forceFreezeSet`，
- * 仍尊重用户的强制冻结策略。
+ * 仅保护 Secure 设置中当前启用的默认输入法与无障碍服务；强制冻结不绕过此安全豁免。
+ * UID 入口按目标用户读取设置；读取失败时保守阻断冻结，不继承主用户缓存。
  */
 object ActiveImeTracker {
 
@@ -29,8 +28,18 @@ object ActiveImeTracker {
     @Volatile
     private var lastRefreshUptimeMs: Long = 0L
 
+    private data class UserServices(
+        val roles: UserServiceRoles,
+        val refreshedAt: Long,
+    )
+
+    private val userServices = java.util.concurrent.ConcurrentHashMap<Int, UserServices>()
+
     private val observerRegistered = AtomicBoolean(false)
     private val observerLock = Any()
+
+    @Volatile
+    private var hotReloading = false
 
     @Volatile
     private var registeredContext: Context? = null
@@ -39,26 +48,30 @@ object ActiveImeTracker {
     private var registeredObserver: ContentObserver? = null
 
     fun onHotReloading() {
-        val ctx: Context?
-        val observer: ContentObserver?
         synchronized(observerLock) {
-            ctx = registeredContext
-            observer = registeredObserver
-            registeredContext = null
-            registeredObserver = null
+            hotReloading = true
             observerRegistered.set(false)
             cachedImePackage = null
             cachedAccessibilityPackages = emptySet()
+            userServices.clear()
             lastRefreshUptimeMs = 0L
+            unregisterObserverLocked()
         }
-        if (ctx != null && observer != null) {
-            val token = Binder.clearCallingIdentity()
-            try {
-                ctx.contentResolver.unregisterContentObserver(observer)
-            } catch (_: Throwable) {
-            } finally {
-                Binder.restoreCallingIdentity(token)
-            }
+    }
+
+    private fun unregisterObserverLocked(): Boolean {
+        val ctx = registeredContext ?: return true
+        val observer = registeredObserver ?: return true
+        val token = Binder.clearCallingIdentity()
+        return try {
+            ctx.contentResolver.unregisterContentObserver(observer)
+            registeredContext = null
+            registeredObserver = null
+            true
+        } catch (_: Throwable) {
+            false
+        } finally {
+            Binder.restoreCallingIdentity(token)
         }
     }
 
@@ -101,20 +114,74 @@ object ActiveImeTracker {
         return lastRefreshUptimeMs > 0L && (now - lastRefreshUptimeMs in 0..REFRESH_FALLBACK_INTERVAL_MS)
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun isProtectedDefaultIme(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean {
-        if (packageName.isNullOrEmpty() || packageName in prefs.forceFreezeSet) return false
+        if (packageName.isNullOrEmpty()) return false
         val activeIme = resolveDefaultImePackage(context) ?: return false
         return packageName == activeIme
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun isProtectedAccessibilityApp(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean {
-        if (packageName.isNullOrEmpty() || packageName in prefs.forceFreezeSet) return false
+        if (packageName.isNullOrEmpty()) return false
         return packageName in resolveAccessibilityPackages(context)
     }
 
     fun isProtectedSystemServiceApp(context: Context?, packageName: String?, prefs: PrefsSnapshot): Boolean =
         isProtectedDefaultIme(context, packageName, prefs) ||
             isProtectedAccessibilityApp(context, packageName, prefs)
+
+    @Suppress("UNUSED_PARAMETER")
+    fun isProtectedDefaultIme(context: Context?, packageName: String?, prefs: PrefsSnapshot, uid: Int): Boolean {
+        if (!AppUidUtils.isManagedAppUid(uid) || packageName.isNullOrEmpty()) return false
+        val roles = resolveUserServices(context, AppUidUtils.userIdOf(uid))?.roles ?: return true
+        return packageName == roles.imePackage
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun isProtectedAccessibilityApp(context: Context?, packageName: String?, prefs: PrefsSnapshot, uid: Int): Boolean {
+        if (!AppUidUtils.isManagedAppUid(uid) || packageName.isNullOrEmpty()) return false
+        val roles = resolveUserServices(context, AppUidUtils.userIdOf(uid))?.roles ?: return true
+        return packageName in roles.accessibilityPackages
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun isProtectedSystemServiceApp(context: Context?, packageName: String?, prefs: PrefsSnapshot, uid: Int): Boolean =
+        resolveServiceRoleProtection(context, packageName, uid).blocksFreeze
+
+    internal fun resolveServiceRoleProtection(context: Context?, packageName: String?, uid: Int): ServiceRoleProtection =
+        evaluateUserServiceProtection(uid, packageName) { userId -> resolveUserServices(context, userId)?.roles }
+
+    private fun resolveUserServices(context: Context?, userId: Int): UserServices? {
+        val ctx = context ?: return null
+        ensureObserver(ctx)
+        val now = SystemClock.uptimeMillis()
+        userServices[userId]?.takeIf { now - it.refreshedAt in 0..REFRESH_FALLBACK_INTERVAL_MS }?.let { return it }
+        val token = Binder.clearCallingIdentity()
+        return try {
+            // ROMs without per-user Secure access cannot provide an independent safety role.
+            val getString = Settings.Secure::class.java.getDeclaredMethod(
+                "getStringForUser", android.content.ContentResolver::class.java,
+                String::class.java, Int::class.javaPrimitiveType,
+            )
+            val resolver = ctx.contentResolver
+            val roles = readUserServiceRoles { key -> getString.invoke(null, resolver, key, userId) as String? }
+                ?: return null
+            UserServices(roles, now)
+                .also { userServices[userId] = it }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    internal fun readUserServiceRoles(readSetting: (String) -> String?): UserServiceRoles? = runCatching {
+        val ime = readSetting(Settings.Secure.DEFAULT_INPUT_METHOD)
+        val enabled = readSetting(Settings.Secure.ACCESSIBILITY_ENABLED)
+        val services = readSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        UserServiceRoles(parseImePackage(ime), parseAccessibilityPackages(enabled?.toIntOrNull() ?: 0, services))
+    }.getOrNull()
 
     private fun refresh(context: Context): String? {
         val token = Binder.clearCallingIdentity()
@@ -136,42 +203,49 @@ object ActiveImeTracker {
     }
 
     private fun ensureObserver(context: Context) {
-        if (observerRegistered.get()) return
+        if (hotReloading || observerRegistered.get()) return
         val looper = Looper.getMainLooper() ?: return
-        if (!observerRegistered.compareAndSet(false, true)) return
-        val appCtx = context.applicationContext ?: context
-        val token = Binder.clearCallingIdentity()
-        try {
-            val resolver = appCtx.contentResolver
-            val observer = object : ContentObserver(Handler(looper)) {
-                override fun onChange(selfChange: Boolean) {
-                    refresh(appCtx)
+        synchronized(observerLock) {
+            if (hotReloading || observerRegistered.get()) return
+            // Release any previous registration before creating another observer.
+            if (!unregisterObserverLocked()) return
+            val appCtx = context.applicationContext ?: context
+            val token = Binder.clearCallingIdentity()
+            try {
+                val resolver = appCtx.contentResolver
+                val observer = object : ContentObserver(Handler(looper)) {
+                    override fun onChange(selfChange: Boolean) {
+                        if (hotReloading) return
+                        userServices.clear()
+                        refresh(appCtx)
+                    }
                 }
-            }
-            resolver.registerContentObserver(
-                Settings.Secure.getUriFor(Settings.Secure.DEFAULT_INPUT_METHOD),
-                false,
-                observer
-            )
-            resolver.registerContentObserver(
-                Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
-                false,
-                observer
-            )
-            resolver.registerContentObserver(
-                Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_ENABLED),
-                false,
-                observer
-            )
-            synchronized(observerLock) {
+                // Keep the cleanup handle before the first URI registration.
                 registeredContext = appCtx
                 registeredObserver = observer
+                resolver.registerContentObserver(
+                    Settings.Secure.getUriFor(Settings.Secure.DEFAULT_INPUT_METHOD),
+                    false,
+                    observer
+                )
+                resolver.registerContentObserver(
+                    Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
+                    false,
+                    observer
+                )
+                resolver.registerContentObserver(
+                    Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_ENABLED),
+                    false,
+                    observer
+                )
+                observerRegistered.set(true)
+                refresh(appCtx)
+            } catch (_: Throwable) {
+                observerRegistered.set(false)
+                unregisterObserverLocked()
+            } finally {
+                Binder.restoreCallingIdentity(token)
             }
-            refresh(appCtx)
-        } catch (_: Throwable) {
-            observerRegistered.set(false)
-        } finally {
-            Binder.restoreCallingIdentity(token)
         }
     }
 }

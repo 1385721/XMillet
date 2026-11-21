@@ -1,5 +1,8 @@
 package io.github.univers629.millet.ui.screen
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +27,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -73,7 +75,8 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 private enum class ProcessFilterMode(val label: String) {
     ALL("全部"),
     FROZEN("已冻结"),
-    RUNNING("运行中")
+    RUNNING("运行中"),
+    UNKNOWN("待确认")
 }
 
 /**
@@ -93,7 +96,8 @@ fun ProcessListScreenMiuix(
     onRefresh: () -> Unit,
     onThawAll: () -> Unit,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
-    onQueryUnfrozenReason: (packageName: String) -> Unit = {},
+    isRefreshing: Boolean = false,
+    snapshotUnavailable: Boolean = false,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
@@ -102,22 +106,24 @@ fun ProcessListScreenMiuix(
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var showSystemApps by rememberSaveable { mutableStateOf(true) }
     val currentFilter = ProcessFilterMode.entries.getOrElse(filterIndex) { ProcessFilterMode.ALL }
 
     val frozenCount = remember(runningProcesses) {
         runningProcesses.count { it.isFrozen }
     }
     val runningCount = remember(runningProcesses, frozenCount) {
-        runningProcesses.size - frozenCount
+        runningProcesses.count { !it.isFrozen && it.frozenCount == 0 && it.unknownCount == 0 }
     }
 
-    val filteredProcesses = remember(runningProcesses, searchQuery, currentFilter) {
+    val filteredProcesses = remember(runningProcesses, searchQuery, currentFilter, showSystemApps) {
         val q = searchQuery.trim().lowercase()
         runningProcesses.filter { proc ->
             val filterMatch = when (currentFilter) {
                 ProcessFilterMode.ALL -> true
                 ProcessFilterMode.FROZEN -> proc.isFrozen
-                ProcessFilterMode.RUNNING -> !proc.isFrozen
+                ProcessFilterMode.RUNNING -> !proc.isFrozen && proc.frozenCount == 0 && proc.unknownCount == 0
+                ProcessFilterMode.UNKNOWN -> proc.unknownCount > 0 || (!proc.isFrozen && proc.frozenCount > 0)
             }
             val queryMatch = q.isEmpty() ||
                 proc.appName.lowercase().contains(q) ||
@@ -126,11 +132,11 @@ fun ProcessListScreenMiuix(
                 proc.pids.any { it.toString().contains(q) } ||
                 (proc.isDualApp && "双开".contains(q))
 
-            filterMatch && queryMatch
+            val isSystem = ((proc.applicationInfo?.flags ?: 0) and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+            filterMatch && queryMatch && (showSystemApps || !isSystem)
         }
     }
 
-    var isRefreshing by remember { mutableStateOf(false) }
     val pullToRefreshState = rememberPullToRefreshState()
     var showTopPopup by remember { mutableStateOf(false) }
 
@@ -168,7 +174,7 @@ fun ProcessListScreenMiuix(
                             alignment = PopupPositionProvider.Align.TopEnd,
                             onDismissRequest = { showTopPopup = false },
                             content = {
-                                val menuItems = listOf("一键解冻全部应用", "重新扫描进程")
+                                val menuItems = listOf("一键解冻全部应用", "重新扫描进程", if (showSystemApps) "隐藏系统应用" else "显示系统应用")
                                 ListPopupColumn {
                                     menuItems.forEachIndexed { idx, text ->
                                         DropdownItem(
@@ -180,6 +186,7 @@ fun ProcessListScreenMiuix(
                                                 when (idx) {
                                                     0 -> onThawAll()
                                                     1 -> onRefresh()
+                                                    2 -> showSystemApps = !showSystemApps
                                                 }
                                             }
                                         )
@@ -198,11 +205,7 @@ fun ProcessListScreenMiuix(
             PullToRefresh(
                 isRefreshing = isRefreshing,
                 pullToRefreshState = pullToRefreshState,
-                onRefresh = {
-                    isRefreshing = true
-                    onRefresh()
-                    isRefreshing = false
-                },
+                onRefresh = onRefresh,
                 contentPadding = PaddingValues(
                     top = innerPadding.calculateTopPadding() + 6.dp
                 ),
@@ -235,10 +238,16 @@ fun ProcessListScreenMiuix(
                     }
 
                     // 2. 状态胶囊横向过滤条
+                    if (snapshotUnavailable) {
+                        item {
+                            BasicComponent(title = "进程快照不可用", summary = "显示上次结果；请检查模块连接后刷新，旧结果不代表当前状态。")
+                        }
+                    }
                     item {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
                                 .padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -249,6 +258,7 @@ fun ProcessListScreenMiuix(
                                     ProcessFilterMode.ALL -> runningProcesses.size
                                     ProcessFilterMode.FROZEN -> frozenCount
                                     ProcessFilterMode.RUNNING -> runningCount
+                                    ProcessFilterMode.UNKNOWN -> runningProcesses.size - frozenCount - runningCount
                                 }
                                 val bgColor = if (selected) {
                                     colorScheme.primary
@@ -293,7 +303,7 @@ fun ProcessListScreenMiuix(
                                 showIndication = true
                             ) {
                                 BasicComponent(
-                                    title = if (runningProcesses.isEmpty()) "暂无活跃应用进程" else "未找到匹配的进程",
+                                    title = if (snapshotUnavailable) "暂时无法获取进程" else if (runningProcesses.isEmpty()) "暂无活跃应用进程" else "未找到匹配的进程",
                                     summary = if (runningProcesses.isEmpty()) "点击此卡片或右上角刷新按钮重新扫描" else "点击重置搜索与分类"
                                 )
                             }
@@ -370,7 +380,12 @@ fun ProcessListScreenMiuix(
                                             )
                                         } else {
                                             StatusTagMiuix(
-                                                label = "运行中",
+                                                 label = when {
+                                                    proc.frozenCount > 0 && proc.unknownCount > 0 -> "部分冻结 · 其余未知"
+                                                    proc.frozenCount > 0 -> "部分冻结"
+                                                    proc.unknownCount > 0 -> "状态未知"
+                                                    else -> "运行中"
+                                                },
                                                 backgroundColor = colorScheme.secondaryContainer,
                                                 contentColor = colorScheme.onSecondaryContainer
                                             )
@@ -378,7 +393,7 @@ fun ProcessListScreenMiuix(
                                         if (proc.isFrozen) {
                                             if (proc.freezerTypes.isEmpty()) {
                                                 StatusTagMiuix(
-                                                    label = FreezeModeLabels.TOMBSTONE,
+                                                    label = "冻结方式未知",
                                                     backgroundColor = colorScheme.secondaryContainer,
                                                     contentColor = colorScheme.onSecondaryContainer
                                                 )

@@ -2,11 +2,11 @@ package io.github.univers629.millet.powerkeeper
 
 import android.content.Context
 import android.os.Bundle
-import android.os.Handler
 import android.os.Message
 import android.provider.Settings
 import io.github.libxposed.api.XposedInterface
 import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.ModernHookInstaller
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookInstallRegistry
@@ -22,9 +22,9 @@ import io.github.univers629.millet.ipc.MilletIpcContract
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 
 /**
- * 作用域 `"com.miui.powerkeeper"` 全部 20 个安装点完整实现（P1–P20）。
+ * 作用域 `"com.miui.powerkeeper"` 的策略与环境检测 Hook。
  *
- * 安装点分母核对（共 20 个安装点）：
+ * 主要安装点：
  * - P1 : PowerKeeperApplication#onCreate() (before) —— 建立跨进程 Binder 双向链路
  * - P2 : MilletPolicy#<init>(Context) (after) —— 捕获实例、清 musicApp、union 重放 6 张内部白名单
  * - P3 : MilletPolicy#dealCloudWhiteList() (replace) —— 整方法替换直接返回 null（云白名单第一刀）
@@ -39,11 +39,8 @@ import io.github.univers629.millet.ipc.PowerKeeperBinderClient
  * - P12: PowerStateMachine#clearAppWhenScreenOffTimeOut() (before) —— disableKill 置 null
  * - P13: PowerStateMachine#clearAppWhenScreenOffTimeOutInNight() (before) —— disableKill 置 null
  * - P14: PowerStateMachine#clearUnactiveApps(Context) (before) —— disableKill 置 null
- * - P15: BluetoothEvent#<init>(Context, Handler) (before) —— 缓存反射句柄
- * - P16: BrightController#<init>(Context, FrozenAppController) (before) —— 缓存反射句柄
- * - P17: FreezeBinder#<init>() (before) —— 缓存反射句柄
+ * - P17: FreezeBinder#<init>() (before) —— 保留 Millet 安装环境检测点位
  * - P18: PowerKeeperManager#<init>(Context) (before) —— 缓存反射句柄
- * - P19: ProcessObserver#<init>(Context, EventsAggregator) (before) —— 缓存反射句柄
  * - P20: BrightScenarioBase#<init>(MilletPolicy, Context, boolean, BrightController) (after) —— 缓存句柄并重建 preloadWhiteApps
  */
 object PowerKeeperHooks {
@@ -56,12 +53,10 @@ object PowerKeeperHooks {
     private const val CLASS_MILLET_BRIGHT_HANDLER = "com.miui.powerkeeper.millet.bright.MilletBrightHandler"
     private const val CLASS_POWER_CHECKER_CONTROLLER = "com.miui.powerkeeper.powerchecker.PowerCheckerController"
     private const val CLASS_POWER_STATE_MACHINE = "com.miui.powerkeeper.statemachine.PowerStateMachine"
-    private const val CLASS_BLUETOOTH_EVENT = "com.miui.powerkeeper.millet.BluetoothEvent"
     private const val CLASS_BRIGHT_CONTROLLER = "com.miui.powerkeeper.millet.bright.BrightController"
     private const val CLASS_FROZEN_APP_CONTROLLER = "com.miui.powerkeeper.controller.FrozenAppController"
     private const val CLASS_FREEZE_BINDER = "com.miui.powerkeeper.millet.FreezeBinder"
     private const val CLASS_POWER_KEEPER_MANAGER = "com.miui.powerkeeper.PowerKeeperManager"
-    private const val CLASS_PROCESS_OBSERVER = "com.miui.powerkeeper.utils.ProcessObserver"
     private const val CLASS_EVENTS_AGGREGATOR = "com.miui.powerkeeper.event.EventsAggregator"
     private const val CLASS_BRIGHT_SCENARIO_BASE = "com.miui.powerkeeper.millet.bright.BrightScenarioBase"
     private const val CLASS_PROCESS_MANAGER = "miui.process.ProcessManager"
@@ -92,7 +87,7 @@ object PowerKeeperHooks {
     private const val MSG_WHAT_CHARGING_CHANGED = 16
 
     /**
-     * 在 `com.miui.powerkeeper` 进程按原规格顺序安装全部 P1–P20 Hook，并注册热更新回调。
+     * 注册 `com.miui.powerkeeper` 进程的配置热更新回调。
      */
     private fun registerPrefReloadCallback() {
         PrefReader.onPowerKeeperGroupReloaded = { changedKey, group, snapshot ->
@@ -135,12 +130,9 @@ object PowerKeeperHooks {
             buildP24NoChargeThawHook(),
             buildP25AutoKillGuardHook(),
             buildP26AudioKillGuardHook(),
-            buildP15BluetoothEventInitHook(),
-            buildP19ProcessObserverInitHook(),
             buildP20BrightScenarioBaseInitHook(),
             buildP17FreezeBinderInitHook(),
             buildP18PowerKeeperManagerInitHook(),
-            buildP16BrightControllerInitHook(),
             buildP29MilletAppUidHook(classLoader)
         )
         // 按当前 ROM 版本的能力过滤点位：目标类/方法在本版本不存在时跳过，
@@ -152,7 +144,7 @@ object PowerKeeperHooks {
     }
 
     /**
-     * 在 com.miui.powerkeeper 进程通过 Modern LibXposed (API 102) 安装全部 P1–P20 Hook。
+     * 在 com.miui.powerkeeper 进程通过 Modern LibXposed (API 102) 安装策略与环境检测 Hook。
      */
     fun installAllModern(xposed: XposedInterface, classLoader: ClassLoader) {
         registerPrefReloadCallback()
@@ -336,10 +328,7 @@ object PowerKeeperHooks {
         methodName = "dealNoRestrictApp",
         paramTypes = emptyList(),
         mode = HookMode.AFTER,
-        after = { param ->
-            if (PowerKeeperState.activeStateControllerInstance == null && param.thisObject != null) {
-                PowerKeeperState.activeStateControllerInstance = param.thisObject
-            }
+        after = {
             reportCurrentNoRestrictApps()
         }
     )
@@ -427,7 +416,9 @@ object PowerKeeperHooks {
             val prefs = PrefReader.powerKeeperPrefs
 
             val pkg = PowerKeeperState.getPackageNameForUid(uid)
-            if (pkg != null && pkg in prefs.forbidSyncBinderSet) {
+            if (pkg != null && AppUidUtils.containsPolicyTarget(prefs.forbidSyncBinderSet, pkg, uid) &&
+                !isFreezeOrKillExemptPkg(pkg, prefs, uid)
+            ) {
                 try {
                     val queryList = XReflect.getObjectField(param.thisObject, "queryList") as? MutableSet<Int>
                     queryList?.remove(uid)
@@ -467,7 +458,9 @@ object PowerKeeperHooks {
                 MSG_WHAT_QUERY_FROZEN_UID -> {
                     val uid = if (msg.arg1 != 0) msg.arg1 else (msg.data?.getInt("uid") ?: 0)
                     val pkg = PowerKeeperState.getPackageNameForUid(uid)
-                    if (pkg != null && pkg in prefs.forbidSyncBinderSet) {
+                    if (pkg != null && AppUidUtils.containsPolicyTarget(prefs.forbidSyncBinderSet, pkg, uid) &&
+                        !isFreezeOrKillExemptPkg(pkg, prefs, uid)
+                    ) {
                         try {
                             val queryList = XReflect.getObjectField(
                                 param.thisObject,
@@ -582,10 +575,10 @@ object PowerKeeperHooks {
         }
     )
 
-    private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot): Boolean {
+    private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot, uid: Int): Boolean {
         if (pkg == null) return false
-        return pkg in prefs.whiteAppSet ||
-            ActiveImeTracker.isProtectedSystemServiceApp(PowerKeeperState.applicationContext, pkg, prefs)
+        return AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
+            ActiveImeTracker.isProtectedSystemServiceApp(PowerKeeperState.applicationContext, pkg, prefs, uid)
     }
 
     /**
@@ -606,7 +599,7 @@ object PowerKeeperHooks {
             if (uid < 10000) return@HookSpec
             val prefs = PrefReader.powerKeeperPrefs
             val pkg = PowerKeeperState.getPackageNameForUid(uid)
-            val hit = prefs.disableKill || isFreezeOrKillExemptPkg(pkg, prefs)
+            val hit = prefs.disableKill || isFreezeOrKillExemptPkg(pkg, prefs, uid)
             if (!hit) return@HookSpec
             if (param.blockSafely() && prefs.isLog) {
                 Logger.warn("阻止电量与性能查杀 ${pkg ?: uid} (UID=$uid)")
@@ -618,7 +611,7 @@ object PowerKeeperHooks {
      * P23（澎湃 3.0 / Android 16 起）：FrozenAppController#appIsAllowToFrozen(int uid)
      * 冻结资格判定：返回 true 才允许 Greeze 冻结该 uid。
      * 白名单或当前默认输入法内的包在此直接返回 false，避免被误冻结。
-     * 强制冻结名单（`forceFreezeSet`）不受影响，保持原样放行。
+     * 保护白名单、当前输入法与无障碍服务优先；其余目标保留原生资格判断。
      */
     private fun buildP23FrozenDecisionHook(): HookSpec = HookSpec(
         id = "P23_FROZEN_DECISION",
@@ -628,15 +621,11 @@ object PowerKeeperHooks {
         paramTypes = listOf(Int::class.javaPrimitiveType!!),
         mode = HookMode.BEFORE,
         before = { param ->
-            if (PowerKeeperState.frozenAppControllerInstance == null && param.thisObject != null) {
-                PowerKeeperState.frozenAppControllerInstance = param.thisObject
-            }
             val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
             if (uid < 10000) return@HookSpec
             val prefs = PrefReader.powerKeeperPrefs
             val pkg = PowerKeeperState.getPackageNameForUid(uid) ?: return@HookSpec
-            if (pkg in prefs.forceFreezeSet) return@HookSpec
-            if (!isFreezeOrKillExemptPkg(pkg, prefs)) return@HookSpec
+            if (!isFreezeOrKillExemptPkg(pkg, prefs, uid)) return@HookSpec
             if (param.blockSafely() && prefs.isLog) {
                 Logger.warn("阻止冻结受保护应用 $pkg (UID=$uid)")
             }
@@ -713,58 +702,17 @@ object PowerKeeperHooks {
         if (uid < 10000) return
         val prefs = PrefReader.powerKeeperPrefs
         val pkg = PowerKeeperState.getPackageNameForUid(uid)
-        if (!prefs.disableKill && !isFreezeOrKillExemptPkg(pkg, prefs)) return
+        if (!prefs.disableKill && !isFreezeOrKillExemptPkg(pkg, prefs, uid)) return
         if (param.blockSafely() && prefs.isLog) {
             Logger.warn("阻止${scene} ${pkg ?: uid} (UID=$uid)")
         }
     }
 
-    // ==================== P15–P20：6 个构造器反射句柄缓存 ====================
-
-    /**
-     * P15（PA(18)）：BluetoothEvent#<init>(Context, Handler)
-     */
-    private fun buildP15BluetoothEventInitHook(): HookSpec = HookSpec(
-        id = "P15",
-        name = "BluetoothEvent#<init>",
-        targetClass = CLASS_BLUETOOTH_EVENT,
-        methodName = null,
-        paramTypes = listOf(Context::class.java, Handler::class.java),
-        mode = HookMode.BEFORE,
-        before = { param ->
-            if (PowerKeeperState.bluetoothEventInstance == null && param.thisObject != null) {
-                PowerKeeperState.bluetoothEventInstance = param.thisObject
-            }
-        }
-    )
-
-    /**
-     * P16（PA(19)）：BrightController#<init>(Context, FrozenAppController)
-     * 真机核验（PrefsAccessor.java:319 与 PowerKeeperManager.java:32）：
-     * `FrozenAppController` 位于 `com.miui.powerkeeper.controller.FrozenAppController`，同时提供构造器反射回退。
-     */
-    private fun buildP16BrightControllerInitHook(): HookSpec = HookSpec(
-        id = "P16",
-        name = "BrightController#<init>",
-        targetClass = CLASS_BRIGHT_CONTROLLER,
-        methodName = null,
-        paramTypes = listOf(Context::class.java, CLASS_FROZEN_APP_CONTROLLER),
-        paramResolver = { _, clazz ->
-            clazz.declaredConstructors
-                .firstOrNull { it.parameterTypes.size == 2 }
-                ?.parameterTypes
-                ?.toList()
-        },
-        mode = HookMode.BEFORE,
-        before = { param ->
-            if (PowerKeeperState.brightControllerInstance == null && param.thisObject != null) {
-                PowerKeeperState.brightControllerInstance = param.thisObject
-            }
-        }
-    )
+    // ==================== P17 / P18 / P20：环境检测与策略句柄 ====================
 
     /**
      * P17（PA(21)）：FreezeBinder#<init>()
+     * 安装记录用于 Millet 环境检测，不缓存宿主实例。
      */
     private fun buildP17FreezeBinderInitHook(): HookSpec = HookSpec(
         id = "P17",
@@ -772,12 +720,7 @@ object PowerKeeperHooks {
         targetClass = CLASS_FREEZE_BINDER,
         methodName = null,
         paramTypes = emptyList(),
-        mode = HookMode.BEFORE,
-        before = { param ->
-            if (PowerKeeperState.freezeBinderInstance == null && param.thisObject != null) {
-                PowerKeeperState.freezeBinderInstance = param.thisObject
-            }
-        }
+        mode = HookMode.BEFORE
     )
 
     /**
@@ -795,23 +738,6 @@ object PowerKeeperHooks {
                 PowerKeeperState.powerKeeperManagerInstance = param.thisObject
             }
             PowerKeeperState.syncDualAppSupport(PrefReader.powerKeeperPrefs.freezeDualApp)
-        }
-    )
-
-    /**
-     * P19（PA(24)）：ProcessObserver#<init>(Context, EventsAggregator)
-     */
-    private fun buildP19ProcessObserverInitHook(): HookSpec = HookSpec(
-        id = "P19",
-        name = "ProcessObserver#<init>",
-        targetClass = CLASS_PROCESS_OBSERVER,
-        methodName = null,
-        paramTypes = listOf(Context::class.java, CLASS_EVENTS_AGGREGATOR),
-        mode = HookMode.BEFORE,
-        before = { param ->
-            if (PowerKeeperState.processObserverInstance == null && param.thisObject != null) {
-                PowerKeeperState.processObserverInstance = param.thisObject
-            }
         }
     )
 
@@ -845,8 +771,7 @@ object PowerKeeperHooks {
      * `DeviceIdleController#getDozeWhiteListAppFromNewCloud()` 读 `doze_whitelist_apps` 后就是调它，
      * `frozenNew_whitelist` 与 `bright_frozen` 同理。
      *
-     * 【只拦不改】：Bundle 里带受保护键时整包丢弃，等价于旧版「云白名单第一刀 / 第二刀 + 睡眠模式名单」
-     * 三处拦截；其它键的云配置照常写入。开关沿用 `blockAddPowerSaveWhitelistApps`（与 P7/P8 同一把闸）。
+     * 仅过滤受保护名单键，其它云配置原样保留。开关沿用 `blockAddPowerSaveWhitelistApps`。
      */
     private fun buildP27CloudWhiteListWriteHook(): HookSpec = HookSpec(
         id = "P27",
@@ -857,10 +782,11 @@ object PowerKeeperHooks {
         mode = HookMode.BEFORE,
         before = { param ->
             if (PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) {
-                val keys = (param.args.getOrNull(1) as? Bundle)?.keySet()?.toSet().orEmpty()
+                val bundle = param.args.getOrNull(1) as? Bundle ?: return@HookSpec
+                val keys = bundle.keySet().toSet()
                 val hit = keys.intersect(CLOUD_WHITE_LIST_KEYS)
                 if (hit.isNotEmpty()) {
-                    param.result = null
+                    param.args[1] = Bundle(bundle).apply { hit.forEach(::remove) }
                     if (PrefReader.powerKeeperPrefs.isLog) {
                         Logger.warn("屏蔽云名单下发: ${hit.joinToString(",")}")
                     }

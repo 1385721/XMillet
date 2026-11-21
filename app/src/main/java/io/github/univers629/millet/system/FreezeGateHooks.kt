@@ -3,6 +3,7 @@ package io.github.univers629.millet.system
 import android.app.ActivityManager
 import android.content.Context
 import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
@@ -13,9 +14,10 @@ import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RomCapabilities
-import io.github.univers629.millet.core.VersionGate
+import io.github.univers629.millet.core.ServiceRoleProtection
+import io.github.univers629.millet.core.UnifiedHookParam
+import io.github.univers629.millet.core.StatsEventOrigin
 import io.github.univers629.millet.core.XReflect
-import java.lang.reflect.Member
 
 /**
  * 冻结与解冻核心三闸（S2 / S3 / S6 / S7 / S8 / S17 / S18 / S20 + UpdateDialog 初始化闸门）。
@@ -183,6 +185,7 @@ object FreezeGateHooks {
         WHITE_LIST,
         DEFAULT_IME,
         ACCESSIBILITY_SERVICE,
+        UNKNOWN_SERVICE_ROLES,
         FOREGROUND_SERVICE
     }
 
@@ -193,28 +196,22 @@ object FreezeGateHooks {
         checkFgs: Boolean,
     ): FreezeExemption {
         if (pkg.isNullOrEmpty()) return FreezeExemption.NONE
-        if (pkg in prefs.whiteAppSet) return FreezeExemption.WHITE_LIST
-        if (ActiveImeTracker.isProtectedDefaultIme(SystemState.systemContext, pkg, prefs)) {
-            return FreezeExemption.DEFAULT_IME
-        }
-        if (ActiveImeTracker.isProtectedAccessibilityApp(SystemState.systemContext, pkg, prefs)) {
-            return FreezeExemption.ACCESSIBILITY_SERVICE
+        if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid)) return FreezeExemption.WHITE_LIST
+        when (ActiveImeTracker.resolveServiceRoleProtection(SystemState.systemContext, pkg, uid)) {
+            ServiceRoleProtection.DEFAULT_IME -> return FreezeExemption.DEFAULT_IME
+            ServiceRoleProtection.ACCESSIBILITY -> return FreezeExemption.ACCESSIBILITY_SERVICE
+            ServiceRoleProtection.UNKNOWN -> return FreezeExemption.UNKNOWN_SERVICE_ROLES
+            ServiceRoleProtection.NONE -> Unit
         }
         if (checkFgs &&
-            pkg !in prefs.forceFreezeSet &&
-            pkg in prefs.notFreezeWhenHasFgsSet &&
+            !AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, pkg, uid) &&
+            AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, pkg, uid) &&
             SystemState.checkAppFgService(uid)
         ) {
             return FreezeExemption.FOREGROUND_SERVICE
         }
         return FreezeExemption.NONE
     }
-
-    private fun isSystemServiceThawProtected(pkg: String?, prefs: PrefsSnapshot): Boolean =
-        pkg != null &&
-            pkg !in prefs.blockThawSet &&
-            pkg !in prefs.ignoreNetworkWakeSet &&
-            ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs)
 
     /**
      * 亮屏解冻豁免判断：
@@ -223,16 +220,84 @@ object FreezeGateHooks {
      * - 系统默认输入法、已启用的无障碍服务以及拥有活跃前台服务的 `notFreezeWhenHasFgsSet` 应用放行。
      */
     private fun isScreenOnThawExempt(uid: Int, pkg: String?, prefs: PrefsSnapshot): Boolean {
-        if (uid in 0 until 10000) return true
+        if (AppUidUtils.appIdOf(uid) in 0 until 10000) return true
         if (pkg.isNullOrEmpty()) return false
-        if (pkg in prefs.whiteAppSet) return true
+        if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid)) return true
+        // The ROM foreground fallback identifies packages, not individual users.
         if (SystemState.isPackageCurrentlyForeground(pkg)) return true
-        if (pkg in prefs.blockThawSet || pkg in prefs.ignoreNetworkWakeSet) return false
-        if (ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs)) return true
+        if (ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs, uid)) return true
+        if (AppUidUtils.containsPolicyTarget(prefs.blockThawSet, pkg, uid) ||
+            AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, pkg, uid)
+        ) return false
         return uid >= 10000 &&
-            pkg !in prefs.forceFreezeSet &&
-            pkg in prefs.notFreezeWhenHasFgsSet &&
+            !AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, pkg, uid) &&
+            AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, pkg, uid) &&
             SystemState.checkAppFgService(uid)
+    }
+
+    private fun thawInterceptRule(uid: Int, pkg: String?, reason: String, prefs: PrefsSnapshot): InterceptRule? {
+        if (!SystemState.isGreezeReady || !AppUidUtils.isManagedAppUid(uid) || pkg.isNullOrEmpty() || reason.isBlank()) return null
+        if (FreezeReasonClassifier.isUserOpenReason(reason) ||
+            SystemState.isPackageCurrentlyForeground(pkg) ||
+            AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
+            ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs, uid)
+        ) return null
+        if (isScreenOnThawReason(reason) && isScreenOnThawExempt(uid, pkg, prefs)) return null
+        if (!SystemState.isUidFrozen(uid)) return null
+        return when {
+            pkg == "com.tencent.mobileqq" && reason.trim().equals("broadcast", ignoreCase = true) -> InterceptRule.HARD_RULE
+            isSyncBinderThawReason(reason) && AppUidUtils.containsPolicyTarget(prefs.forbidSyncBinderSet, pkg, uid) -> InterceptRule.FORBID_SYNC_BINDER
+            isNetworkWakeReason(reason) && AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, pkg, uid) -> InterceptRule.IGNORE_NETWORK
+            prefs.disableCharge && isChargeThawReason(reason) -> InterceptRule.NO_CHARGE_THAW
+            prefs.disableScreenOnThaw && isScreenOnThawReason(reason) -> InterceptRule.NO_SCREEN_ON_THAW
+            AppUidUtils.containsPolicyTarget(prefs.blockThawSet, pkg, uid) && !isAllowedThawReason(reason) -> InterceptRule.BLOCK_THAW
+            else -> null
+        }
+    }
+
+    private fun recordThawIntercept(uid: Int, pkg: String?, reason: String, rule: InterceptRule, prefs: PrefsSnapshot) {
+        if (prefs.freezeStats) FreezeStatsRecorder.recordIntercept(uid, rule, reason, pkg)
+        Logger.warn("--系统[解冻uid]:${rule.label},拒绝[$reason]解冻[$pkg]uid:$uid")
+    }
+
+    private data class StatsInvocation(val freeze: Boolean, val outer: Boolean,
+        val uids: Set<Int>, val origin: StatsEventOrigin)
+    private val statsInvocations = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<UnifiedHookParam, StatsInvocation>())
+    private fun hasEnclosingStatsBoundary(param: UnifiedHookParam, freeze: Boolean): Boolean {
+        val methods = if (freeze) setOf("freezeUids", "freezeAction", "freezePids")
+            else setOf("thawUids", "thawUid", "dispatchThawEvent")
+        val frames = Thread.currentThread().stackTrace.filter {
+            it.className == CLASS_GREEZE_SERVICE && it.methodName in methods
+        }
+        val current = param.method?.name
+        return frames.any { it.methodName != current } || frames.count { it.methodName == current } > 1
+    }
+
+    private fun beginStats(param: UnifiedHookParam, uids: Collection<Int>, reason: String, freeze: Boolean) {
+        if (!SystemState.isGreezeReady || !PrefReader.systemPrefs.freezeStats) return
+        val targets = uids.filter { AppUidUtils.isManagedAppUid(it) }.toSet()
+        val call: StatsInvocation
+        synchronized(statsInvocations) {
+            if (statsInvocations.containsKey(param)) return
+            if (statsInvocations.size >= 256) statsInvocations.keys.firstOrNull()?.let { statsInvocations.remove(it) }
+            val outer = !hasEnclosingStatsBoundary(param, freeze)
+            call = StatsInvocation(freeze, outer, targets, FreezeStatsRecorder.currentOrigin(reason))
+            statsInvocations[param] = call
+        }
+    }
+
+    private fun finishStats(param: UnifiedHookParam, acceptedUids: Collection<Int>, reason: String): Boolean {
+        val call = statsInvocations.remove(param) ?: return false
+        if (!call.outer) return false
+        if (FreezeStatsRecorder.isModuleBatchActive()) return param.throwable == null && !param.isSkipped
+        return param.throwable == null && !param.isSkipped
+    }
+
+    private fun recordThawAccounting(param: UnifiedHookParam, uids: IntArray, reason: String) {
+        val accepted = if (param.throwable == null && !param.isSkipped) resolveEffectiveIds(param.result, uids) else emptyList()
+        if (!finishStats(param, accepted, reason) || FreezeStatsRecorder.isDispatchThawEventActive) return
+        for (uid in accepted) if (AppUidUtils.isManagedAppUid(uid)) FreezeStatsRecorder.recordThaw(uid, reason)
     }
 
     /**
@@ -258,6 +323,7 @@ object FreezeGateHooks {
             if (uids.isEmpty()) return@HookSpec
             val prefs = PrefReader.systemPrefs
             val reason = (param.args.getOrNull(3) as? String) ?: "unknown"
+            beginStats(param, uids.toList(), reason, freeze = true)
             var blocked = false
             val kept = ArrayList<Int>(uids.size)
             for (uid in uids) {
@@ -267,7 +333,8 @@ object FreezeGateHooks {
                     blocked = true
                     if (prefs.freezeStats && uid >= 10000 &&
                         exemption != FreezeExemption.DEFAULT_IME &&
-                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE
+                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE &&
+                        exemption != FreezeExemption.UNKNOWN_SERVICE_ROLES
                     ) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
@@ -292,10 +359,12 @@ object FreezeGateHooks {
             val argUids = (param.args.getOrNull(0) as? IntArray) ?: IntArray(0)
             val reason = (param.args.getOrNull(3) as? String) ?: "unknown"
 
+            val accepted = if (param.throwable == null && !param.isSkipped) resolveEffectiveIds(param.result, argUids) else emptyList()
+            val outerSuccess = finishStats(param, accepted, reason)
             if (needStats) {
-                val actuallyFrozenUids = resolveEffectiveIds(param.result, param.method, argUids)
+                val actuallyFrozenUids = if (outerSuccess) accepted else emptyList()
                 if (actuallyFrozenUids.isNotEmpty()) {
-                    FreezeStatsRecorder.recordFreezeBatch(actuallyFrozenUids, reason)
+                    FreezeStatsRecorder.recordFreezeBatch(actuallyFrozenUids, reason, onlyIfNotFrozen = true)
                 }
             }
 
@@ -304,12 +373,8 @@ object FreezeGateHooks {
                 val fromWho = (param.args.getOrNull(2) as? Int) ?: 0
                 val flag = (param.args.getOrNull(4) as? Boolean) ?: false
 
-                val resultList = param.result as? Collection<*>
-                val effectiveUids: List<Int> = if (!resultList.isNullOrEmpty()) {
-                    resultList.mapNotNull { it as? Int }
-                } else {
-                    argUids.toList()
-                }
+                val effectiveUids = resolveEffectiveIds(param.result, argUids)
+                if (effectiveUids.isEmpty()) return@HookSpec
 
                 val labelList = effectiveUids.joinToString(",") { uid ->
                     SystemState.formatAppLabelAndUid(uid)
@@ -328,17 +393,12 @@ object FreezeGateHooks {
 
     private fun resolveEffectiveIds(
         result: Any?,
-        method: Member?,
         argIds: IntArray,
     ): List<Int> {
         return when (result) {
-            is Collection<*> -> result.mapNotNull { it as? Int }
-            is IntArray -> result.toList()
+            is Collection<*> -> result.mapNotNull { it as? Int }.filter { it in argIds }
+            is IntArray -> result.filter { it in argIds }
             is Boolean -> if (result) argIds.toList() else emptyList()
-            null -> {
-                val returnsVoid = (method as? java.lang.reflect.Method)?.returnType == Void.TYPE
-                if (returnsVoid) argIds.toList() else emptyList()
-            }
             else -> emptyList()
         }
     }
@@ -367,7 +427,8 @@ object FreezeGateHooks {
         paramResolver = { _, clazz ->
             val candidates = clazz.declaredMethods.filter { m ->
                 m.name == "freezeAction" &&
-                    m.parameterCount >= 4 &&
+                    (m.parameterCount == 4 ||
+                        (m.parameterCount == 5 && m.parameterTypes[4] == Boolean::class.javaPrimitiveType)) &&
                     m.parameterTypes[0] == Int::class.javaPrimitiveType &&
                     m.parameterTypes[1] == Int::class.javaPrimitiveType &&
                     m.parameterTypes[2] == String::class.java &&
@@ -407,6 +468,7 @@ object FreezeGateHooks {
                     Logger.info("FAH判断:${pkg}为已启用无障碍服务，免予冻结")
                     param.blockSafely()
                 }
+                FreezeExemption.UNKNOWN_SERVICE_ROLES -> param.blockSafely()
                 FreezeExemption.FOREGROUND_SERVICE -> {
                     if (prefs.freezeStats && uid >= 10000) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
@@ -417,15 +479,17 @@ object FreezeGateHooks {
                 }
                 FreezeExemption.NONE -> Unit
             }
+            beginStats(param, listOf(uid), reason, freeze = true)
         },
         after = { param ->
             if (!SystemState.isGreezeReady) return@HookSpec
             val prefs = PrefReader.systemPrefs
             if (!prefs.freezeStats) return@HookSpec
-            if ((param.result as? Boolean) != true) return@HookSpec
             val uid = (param.args.getOrNull(0) as? Int) ?: return@HookSpec
             if (uid < 10000) return@HookSpec
             val reason = (param.args.getOrNull(2) as? String) ?: ""
+            val accepted = if (param.result == true && param.throwable == null && !param.isSkipped) listOf(uid) else emptyList()
+            if (!finishStats(param, accepted, reason) || accepted.isEmpty()) return@HookSpec
             FreezeStatsRecorder.recordFreeze(
                 uid = uid,
                 reason = reason,
@@ -458,22 +522,25 @@ object FreezeGateHooks {
             } ?: return@HookSpec
 
             val prefs = PrefReader.systemPrefs
-            val exemption = evaluateFreezeExemption(0, pkg, prefs, checkFgs = false)
+            val uid = resolveAurogonAppUid(appInfoObj)
+            // Missing UID fields cannot identify an independent policy target.
+            if (!AppUidUtils.isManagedAppUid(uid)) return@HookSpec
+            val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = false)
             if (exemption == FreezeExemption.WHITE_LIST) {
                 if (prefs.freezeStats) {
-                    val uid = resolveAurogonAppUidZeroPm(appInfoObj, pkg)
-                    if (uid >= 10000) {
-                        FreezeStatsRecorder.recordProtect(uid, "checkAppStatusForFreeze", pkg)
-                    }
+                    FreezeStatsRecorder.recordProtect(uid, "checkAppStatusForFreeze", pkg)
                 }
                 param.blockSafely()
-            } else if (exemption == FreezeExemption.DEFAULT_IME || exemption == FreezeExemption.ACCESSIBILITY_SERVICE) {
+            } else if (exemption == FreezeExemption.DEFAULT_IME ||
+                exemption == FreezeExemption.ACCESSIBILITY_SERVICE ||
+                exemption == FreezeExemption.UNKNOWN_SERVICE_ROLES
+            ) {
                 param.blockSafely()
             }
         }
     )
 
-    private fun resolveAurogonAppUidZeroPm(appInfoObj: Any, pkg: String): Int {
+    private fun resolveAurogonAppUid(appInfoObj: Any): Int {
         val clazz = appInfoObj.javaClass
         val fieldUid = when {
             RomCapabilities.hasField(clazz, "mUid") ->
@@ -482,8 +549,7 @@ object FreezeGateHooks {
                 runCatching { XReflect.getIntField(appInfoObj, "uid") }.getOrDefault(-1)
             else -> -1
         }
-        if (fieldUid >= 10000) return fieldUid
-        return FreezeStatsRecorder.getCachedUidForPackage(pkg)
+        return fieldUid
     }
 
     /**
@@ -586,214 +652,72 @@ object FreezeGateHooks {
         }
     )
 
-    /**
-     * S20（SettingsSection）：GreezeManagerService#thawUid(int uid, int fromWho, String reason)
-     * 【解冻压制 / 冻结保持核心】：
-     * 1. `!isGreezeReady` 或包名/reason 为空 -> 放行
-     * 2. 若 reason 代表切回前台（toFront），记录 `lastToFrontPackage = pkg`
-     * 3. 若 `(reason == "screen on" && lastToFrontPackage == pkg)` 或当前 UID 本来就未冻结 -> 放行
-     * 4. 若 `pkg == "com.tencent.mobileqq" && reason == "broadcast"` 或 `reason == "Broadcast"` -> 永久拒绝解冻
-     * 5. 若 `reason in {"Sync Binder", "Check Binder"}` 且 `pkg in forbidSyncBinderSet` -> 拒绝解冻
-     * 6. 若 `pkg in ignoreNetworkWakeSet` 且 `reason` 属网络类（PACKET / Net Change / Signal / broadcast）
-     *    -> 拒绝解冻（优先于理由放行表，代价是推送延迟到下次打开应用）
-     * 7. 若 `pkg !in blockThawSet` 或 `isAllowedThawReason(reason)` 为真 -> 放行
-     * 8. 其余情况 -> 强力压制，拒绝解冻（`param.result = false`）
-     */
+    /** Single-UID thaw gate; accounting follows a confirmed native return. */
     fun buildS20ThawUidHook(): HookSpec = HookSpec(
         id = "S20",
         name = "GreezeManagerService#thawUid",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "thawUid",
-        paramTypes = listOf(
-            Int::class.javaPrimitiveType!!,
-            Int::class.javaPrimitiveType!!,
-            String::class.java
-        ),
-        mode = HookMode.BEFORE,
+        paramTypes = listOf(Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!, String::class.java),
+        mode = HookMode.BEFORE_AND_AFTER,
         before = { param ->
-            if (!SystemState.isGreezeReady) return@HookSpec
-
-            val uid = (param.args.getOrNull(0) as? Int) ?: return@HookSpec
-            val reason = (param.args.getOrNull(2) as? String) ?: return@HookSpec
+            if ((param.method as? java.lang.reflect.Method)?.returnType != Boolean::class.javaPrimitiveType) return@HookSpec
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val reason = param.args.getOrNull(2) as? String ?: return@HookSpec
+            beginStats(param, listOf(uid), reason, freeze = false)
             val pkg = SystemState.getPackageNameForUid(uid) ?: return@HookSpec
             val prefs = PrefReader.systemPrefs
-
-            if (isToFrontReason(reason)) {
-                SystemState.lastToFrontPackage = pkg
-            }
-
-            // 亮屏时恢复当前前台/白名单/系统关键服务，或该 UID 当前处于未冻结态 -> 直接放行
-            if (isScreenOnThawReason(reason) && isScreenOnThawExempt(uid, pkg, prefs)) {
-                if (prefs.freezeStats && uid >= 10000 &&
-                    !FreezeStatsRecorder.isDispatchThawEventActive &&
-                    FreezeStatsRecorder.isUidTrackedFrozen(uid) &&
-                    SystemState.isUidFrozen(uid)
-                ) {
-                    FreezeStatsRecorder.recordThaw(uid, reason, pkg)
-                }
-                return@HookSpec
-            }
-            if (!SystemState.isUidFrozen(uid)) {
-                return@HookSpec
-            }
-
-            // 硬规则 1：QQ 广播唤醒永久拒绝
-            if ((pkg == "com.tencent.mobileqq" && reason == "broadcast") || reason == "Broadcast") {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordIntercept(uid, InterceptRule.HARD_RULE, reason, pkg)
-                }
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 硬规则 2：命中「禁止同步 Binder」集合时拦截 Sync Binder* / Check Binder* 解冻
-            if (isSyncBinderThawReason(reason) && pkg in prefs.forbidSyncBinderSet) {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordIntercept(uid, InterceptRule.FORBID_SYNC_BINDER, reason, pkg)
-                }
-                Logger.warn("--系统[解冻uid]:禁止[$reason]解冻[$pkg]uid:$uid")
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 规则 2.5：「忽略网络唤醒」——网络类理由不再放行，冻结保持到用户主动打开。
-            // 独立于「禁止后台解冻」生效：勾了这一个开关就足够，不必再额外压一层。
-            if (pkg in prefs.ignoreNetworkWakeSet && isNetworkWakeReason(reason)) {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordIntercept(uid, InterceptRule.IGNORE_NETWORK, reason, pkg)
-                }
-                Logger.warn("--系统[解冻uid]:忽略网络唤醒,禁止[$reason]解冻[$pkg]uid:$uid")
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 规则 2.6：全局「禁止插电时全量解冻」。
-            // 插充电器这条路径在 OS1/OS2 上并不是 powerkeeper 的 MilletBrightHandler what=16，
-            // 而是 Greezer 自己逐个 uid 调 thawUid(reason="battery charging")，所以只挂 P10 拦不住，
-            // 必须在闸门这里一并拒掉，否则「禁止插电时全量解冻」在旧版本上等于没开。
-            if (prefs.disableCharge && isChargeThawReason(reason) && !isSystemServiceThawProtected(pkg, prefs)) {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_CHARGE_THAW, reason, pkg)
-                }
-                Logger.warn("--系统[解冻uid]:禁止插电解冻,拒绝[$reason]解冻[$pkg]uid:$uid")
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 规则 2.7：可选「亮屏时保持冻结」——豁免对象已提前放行，仅拦普通后台的 screen on。
-            if (prefs.disableScreenOnThaw && isScreenOnThawReason(reason)) {
-                if (prefs.freezeStats && uid >= 10000) {
-                    FreezeStatsRecorder.recordIntercept(uid, InterceptRule.NO_SCREEN_ON_THAW, reason, pkg)
-                }
-                Logger.warn("--系统[解冻uid]:禁止亮屏解冻,拒绝[$reason]解冻[$pkg]uid:$uid")
-                param.blockSafely()
-                return@HookSpec
-            }
-
-            // 规则 3：未勾选「强力压制」(blockThawSet)，或者默认输入法/无障碍服务/合法解冻理由白名单 -> 放行
-            if (pkg !in prefs.blockThawSet || isAllowedThawReason(reason) || isSystemServiceThawProtected(pkg, prefs)) {
-                if (prefs.freezeStats && uid >= 10000 && !FreezeStatsRecorder.isDispatchThawEventActive) {
-                    FreezeStatsRecorder.recordThaw(uid, reason, pkg)
-                }
-                return@HookSpec
-            }
-
-            // 规则 4：强力压制拦截
-            if (prefs.freezeStats && uid >= 10000) {
-                FreezeStatsRecorder.recordIntercept(uid, InterceptRule.BLOCK_THAW, reason, pkg)
-            }
-            Logger.warn("--系统[解冻uid]:强力压制,禁止[$reason]解冻[$pkg]uid:$uid")
-            param.blockSafely()
+            if (SystemState.isGreezeReady && isToFrontReason(reason)) SystemState.lastToFrontPackage = pkg
+            val rule = thawInterceptRule(uid, pkg, reason, prefs) ?: return@HookSpec
+            if (param.blockSafely()) recordThawIntercept(uid, pkg, reason, rule, prefs)
+        },
+        after = { param ->
+            if ((param.method as? java.lang.reflect.Method)?.returnType != Boolean::class.javaPrimitiveType) return@HookSpec
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val reason = param.args.getOrNull(2) as? String ?: return@HookSpec
+            recordThawAccounting(param, intArrayOf(uid), reason)
         }
     )
 
-    /**
-     * S21：GreezeManagerService#thawUids(int[] uids, int fromWho, String reason)
-     *
-     * 澎湃 3.0 的框架侧批量解冻（音量键、音频焦点、亮屏批量恢复）走这个入口，而不是单个 `thawUid`。
-     * 平时只记录；命中「忽略网络唤醒」名单的应用在批量网络唤醒里会被摘出去，保持冻结。
-     */
+    /** Batch thaw uses the same per-UID decision as the synchronous and async gates. */
     fun buildS21ThawUidsProbeHook(): HookSpec = HookSpec(
         id = "S21",
         name = "GreezeManagerService#thawUids",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "thawUids",
-        paramTypes = listOf(
-            IntArray::class.java,
-            Int::class.javaPrimitiveType!!,
-            String::class.java
-        ),
-        mode = HookMode.BEFORE,
+        paramTypes = listOf(IntArray::class.java, Int::class.javaPrimitiveType!!, String::class.java),
+        mode = HookMode.BEFORE_AND_AFTER,
         before = { param ->
-            val prefs = PrefReader.systemPrefs
-            if (prefs.isLog) {
-                val uids = param.args.getOrNull(0) as? IntArray
-                val reason = param.args.getOrNull(2) as? String ?: "-"
-                val pkgNames = uids
-                    ?.asSequence()
-                    ?.mapNotNull { SystemState.getPackageNameForUid(it) }
-                    ?.distinct()
-                    ?.joinToString(",")
-                    .orEmpty()
-                Logger.info("批量解冻入口[$reason]: uids=[${uids?.joinToString(",") ?: "-"}] pkgs=[$pkgNames]")
-            }
-
-            // 批量解冻同样要尊重「忽略网络唤醒」：框架侧网络事件可能一次唤醒多个 uid，
-            // 只拦 S20 的单个入口会漏掉这条路径。
-            // 另外「禁止插电时全量解冻」在部分版本上也是走批量入口的，一并处理。
+            if ((param.method as? java.lang.reflect.Method)?.returnType != List::class.java) return@HookSpec
             val uids = param.args.getOrNull(0) as? IntArray ?: return@HookSpec
             val reason = param.args.getOrNull(2) as? String ?: return@HookSpec
-            val needFallbackThaw = SystemState.isGreezeReady &&
-                prefs.freezeStats &&
-                !FreezeStatsRecorder.isDispatchThawEventActive
-            val ignoreSet = prefs.ignoreNetworkWakeSet
-            val chargeThaw = prefs.disableCharge && isChargeThawReason(reason)
-            val networkThaw = isNetworkWakeReason(reason) && ignoreSet.isNotEmpty()
-            val screenOnThaw = prefs.disableScreenOnThaw && isScreenOnThawReason(reason)
-            if (!chargeThaw && !networkThaw && !screenOnThaw) {
-                if (needFallbackThaw) {
-                    for (uid in uids) {
-                        if (uid >= 10000 && FreezeStatsRecorder.isUidTrackedFrozen(uid)) {
-                            FreezeStatsRecorder.recordThaw(uid, reason)
-                        }
-                    }
-                }
-                return@HookSpec
-            }
-
-            var blocked = false
+            val prefs = PrefReader.systemPrefs
+            beginStats(param, uids.toList(), reason, freeze = false)
             val kept = ArrayList<Int>(uids.size)
+            val blocked = ArrayList<Pair<Int, InterceptRule>>()
             for (uid in uids) {
                 val pkg = SystemState.getPackageNameForUid(uid)
-                val sysServiceProtected = isSystemServiceThawProtected(pkg, prefs)
-                val interceptRule: InterceptRule? = when {
-                    chargeThaw && pkg != null && !sysServiceProtected -> InterceptRule.NO_CHARGE_THAW
-                    screenOnThaw && !isScreenOnThawExempt(uid, pkg, prefs) -> InterceptRule.NO_SCREEN_ON_THAW
-                    networkThaw && pkg != null && !sysServiceProtected && pkg in ignoreSet -> InterceptRule.IGNORE_NETWORK
-                    else -> null
-                }
-                if (interceptRule != null) {
-                    blocked = true
-                    if (prefs.freezeStats && uid >= 10000) {
-                        FreezeStatsRecorder.recordIntercept(uid, interceptRule, reason, pkg)
-                    }
-                    Logger.warn("thawUids 拒绝批量解冻: 保持冻结 $pkg uid=$uid reason=$reason")
-                } else {
-                    kept.add(uid)
-                    if (needFallbackThaw && uid >= 10000 && FreezeStatsRecorder.isUidTrackedFrozen(uid)) {
-                        FreezeStatsRecorder.recordThaw(uid, reason, pkg)
-                    }
-                }
+                val rule = thawInterceptRule(uid, pkg, reason, prefs)
+                if (rule == null) kept.add(uid) else blocked.add(uid to rule)
             }
-            if (!blocked) return@HookSpec
+            if (prefs.isLog) Logger.info("批量解冻入口[$reason]: uids=[${uids.joinToString(",")}]")
+            if (blocked.isEmpty()) return@HookSpec
             if (kept.isEmpty()) {
-                param.blockSafely()
+                if (!param.blockSafely()) return@HookSpec
             } else {
                 param.args[0] = kept.toIntArray()
             }
+            for ((uid, rule) in blocked) {
+                recordThawIntercept(uid, SystemState.getPackageNameForUid(uid), reason, rule, prefs)
+            }
+        },
+        after = { param ->
+            if ((param.method as? java.lang.reflect.Method)?.returnType != List::class.java) return@HookSpec
+            val uids = param.args.getOrNull(0) as? IntArray ?: return@HookSpec
+            val reason = param.args.getOrNull(2) as? String ?: return@HookSpec
+            recordThawAccounting(param, uids, reason)
         }
     )
-
     /**
      * S22（诊断探点）：GreezeManagerService#dispatchThawEvent(int uid, String reason)
      *
@@ -805,17 +729,26 @@ object FreezeGateHooks {
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "dispatchThawEvent",
         paramTypes = listOf(Int::class.javaPrimitiveType!!, String::class.java),
-        mode = HookMode.BEFORE,
+        mode = HookMode.BEFORE_AND_AFTER,
         before = { param ->
             val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
             val reason = param.args.getOrNull(1) as? String ?: "-"
             val prefs = PrefReader.systemPrefs
             if (SystemState.isGreezeReady && prefs.freezeStats && uid >= 10000) {
-                FreezeStatsRecorder.recordThaw(uid, reason)
+                beginStats(param, listOf(uid), reason, freeze = false)
             }
             if (prefs.isLog) {
                 val pkg = SystemState.getPackageNameForUid(uid) ?: "uid$uid"
                 Logger.info("解冻事件[$reason]: $pkg uid=$uid")
+            }
+        },
+        after = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val reason = param.args.getOrNull(1) as? String ?: "-"
+            val success = param.throwable == null && !param.isSkipped
+            finishStats(param, if (success) listOf(uid) else emptyList(), reason)
+            if (success && SystemState.isGreezeReady && PrefReader.systemPrefs.freezeStats) {
+                FreezeStatsRecorder.recordThaw(uid, reason)
             }
         }
     )
@@ -830,27 +763,34 @@ object FreezeGateHooks {
      *
      * 这里在冻结之前把属于免冻结应用的 pid 从数组里摘掉；全部摘空时直接否决本次调用。
      */
+    internal data class PidIdentity(val uid: Int, val startTicks: Long)
+
+    private val freezePidInvocations = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<UnifiedHookParam, Map<Int, PidIdentity>>()
+    )
+
     fun buildS23FreezePidsHook(): HookSpec = HookSpec(
         id = "S23",
         name = "GreezeManagerService#freezePids",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "freezePids",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods.firstOrNull { it.name == "freezePids" }?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(
+            IntArray::class.java, Long::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!, String::class.java,
+        ),
         mode = HookMode.BEFORE_AND_AFTER,
         before = { param ->
             if (!SystemState.isGreezeReady) return@HookSpec
+            if ((param.method as? java.lang.reflect.Method)?.returnType != List::class.java) return@HookSpec
             val pidArray = param.args.getOrNull(0) as? IntArray ?: return@HookSpec
             if (pidArray.isEmpty()) return@HookSpec
+            val reason = param.args.getOrNull(3) as? String ?: return@HookSpec
 
             val prefs = PrefReader.systemPrefs
 
             var blocked = false
             val kept = ArrayList<Int>(pidArray.size)
             var protectedUids: HashSet<Int>? = null
-            var protectReason: String? = null
             for (pid in pidArray) {
                 val uid = uidForPid(pid)
                 val pkg = if (uid > 0) SystemState.getPackageNameForUid(uid) else null
@@ -859,15 +799,12 @@ object FreezeGateHooks {
                     blocked = true
                     if (prefs.freezeStats && uid >= 10000 &&
                         exemption != FreezeExemption.DEFAULT_IME &&
-                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE
+                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE &&
+                        exemption != FreezeExemption.UNKNOWN_SERVICE_ROLES
                     ) {
                         val seen = protectedUids ?: HashSet<Int>().also { protectedUids = it }
                         if (seen.add(uid)) {
-                            val r = protectReason ?: (
-                                param.args.filterIsInstance<String>()
-                                    .firstOrNull { it.isNotBlank() } ?: "freezePids"
-                                ).also { protectReason = it }
-                            FreezeStatsRecorder.recordProtect(uid, r, pkg)
+                            FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                         }
                     }
                     Logger.info("freezePids 跳过受保护应用进程[$exemption]: $pkg pid=$pid")
@@ -876,34 +813,62 @@ object FreezeGateHooks {
                 }
             }
 
-            if (!blocked) return@HookSpec
-            if (kept.isEmpty()) {
-                param.blockSafely()
-            } else {
+            if (blocked) {
+                if (kept.isEmpty()) {
+                    param.blockSafely()
+                    return@HookSpec
+                }
                 param.args[0] = kept.toIntArray()
+                Logger.logEvent(Logger.Level.INFO, "freezePids 冻结闸门生效", kept.joinToString(","))
             }
-            Logger.logEvent(Logger.Level.INFO, "freezePids 冻结闸门生效", kept.joinToString(","))
+            if (prefs.freezeStats) {
+                val identities = kept.mapNotNull { pid ->
+                    readPidIdentity(pid)?.let { pid to it }
+                }.toMap()
+                if (identities.isNotEmpty()) freezePidInvocations[param] = identities
+                beginStats(param, identities.values.map { it.uid }, reason, freeze = true)
+            }
         },
         after = { param ->
+            val identities = freezePidInvocations.remove(param) ?: return@HookSpec
             if (!SystemState.isGreezeReady) return@HookSpec
             val prefs = PrefReader.systemPrefs
             if (!prefs.freezeStats) return@HookSpec
             val argPids = (param.args.getOrNull(0) as? IntArray)?.takeIf { it.isNotEmpty() } ?: return@HookSpec
-            val frozenPids = resolveEffectiveIds(param.result, param.method, argPids)
-            if (frozenPids.isEmpty()) return@HookSpec
-            val reason = param.args.filterIsInstance<String>()
-                .firstOrNull { it.isNotBlank() } ?: "freezePids"
-            Logger.postIoTask {
-                val seenUids = HashSet<Int>()
-                for (pid in frozenPids) {
-                    val uid = uidForPid(pid)
-                    if (uid >= 10000 && seenUids.add(uid)) {
-                        FreezeStatsRecorder.recordFreeze(uid, reason, onlyIfNotFrozen = true)
-                    }
-                }
-            }
+            val frozenPids = resolveEffectiveIds(param.result, argPids)
+            val reason = param.args.getOrNull(3) as? String ?: return@HookSpec
+            val uids = if (param.throwable == null && !param.isSkipped)
+                acceptedFreezeUids(identities, frozenPids, ::readPidIdentity) else emptyList()
+            if (finishStats(param, uids, reason) && uids.isNotEmpty())
+                FreezeStatsRecorder.recordFreezeBatch(uids, reason, onlyIfNotFrozen = true)
         }
     )
+
+    internal fun acceptedFreezeUids(
+        identities: Map<Int, PidIdentity>,
+        acceptedPids: List<Int>,
+        currentIdentity: (Int) -> PidIdentity?,
+    ): List<Int> = acceptedPids.mapNotNull { pid ->
+        val before = identities[pid] ?: return@mapNotNull null
+        if (before.uid >= 10000 && currentIdentity(pid) == before) before.uid else null
+    }.distinct()
+
+    internal fun parsePidStartTicks(pid: Int, raw: String): Long? {
+        if (raw.substringBefore(' ').toIntOrNull() != pid) return null
+        val close = raw.lastIndexOf(')')
+        if (close < 0 || close + 2 >= raw.length) return null
+        val fields = raw.substring(close + 2).trim().split(' ').filter { it.isNotEmpty() }
+        return fields.getOrNull(19)?.toLongOrNull()?.takeIf { it > 0L }
+    }
+
+    private fun readPidIdentity(pid: Int): PidIdentity? = runCatching {
+        if (pid <= 0) return@runCatching null
+        val stat = java.io.File("/proc/$pid/stat")
+        val startTicks = parsePidStartTicks(pid, stat.readText()) ?: return@runCatching null
+        val uid = uidForPid(pid)
+        if (uid < 10000 || parsePidStartTicks(pid, stat.readText()) != startTicks) return@runCatching null
+        PidIdentity(uid, startTicks)
+    }.getOrNull()
 
     /**
      * pid → uid。`android.os.Process#getUidForPid` 属于隐藏 API，走反射调用；
@@ -945,15 +910,22 @@ object FreezeGateHooks {
         name = "PowerManagerService#acquireWakeLockInternal",
         targetClass = "com.android.server.power.PowerManagerService",
         methodName = "acquireWakeLockInternal",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods.firstOrNull { it.name == "acquireWakeLockInternal" }?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(
+            android.os.IBinder::class.java,
+            Int::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!,
+            String::class.java,
+            String::class.java,
+            android.os.WorkSource::class.java,
+            String::class.java,
+            Int::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!,
+            "android.os.IWakeLockCallback",
+        ),
         mode = HookMode.BEFORE,
         before = { param ->
-            val uid = (param.args.getOrNull(7) as? Int)
-                ?: (param.args.getOrNull(6) as? Int)
-                ?: return@HookSpec
+            if ((param.method as? java.lang.reflect.Method)?.returnType != Void.TYPE) return@HookSpec
+            val uid = param.args.getOrNull(7) as? Int ?: return@HookSpec
             if (uid > 10000 && SystemState.isUidFrozen(uid)) {
                 param.result = null
                 if (PrefReader.systemPrefs.isLog) {
@@ -969,21 +941,18 @@ object FreezeGateHooks {
      * 官方广播放行入口（澎湃 1.0 起存在）。系统在决定「这条广播能不能送给冻结中的应用」
      * 时会先问它。本模块的 S9/S10 挂在广播队列侧，澎湃 3.0 的推送投递会绕过队列直连，
      * 「消息应用 / 免冻白名单」的推送只在部分投递路径上放行，「禁止后台解冻」对推送
-     * 仅部分生效。这里只在官方入口上按应用名单放行，其余交回系统判断，
-     * 不改变非白名单应用的既有行为。
+     * 仅部分生效。官方入口复用已有解冻拒绝裁决，保护白名单与系统服务优先；
+     * 强冻或唤醒限制不命中模块消息/前台服务放行，其余交回系统判断。
      */
     fun buildS24AllowBroadcastHook(): HookSpec = HookSpec(
         id = "S24",
         name = "GreezeManagerService#isAllowBroadcast",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "isAllowBroadcast",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods
-                .filter { it.name == "isAllowBroadcast" }
-                .minByOrNull { it.parameterCount }
-                ?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(
+            Int::class.javaPrimitiveType!!, String::class.java,
+            Int::class.javaPrimitiveType!!, String::class.java, String::class.java,
+        ),
         mode = HookMode.REPLACE,
         replace = { param ->
             if (!SystemState.isGreezeReady) {
@@ -992,14 +961,24 @@ object FreezeGateHooks {
             val prefs = PrefReader.systemPrefs
             // 已知签名：isAllowBroadcast(int callerUid, String callerPkg, int calleeUid, String calleePkg, String action)
             val calleeUid = param.args.getOrNull(2) as? Int ?: -1
+            if (!AppUidUtils.isManagedAppUid(calleeUid)) return@HookSpec param.invokeOriginal()
             val calleePkg = (param.args.getOrNull(3) as? String)?.takeIf { it.isNotEmpty() }
                 ?: SystemState.getPackageNameForUid(calleeUid)
                 ?: return@HookSpec param.invokeOriginal()
-            val exempt = calleePkg in prefs.whiteAppSet ||
-                (calleePkg in prefs.messageAppSet && calleePkg !in prefs.ignoreNetworkWakeSet) ||
-                (calleePkg !in prefs.forceFreezeSet &&
-                    calleePkg in prefs.notFreezeWhenHasFgsSet &&
-                    SystemState.checkAppFgService(calleeUid))
+            val rule = thawInterceptRule(calleeUid, calleePkg, "broadcast", prefs)
+            if (rule != null) {
+                recordThawIntercept(calleeUid, calleePkg, "broadcast", rule, prefs)
+                return@HookSpec false
+            }
+            val suppressSoftExemption = AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, calleePkg, calleeUid) ||
+                AppUidUtils.containsPolicyTarget(prefs.blockThawSet, calleePkg, calleeUid) ||
+                AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, calleePkg, calleeUid)
+            val exempt = AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, calleePkg, calleeUid) ||
+                ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, calleePkg, prefs, calleeUid) ||
+                (!suppressSoftExemption &&
+                    (AppUidUtils.containsPolicyTarget(prefs.messageAppSet, calleePkg, calleeUid) ||
+                        (AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, calleePkg, calleeUid) &&
+                            SystemState.checkAppFgService(calleeUid))))
             if (!exempt) {
                 return@HookSpec param.invokeOriginal()
             }
@@ -1015,83 +994,42 @@ object FreezeGateHooks {
      * S25: GreezeManagerService#deferBroadcastForMiui
      *
      * 澎湃自己的「延后投递」入口：返回 true 表示这条广播先攒着，等应用解冻再发。
-     * 该入口只带 action、不带收件应用，因此仅在 action 字符串里能认出消息应用包名时
-     * 放行（澎湃常见形式为 `com.tencent.mm/com.tencent.mm.push.X`），认不出就交回系统，
-     * 避免变成「全局关掉延后投递」这种额外实现。
+     * 该入口仅有 action，不能识别收件 UID 或用户空间，保留原生投递判断。
      */
     fun buildS25DeferBroadcastHook(): HookSpec = HookSpec(
         id = "S25",
         name = "GreezeManagerService#deferBroadcastForMiui",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "deferBroadcastForMiui",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods
-                .filter { it.name == "deferBroadcastForMiui" }
-                .minByOrNull { it.parameterCount }
-                ?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(String::class.java),
         mode = HookMode.REPLACE,
         replace = { param ->
-            if (!SystemState.isGreezeReady) {
-                return@HookSpec param.invokeOriginal()
-            }
-            val prefs = PrefReader.systemPrefs
-            val targets = (prefs.messageAppSet - prefs.ignoreNetworkWakeSet) + prefs.whiteAppSet
-            if (targets.isEmpty()) {
-                return@HookSpec param.invokeOriginal()
-            }
-            val action = param.args.filterIsInstance<String>().firstOrNull()
-                ?: return@HookSpec param.invokeOriginal()
-            val matched = targets.firstOrNull { action.contains(it) }
-                ?: return@HookSpec param.invokeOriginal()
-            if (prefs.isLog) {
-                Logger.info("deferBroadcastForMiui 放行消息应用广播: $matched action=$action")
-            }
-            false
+            param.invokeOriginal()
         }
     )
 
     /**
      * S26: GreezeManagerService#thawUidAsync
      *
-     * OS1/OS2 上插充电器的解冻不走 `thawUid`（同步版），而是发给异步版
-     * `thawUidAsync`：greezer 历史里能看到逐条 `THAW uid = x reason : battery charging`，
-     * 但 S20 的同步闸门完全不触发，于是「禁止插电时全量解冻」在旧版本上形同虚设。
-     * 这里只按理由文本识别充电事件，命中且开关打开时拒绝本次解冻，其余情况放行。
+     * 已知签名为 `(int uid, int caller, String reason) -> void`。
+     * 与同步、批量入口共享 UID 裁决；入队请求不记为成功解冻。
      */
     fun buildS26ThawUidAsyncHook(): HookSpec = HookSpec(
         id = "S26",
         name = "GreezeManagerService#thawUidAsync",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "thawUidAsync",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods
-                .filter { it.name == "thawUidAsync" }
-                .minByOrNull { it.parameterCount }
-                ?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!, String::class.java),
         mode = HookMode.BEFORE,
         before = { param ->
+            if ((param.method as? java.lang.reflect.Method)?.returnType != Void.TYPE) return@HookSpec
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val reason = param.args.getOrNull(2) as? String ?: return@HookSpec
+            val pkg = SystemState.getPackageNameForUid(uid) ?: return@HookSpec
             val prefs = PrefReader.systemPrefs
-            val reason = param.args.filterIsInstance<String>()
-                .firstOrNull { it.isNotBlank() } ?: return@HookSpec
-            val chargeThaw = prefs.disableCharge && isChargeThawReason(reason)
-            val screenOnThaw = prefs.disableScreenOnThaw && isScreenOnThawReason(reason)
-            if (!chargeThaw && !screenOnThaw) return@HookSpec
-            val uid = param.args.filterIsInstance<Int>()
-                .firstOrNull { it >= 0 } ?: -1
-            val pkg = if (uid >= 0) SystemState.getPackageNameForUid(uid) else null
-            if (chargeThaw && isSystemServiceThawProtected(pkg, prefs)) return@HookSpec
-            if (screenOnThaw && isScreenOnThawExempt(uid, pkg, prefs)) return@HookSpec
-            if (prefs.freezeStats && uid >= 10000) {
-                val rule = if (chargeThaw) InterceptRule.NO_CHARGE_THAW else InterceptRule.NO_SCREEN_ON_THAW
-                FreezeStatsRecorder.recordIntercept(uid, rule, reason, pkg)
-            }
-            val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
-            Logger.warn("--系统[解冻uid]:$label(async),拒绝[$reason]解冻[${pkg ?: "uid$uid"}]")
-            param.result = null
+            if (SystemState.isGreezeReady && isToFrontReason(reason)) SystemState.lastToFrontPackage = pkg
+            val rule = thawInterceptRule(uid, pkg, reason, prefs) ?: return@HookSpec
+            if (param.blockSafely()) recordThawIntercept(uid, pkg, reason, rule, prefs)
         }
     )
 
@@ -1099,49 +1037,42 @@ object FreezeGateHooks {
      * S27: GreezeManagerService#thawAll
      *
      * 真正的「全量解冻」入口（开机完成、插电、切换省电模式时会被调用）。
-     * 当因「亮屏保持冻结」拦下全量 `screen on` 时，同步扫一遍已冻结 UID，
-     * 把前台应用 / 白名单 / 默认输入法 / 已启用无障碍服务逐个保底唤醒。
+     * 仅识别 `(String reason) -> boolean` 全量入口，其他签名保留原生行为。
+     * 拦截后单次放行前台、白名单、当前输入法与无障碍服务等安全豁免。
      */
     fun buildS27ThawAllHook(): HookSpec = HookSpec(
         id = "S27",
         name = "GreezeManagerService#thawAll",
         targetClass = CLASS_GREEZE_SERVICE,
         methodName = "thawAll",
-        paramTypes = emptyList(),
-        paramResolver = { _, clazz ->
-            clazz.declaredMethods
-                .filter { it.name == "thawAll" }
-                .minByOrNull { it.parameterCount }
-                ?.parameterTypes?.toList()
-        },
+        paramTypes = listOf(String::class.java),
         mode = HookMode.BEFORE,
         before = { param ->
+            if ((param.method as? java.lang.reflect.Method)?.returnType != Boolean::class.javaPrimitiveType) return@HookSpec
+            if (!SystemState.isGreezeReady || SystemState.greezeService == null) return@HookSpec
             val prefs = PrefReader.systemPrefs
-            val reason = param.args.filterIsInstance<String>()
-                .firstOrNull { it.isNotBlank() } ?: return@HookSpec
+            val reason = param.args.getOrNull(0) as? String ?: return@HookSpec
             val chargeThaw = prefs.disableCharge && isChargeThawReason(reason)
             val screenOnThaw = prefs.disableScreenOnThaw && isScreenOnThawReason(reason)
             if (!chargeThaw && !screenOnThaw) return@HookSpec
+            if (!param.blockSafely()) return@HookSpec
             if (prefs.freezeStats) {
                 val rule = if (chargeThaw) InterceptRule.NO_CHARGE_THAW else InterceptRule.NO_SCREEN_ON_THAW
                 FreezeStatsRecorder.recordSystemIntercept(rule, reason)
             }
             val label = if (chargeThaw) "禁止插电解冻" else "禁止亮屏解冻"
             Logger.warn("--系统[解冻uid]:$label(thawAll),拒绝[$reason]全量解冻")
-            param.blockSafely()
-            if (screenOnThaw) {
-                thawScreenOnExemptedUidsAsync(reason, prefs)
-            }
+            thawProtectedUidsAsync(reason, prefs)
         }
     )
 
-    private fun thawScreenOnExemptedUidsAsync(reason: String, prefs: PrefsSnapshot) {
+    private fun thawProtectedUidsAsync(reason: String, prefs: PrefsSnapshot) {
         val greeze = SystemState.greezeService ?: return
         Logger.postIoTask {
             val frozenUids = SystemState.getFrozenUidsArray()
             for (uid in frozenUids) {
                 val pkg = SystemState.getPackageNameForUid(uid)
-                if (isScreenOnThawExempt(uid, pkg, prefs)) {
+                if (thawInterceptRule(uid, pkg, reason, prefs) == null) {
                     runCatching { XReflect.callMethod(greeze, "thawUid", uid, 1000, reason) }
                 }
             }

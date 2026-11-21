@@ -15,18 +15,22 @@ enum class StatsWindow(val label: String) {
  * 归类逻辑与 [FreezeReasonClassifier] 及 `FreezeGateHooks` 严格保持一致。
  */
 enum class WakeCategory(val label: String) {
-    USER_OPEN("用户打开"),
-    NETWORK("网络推送"),
+    USER_OPEN("前台活动"),
+    NETWORK("网络活动"),
     BINDER("Binder 通信"),
     BROADCAST("广播/通知"),
     SCREEN_ON("亮屏"),
     CHARGING("充电"),
-    OTHER("系统其他");
+    OTHER("系统其他"),
+    MODULE_OPERATION("模块操作"),
+    LAUNCH_MODE("启动模式");
 
-    /** 「后台唤醒」口径不含用户主动打开 */
+    /** Compatibility property: excludes foreground activity, not proof of a human tap. */
     val isBackground: Boolean
         get() = this != USER_OPEN
 }
+
+enum class StatsEventOrigin { UNKNOWN, NATIVE, MODULE, LAUNCH_MODE, SNAPSHOT }
 
 /**
  * XMillet 拦截解冻所命中的规则。
@@ -102,6 +106,7 @@ data class StatsRecentEventData(
     val category: WakeCategory? = null,
     val rule: InterceptRule? = null,
     val rawReason: String = "",
+    val origin: StatsEventOrigin = StatsEventOrigin.UNKNOWN,
 )
 
 /**
@@ -184,8 +189,6 @@ object FreezeReasonClassifier {
         "network connect",
         "Signal other",
         "Signal iso",
-        "broadcast",
-        "Broadcast",
     )
 
     fun isSyncBinderThawReason(reason: String): Boolean {
@@ -199,6 +202,7 @@ object FreezeReasonClassifier {
         val trimmed = reason.trim()
         if (trimmed in ALLOWED_THAW_EXACT_REASONS) return true
         return isSyncBinderThawReason(trimmed) ||
+            trimmed.equals("broadcast", ignoreCase = true) ||
             trimmed.startsWith("Signal ", ignoreCase = true) ||
             trimmed.startsWith("Activity Start", ignoreCase = true) ||
             trimmed.contains("toFront", ignoreCase = true) ||
@@ -259,6 +263,7 @@ object FreezeReasonClassifier {
         val trimmed = reason.trim()
         if (trimmed.isEmpty()) return WakeCategory.OTHER
         return when {
+            trimmed.equals("LAUNCH_MODE", ignoreCase = true) -> WakeCategory.LAUNCH_MODE
             isUserOpenReason(trimmed) -> WakeCategory.USER_OPEN
             isChargeThawReason(trimmed) -> WakeCategory.CHARGING
             isScreenOnThawReason(trimmed) -> WakeCategory.SCREEN_ON

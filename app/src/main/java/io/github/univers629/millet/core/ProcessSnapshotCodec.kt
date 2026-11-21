@@ -1,79 +1,70 @@
 package io.github.univers629.millet.core
 
-/**
- * 解析 system_server 通过 `TX_GET_PROCESS_SNAPSHOT` 回传的进程快照。
- *
- * 协议（`ProcessSnapshotProvider` 生成）：
- * ```
- * v1
- * pid|uid|rssKb|vszKb|wchan|elapsedSec|processName|packageName|state|freezerType|svc1;svc2
- * ```
- * 任何一行解析失败都跳过该行，不影响其它进程；版本不认识时整体退化为空列表，
- * 让调用方回退到 root 采集。
- */
+/** 解析按需采集的进程快照；解析失败与合法空结果分别处理。 */
 object ProcessSnapshotCodec {
+    data class Snapshot(val capturedAt: Long, val entries: List<RootHelper.ProcessRawEntry>)
 
-    private const val FIELD_COUNT = 11
+    fun decode(payload: String?): List<RootHelper.ProcessRawEntry> = decodeSnapshot(payload)?.entries.orEmpty()
 
-    fun decode(payload: String?): List<RootHelper.ProcessRawEntry> {
-        if (payload.isNullOrEmpty()) return emptyList()
+    fun decodeSnapshot(payload: String?): Snapshot? {
+        if (payload.isNullOrEmpty()) return null
         val lines = payload.lineSequence().iterator()
-        if (!lines.hasNext()) return emptyList()
+        if (!lines.hasNext()) return null
         val header = lines.next().trim()
-        if (header != "v1") {
-            Logger.warn("进程快照版本不支持: $header")
-            return emptyList()
+        val legacy = header == "v1"
+        val fields = header.split('|')
+        val capturedAt = if (legacy) 0L else {
+            if (fields.size != 2 || fields[0] != "v2") return null
+            fields[1].toLongOrNull()?.takeIf { it >= 0L } ?: return null
         }
         val result = ArrayList<RootHelper.ProcessRawEntry>()
         for (line in lines) {
             if (line.isBlank()) continue
-            val entry = parseLine(line) ?: continue
-            result.add(entry)
+            result.add(parseLine(line, legacy) ?: return null)
         }
-        return result
+        return Snapshot(capturedAt, result)
     }
 
-    private fun parseLine(line: String): RootHelper.ProcessRawEntry? {
+    private fun parseLine(line: String, legacy: Boolean): RootHelper.ProcessRawEntry? {
         val parts = line.split('|')
-        if (parts.size < FIELD_COUNT) return null
-        val pid = parts[0].toIntOrNull() ?: return null
-        val uid = parts[1].toIntOrNull() ?: return null
-        val rssKb = parts[2].toLongOrNull() ?: 0L
-        val vszKb = parts[3].toLongOrNull() ?: 0L
+        if (parts.size != (if (legacy) 11 else 12)) return null
+        val pid = parts[0].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val uid = parts[1].toIntOrNull()?.takeIf { it >= 0 } ?: return null
+        val rssKb = parts[2].toLongOrNull()?.takeIf { it >= 0L } ?: return null
+        val vszKb = parts[3].toLongOrNull()?.takeIf { it >= 0L } ?: return null
         val wchan = parts[4]
-        val elapsedSec = parts[5].toLongOrNull() ?: 0L
-        val processName = parts[6]
-        val packageName = parts[7].ifEmpty { processName.substringBefore(':') }
+        val elapsedSec = parts[5].toLongOrNull()?.takeIf { it >= 0L } ?: return null
+        val processName = parts[6].takeIf { it.isNotEmpty() } ?: return null
+        val packageName = if (legacy) parts[7].ifEmpty { processName.substringBefore(':') } else parts[7]
         val state = parts[8]
-        val freezerType = parseFreezerType(parts[9])
-        val services = if (parts.size > 10 && parts[10].isNotEmpty()) {
-            parts[10].split(';').filter { it.isNotEmpty() }
-        } else {
-            emptyList()
+        if (parts[9] !in setOf("", "V1", "V2", "KILL")) return null
+        var freezerType = when (parts[9]) {
+            "V2" -> RootHelper.FreezerType.V2
+            "V1" -> RootHelper.FreezerType.V1
+            "KILL" -> RootHelper.FreezerType.KILL
+            else -> RootHelper.FreezerType.UNKNOWN
         }
+        // v1 的 V2 可能只来自请求值或普通等待函数，保守降级旧证据。
+        if (legacy && freezerType == RootHelper.FreezerType.V2 && !wchan.contains("do_freezer_trap")) {
+            freezerType = RootHelper.FreezerType.UNKNOWN
+        }
+        if (legacy && freezerType == RootHelper.FreezerType.KILL && state != "T") freezerType = RootHelper.FreezerType.UNKNOWN
+        if (legacy && state == "T") freezerType = RootHelper.FreezerType.KILL
+        if (!legacy && freezerType == RootHelper.FreezerType.KILL && state != "T") return null
+        val freezeState = if (legacy) {
+            if (freezerType == RootHelper.FreezerType.UNKNOWN) RootHelper.FreezeState.UNKNOWN else RootHelper.FreezeState.FROZEN
+        } else {
+            RootHelper.FreezeState.entries.firstOrNull { it.name == parts[11] } ?: return null
+        }
+        if ((freezeState == RootHelper.FreezeState.FROZEN) != (freezerType != RootHelper.FreezerType.UNKNOWN)) return null
         return RootHelper.ProcessRawEntry(
-            uid = uid,
-            pid = pid,
-            rssKb = rssKb,
-            vszKb = vszKb,
-            wchan = wchan,
-            elapsedStr = formatElapsed(elapsedSec),
-            processName = processName,
-            packageName = packageName,
-            status = state,
-            freezerType = freezerType,
-            services = services
+            uid = uid, pid = pid, rssKb = rssKb, vszKb = vszKb, wchan = wchan,
+            elapsedStr = formatElapsed(elapsedSec), processName = processName,
+            packageName = packageName, status = state, freezerType = freezerType,
+            services = parts[10].split(';').filter { it.isNotEmpty() }, freezeState = freezeState
         )
     }
 
-    private fun parseFreezerType(raw: String): RootHelper.FreezerType = when (raw) {
-        "V2" -> RootHelper.FreezerType.V2
-        "V1" -> RootHelper.FreezerType.V1
-        "KILL" -> RootHelper.FreezerType.KILL
-        else -> RootHelper.FreezerType.UNKNOWN
-    }
-
-    /** 转成 toybox ps 的 ELAPSED 形态（`HH:MM:SS` / `D-HH:MM:SS`），复用现有格式化逻辑。 */
     private fun formatElapsed(seconds: Long): String {
         if (seconds <= 0L) return ""
         val days = seconds / 86_400

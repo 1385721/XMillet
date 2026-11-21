@@ -2,12 +2,6 @@ package io.github.univers629.millet.ipc
 
 /**
  * 跨进程 Binder 通道与消息编解码协议定义。
- *
- * 修正缺陷 #5：
- * 原模块发送端拼接 `"[" + pkg + "," + reason`（缺失右括号 `]`），而接收端在 `mo498` 中用
- * `substring(indexOf("[") + 1)` 直接当包名查询，导致包名与原因粘连，反查未冻结原因失败。
- * 本实现采用明确的带边界符协议（`?unfrozen\t<pkg>` 与 `!unfrozen\t<pkg>\t<reason>`），
- * 同时向下兼容原版的 `[` 前缀格式。
  */
 object MilletIpcContract {
 
@@ -30,7 +24,7 @@ object MilletIpcContract {
     /** 客户端（powerkeeper / App）回调 AIDL 接口描述符 */
     const val DESCRIPTOR_CLIENT_CALLBACK = "io.github.univers629.millet.ISystemCallback"
 
-    // ==================== SystemBinderService 19 个事务码 ====================
+    // ==================== SystemBinderService 事务码 ====================
     const val TX_REGISTER_CLIENT = 1          // 注册客户端回调 Binder（+ 可选：本进程 Hook 覆盖串、能力位串）
     const val TX_UNREGISTER_CLIENT = 2        // 注销客户端回调 Binder
     const val TX_PING_ALIVE = 3               // 存活探测 -> boolean(1)
@@ -42,14 +36,19 @@ object MilletIpcContract {
     const val TX_IS_GREEZE_READY = 9          // 查询 Greeze 冻结服务是否就绪 -> boolean(0/1)
     const val TX_GET_RUNTIME_STATUS = 10      // 查询实时状态：就绪位 + 冻结 UID + frameworkApiVersion + Hook 覆盖
     const val TX_THAW_ALL_FROZEN = 11         // 一键解冻当前所有已冻结 UID -> int(count)
-    const val TX_QUERY_UNFROZEN_REASON = 12   // 请求诊断应用未冻结原因(packageName)
-    const val TX_REPORT_UNFROZEN_REASON = 13  // 回传未冻结原因诊断结果(packageName, reason)
+    // 事务码 12、13 已停用，保留空编号以兼容存续事务。
     const val TX_GET_PROCESS_SNAPSHOT = 14    // 查询应用进程快照 -> String（ProcessSnapshotProvider 序列化结果，App 因此不需要 root）
     const val TX_APPLY_BATTERY_POLICY = 15    // 应用省电策略(packageName, noRestrict 0/1) -> int(1=成功)，由 system_server 直接写，免 root
     const val TX_GET_KERNEL_FREEZER = 16      // 内核冻结器类型 -> String("V2"/"V1"/"NONE"/"UNKNOWN")，system_server 探测，免 root
     const val TX_GET_FREEZE_STATS = 17        // 查询墓碑统计快照(windowName) -> String (FreezeStatsCodec v1)
     const val TX_RESET_FREEZE_STATS = 18      // 重置墓碑统计计数与持久文件 -> int(1=成功)
     const val TX_GET_DUAL_APPS = 19           // 查询双开空间 (user 999) 已安装应用清单 -> String (`pkg|uid|flags`)
+    const val TX_QUERY_UID_PACKAGES = 20     // 批量查询完整 UID 的成员包名，只读
+
+    const val MAX_UID_PACKAGES_QUERY = 512
+
+    // TX_QUERY_UID_PACKAGES：请求 int[]（完整 UID，去重后最多 512 个）；响应 int 成功项数，
+    // 随后逐项写 int UID + StringList 包名。查询失败的 UID 不写入，成功无成员写空列表。
 
     // ==================== 尾部扩展字段（向下兼容约定） ====================
     /*
@@ -68,74 +67,6 @@ object MilletIpcContract {
     // ==================== ClientCallback 事务码 ====================
     const val TX_ON_CLIENT_MESSAGE = 1        // mo498(message)
 
-    // ==================== 带边界符的消息编解码（修正缺陷 #5） ====================
-    private const val PREFIX_QUERY_UNFROZEN = "?unfrozen\t"
-    private const val PREFIX_RESPONSE_UNFROZEN = "!unfrozen\t"
     const val MSG_IS_UPDATE = "isUpdate"
     const val MSG_REBIND_SYSTEM_BINDER = "__xmillet_rebind_system_binder__"
-
-    /**
-     * 编码「查询某包为什么没被冻结」请求消息（system_server -> powerkeeper）。
-     */
-    fun encodeUnfrozenQuery(packageName: String): String {
-        return "$PREFIX_QUERY_UNFROZEN${packageName.trim()}"
-    }
-
-    /**
-     * 尝试解析「查询某包为什么没被冻结」请求消息。
-     * @return 目标应用包名；若该消息不是未冻结原因查询（例如是配置热更新键名），返回 null。
-     */
-    fun decodeUnfrozenQueryOrNull(message: String): String? {
-        if (message.startsWith(PREFIX_QUERY_UNFROZEN)) {
-            val pkg = message.removePrefix(PREFIX_QUERY_UNFROZEN).trim()
-            return pkg.ifEmpty { null }
-        }
-        // 兼容旧版 "[" + pkg 格式（若含逗号则取逗号前包名）
-        if (message.startsWith("[")) {
-            val body = message.substring(1).trim().removeSuffix("]")
-            val pkg = body.substringBefore(',').trim()
-            return pkg.ifEmpty { null }
-        }
-        return null
-    }
-
-    /**
-     * 编码「未冻结原因诊断结果」响应消息（system_server -> App，采用 `\t` 严格定界）。
-     */
-    fun encodeUnfrozenResponse(packageName: String, reason: String): String {
-        val cleanPkg = packageName.replace('\t', ' ').trim()
-        val cleanReason = reason.replace('\t', ' ').trim()
-        return "$PREFIX_RESPONSE_UNFROZEN$cleanPkg\t$cleanReason"
-    }
-
-    /**
-     * 解析「未冻结原因诊断结果」响应消息。
-     * @return Pair(packageName, reason)，若非诊断响应消息则返回 null。
-     */
-    fun decodeUnfrozenResponseOrNull(message: String): Pair<String, String>? {
-        if (message.startsWith(PREFIX_RESPONSE_UNFROZEN)) {
-            val payload = message.removePrefix(PREFIX_RESPONSE_UNFROZEN)
-            val tabIndex = payload.indexOf('\t')
-            if (tabIndex > 0) {
-                val pkg = payload.substring(0, tabIndex).trim()
-                val reason = payload.substring(tabIndex + 1).trim()
-                if (pkg.isNotEmpty()) {
-                    return pkg to reason.ifEmpty { "未知原因" }
-                }
-            }
-        }
-        // 兼容旧版 "[pkg,reason" 格式
-        if (message.startsWith("[") && message.contains(",")) {
-            val body = message.substring(1).removeSuffix("]")
-            val commaIndex = body.indexOf(',')
-            if (commaIndex > 0) {
-                val pkg = body.substring(0, commaIndex).trim()
-                val reason = body.substring(commaIndex + 1).trim()
-                if (pkg.isNotEmpty()) {
-                    return pkg to reason.ifEmpty { "未知原因" }
-                }
-            }
-        }
-        return null
-    }
 }

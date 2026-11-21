@@ -42,13 +42,14 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.SignalWifiOff
 import androidx.compose.material.icons.rounded.SyncDisabled
-import androidx.compose.material.icons.rounded.Troubleshoot
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,6 +81,7 @@ import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -105,17 +107,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
-/**
- * 单应用策略详情页（复刻 KernelSU AppProfileScreenMiuix 布局与交互）：
- * 完整支持 8 个应用级策略集合与严格互斥联动，以及跨进程未冻结原因一键诊断。
- */
+/** 单应用策略详情页，展示进程快照与七个应用级策略集合。 */
 @Composable
 fun AppProfileScreenMiuix(
     app: InstalledAppUiModel,
-    runtimeStatus: PowerKeeperBinderClient.RuntimeStatusSnapshot = PowerKeeperBinderClient.RuntimeStatusSnapshot(),
     onBack: () -> Unit,
     onPolicyChanged: () -> Unit,
-    onQueryUnfrozenReason: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -126,40 +123,56 @@ fun AppProfileScreenMiuix(
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
+    val policyTarget = AppUidUtils.encodeQueryTarget(app.packageName, app.uid)
+    val isDualApp = AppUidUtils.isDualAppUid(app.uid)
     val processCacheKey = "${app.packageName}:${app.uid}"
+    val pageToken = remember(app.packageName, app.uid) { Any() }
+    val currentPageToken by rememberUpdatedState(pageToken)
+    var isPageActive by remember(pageToken) { mutableStateOf(true) }
+    DisposableEffect(pageToken) {
+        onDispose { isPageActive = false }
+    }
     var appProcesses by remember(app.packageName, app.uid) {
         mutableStateOf(AppProcessSnapshotCache.get(processCacheKey).orEmpty())
     }
-    var isScanningProcesses by remember { mutableStateOf(false) }
+    var isScanningProcesses by remember(app.packageName, app.uid) { mutableStateOf(false) }
+    var processSnapshotUnavailable by remember(app.packageName, app.uid) { mutableStateOf(false) }
     var hasScannedProcesses by remember(app.packageName, app.uid) {
         mutableStateOf(AppProcessSnapshotCache.get(processCacheKey) != null)
     }
 
     suspend fun scanProcesses() {
-        if (isScanningProcesses) return
+        if (isScanningProcesses || !isPageActive || currentPageToken !== pageToken) return
+        val targetUid = app.uid
         isScanningProcesses = true
-        val list = withContext(Dispatchers.IO) {
-            // 优先用 system_server 采集的快照（含每个进程挂载的服务），按 UID 严格隔离主应用与双开空间
-            val fromSystem = PowerKeeperBinderClient.queryProcessSnapshot()
-                ?.filter { entry ->
-                    if (app.uid > 0) {
-                        entry.uid == app.uid
-                    } else {
-                        entry.packageName == app.packageName && !AppUidUtils.isDualAppUid(entry.uid)
-                    }
-                }
-                .orEmpty()
-            if (fromSystem.isNotEmpty()) {
-                RootHelper.sortProcessEntries(fromSystem)
-            } else {
-                // 模块未激活时不再回退 root 采集，进程列表留空，避免后台拉起 su 弹授权框
-                emptyList()
+        try {
+            val snapshot = withContext(Dispatchers.IO) {
+                PowerKeeperBinderClient.queryProcessSnapshot()
             }
+            if (!isPageActive || currentPageToken !== pageToken) return
+            if (snapshot == null) {
+                processSnapshotUnavailable = true
+                hasScannedProcesses = true
+                return
+            }
+            val list = withContext(Dispatchers.IO) {
+                RootHelper.sortProcessEntries(snapshot.entries.filter { it.uid == targetUid })
+            }
+            if (!isPageActive || currentPageToken !== pageToken) return
+            appProcesses = list
+            AppProcessSnapshotCache.put(processCacheKey, list)
+            processSnapshotUnavailable = false
+            hasScannedProcesses = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (isPageActive && currentPageToken === pageToken) {
+                processSnapshotUnavailable = true
+                hasScannedProcesses = true
+            }
+        } finally {
+            isScanningProcesses = false
         }
-        appProcesses = list
-        AppProcessSnapshotCache.put(processCacheKey, list)
-        hasScannedProcesses = true
-        isScanningProcesses = false
     }
 
     val refreshProcesses: () -> Unit = {
@@ -174,52 +187,51 @@ fun AppProfileScreenMiuix(
         scanProcesses()
     }
 
-    var inWhite by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.WHITE_APP_SET))
+    var inWhite by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.WHITE_APP_SET), app.packageName, app.uid))
     }
-    var inMessage by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.MESSAGE_APP_SET))
+    var inMessage by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.MESSAGE_APP_SET), app.packageName, app.uid))
     }
-    var inForceFreeze by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.FORCE_FREEZE_SET))
+    var inForceFreeze by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.FORCE_FREEZE_SET), app.packageName, app.uid))
     }
-    var inBlockThaw by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.BLOCK_THAW_SET))
+    var inBlockThaw by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.BLOCK_THAW_SET), app.packageName, app.uid))
     }
-    var inForbidSync by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.FORBID_SYNC_BINDER_SET))
+    var inForbidSync by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.FORBID_SYNC_BINDER_SET), app.packageName, app.uid))
     }
-    var inNotFreezeFgs by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET))
+    var inNotFreezeFgs by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET), app.packageName, app.uid))
     }
-    var inIgnoreNetworkWake by remember(app.packageName) {
-        mutableStateOf(app.packageName in PrefReader.readUiStringSet(prefs, PrefsKeys.IGNORE_NETWORK_WAKE_SET))
+    var inIgnoreNetworkWake by remember(app.packageName, app.uid) {
+        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.IGNORE_NETWORK_WAKE_SET), app.packageName, app.uid))
     }
-    // 系统「无限制」的唯一事实来源是 Settings.System.MILLET_NO_RESTRICT_APP。
-    // 读到它就把「免冻结白名单」开关点亮，并把包名补进白名单集合 ——
-    // 这样开关、列表胶囊、系统策略三者说的是同一件事（开关开着就是真的在名单里）。
-    var systemUnrestricted by remember(app.packageName) { mutableStateOf(false) }
+    // 系统省电策略按包名读取，不作为模块名单的成员判定。
+    var systemUnrestricted by remember(app.packageName, app.uid) { mutableStateOf(false) }
 
     // 系统省电策略的只读回显：不提供绑定/初始化按钮，进页面自动读系统真值。
-    var systemPolicyLabel by remember(app.packageName) { mutableStateOf("读取中…") }
+    var systemPolicyLabel by remember(app.packageName, app.uid) { mutableStateOf("读取中…") }
 
     suspend fun refreshSystemPolicy() {
         val (unrestricted, label) = withContext(Dispatchers.IO) {
             val value = BatteryPolicyHelper.isPackageNoRestrict(context, app.packageName)
             value to readSystemPolicyLabel(context, app.packageName, value)
         }
+        if (!isPageActive || currentPageToken !== pageToken) return
         systemUnrestricted = unrestricted
         systemPolicyLabel = label
         // 开关只跟随模块名单；系统侧是否「无限制」由上方提示条单独展示，
         // 避免系统名单没清干净时把开关顶回开启状态，让用户以为点不动。
     }
-    LaunchedEffect(app.packageName) {
+    LaunchedEffect(app.packageName, app.uid) {
         refreshSystemPolicy()
     }
 
     fun buildMembershipSet(key: String, add: Boolean): Set<String> {
         val currentSet = PrefReader.readUiStringSet(prefs, key)
-        if (add) currentSet.add(app.packageName) else currentSet.remove(app.packageName)
+        if (add) currentSet.add(policyTarget) else currentSet.remove(policyTarget)
         return currentSet
     }
 
@@ -277,7 +289,6 @@ fun AppProfileScreenMiuix(
                             content = {
                                 ListPopupColumn {
                                     val items = listOf(
-                                        "诊断为什么未被冻结",
                                         "启动该应用",
                                         "系统应用详情页"
                                     )
@@ -289,10 +300,7 @@ fun AppProfileScreenMiuix(
                                             onSelectedIndexChange = {
                                                 showTopPopup.value = false
                                                 when (idx) {
-                                                    0 -> onQueryUnfrozenReason(
-                                                        AppUidUtils.encodeQueryTarget(app.packageName, app.uid)
-                                                    )
-                                                    1 -> {
+                                                    0 -> {
                                                         val launchIntent = context.packageManager
                                                             .getLaunchIntentForPackage(app.packageName)
                                                         if (launchIntent != null) {
@@ -301,7 +309,7 @@ fun AppProfileScreenMiuix(
                                                             Toast.makeText(context, "该应用无桌面启动入口", Toast.LENGTH_SHORT).show()
                                                         }
                                                     }
-                                                    2 -> {
+                                                    1 -> {
                                                         val intent = Intent(
                                                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                                             Uri.fromParts("package", app.packageName, null)
@@ -417,12 +425,12 @@ fun AppProfileScreenMiuix(
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp)
                                 .padding(bottom = 12.dp),
-                            message = "该应用在系统「省电策略」中被设为「无限制 (MILLET_NO_RESTRICT_APP)」。除非开启下方「强制冻结」，否则系统默认不冻结该应用。",
+                            message = "系统包名级省电策略记录为「无限制 (MILLET_NO_RESTRICT_APP)」，该记录不代表当前进程的内核冻结状态。",
                             level = WarningLevel.Notice
                         )
                     }
 
-                    // 3. 运行中子进程与内核冻结诊断（按应用专属深入查看）
+                    // 3. 应用进程快照
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -431,7 +439,7 @@ fun AppProfileScreenMiuix(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         SmallTitle(
-                            text = "运行中子进程与冻结诊断 (${appProcesses.size})",
+                            text = "进程快照 (${appProcesses.size})",
                             modifier = Modifier.weight(1f)
                         )
                         IconButton(
@@ -455,12 +463,16 @@ fun AppProfileScreenMiuix(
                             .padding(bottom = 12.dp),
                         insideMargin = PaddingValues(14.dp)
                     ) {
+                        if (processSnapshotUnavailable && appProcesses.isNotEmpty()) {
+                            Text(
+                                text = "进程快照不可用，本次采集失败；保留上次成功快照。",
+                                fontSize = 12.sp,
+                                color = colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
                         if (appProcesses.isEmpty()) {
-                            // 冻结/墓碑状态下进程可能已被回收，此时「无进程」本身就是正常结果，
-                            // 与列表行显示的「已冻结」不是矛盾，这里把原因写清楚。
-                            // 三种占位文案共用同一个固定高度：否则「准备 → 扫描 → 结果」之间
-                            // 卡片会反复收缩，动画期间任何一次尺寸变化都会掉帧。
-                            val uidFrozen = app.uid in runtimeStatus.frozenUids
+                            // 空列表占位保持固定高度，减少扫描期间的布局变化。
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -471,9 +483,9 @@ fun AppProfileScreenMiuix(
                                 Text(
                                     text = when {
                                         isScanningProcesses -> "正在扫描进程..."
+                                        processSnapshotUnavailable -> "进程快照不可用"
                                         !hasScannedProcesses -> "正在准备进程快照..."
-                                        uidFrozen -> "该应用已被冻结，当前没有存活进程"
-                                        else -> "该应用当前暂无运行中进程"
+                                        else -> "快照中没有该 UID 的进程"
                                     },
                                     fontWeight = FontWeight.Medium,
                                     fontSize = 14.sp,
@@ -483,9 +495,9 @@ fun AppProfileScreenMiuix(
                                 Text(
                                     text = when {
                                         isScanningProcesses -> "请稍候..."
+                                        processSnapshotUnavailable -> "本次采集失败，点击刷新可重试"
                                         !hasScannedProcesses -> "转场结束后立即读取进程表"
-                                        uidFrozen -> "系统侧记录该 uid 处于冻结状态，进程随冻结被回收；应用被唤醒后会重新出现"
-                                        else -> "未载入内存或进程已冷终止，点击右上角刷新可重新探测"
+                                        else -> "仅表示本次采集未返回目标 UID 的进程，不推断原因"
                                     },
                                     fontSize = 12.sp,
                                     color = colorScheme.onSurfaceVariantSummary
@@ -562,28 +574,27 @@ fun AppProfileScreenMiuix(
 
                                             Spacer(Modifier.size(8.dp))
 
-                                            // 状态徽章：冻结方式统一走 FreezeModeLabels，与首页列表同一口径
-                                            val isUidFrozen = app.uid in runtimeStatus.frozenUids
+                                            // 冻结状态仅取进程快照，Greeze UID 记账不作为内核事实。
                                             val modeType = proc.freezerType
                                             val modeColor = FreezeModeLabels.colorHex(modeType)
-                                            when {
-                                                modeColor != null -> {
+                                            when (proc.freezeState) {
+                                                RootHelper.FreezeState.FROZEN -> {
                                                     StatusTagMiuix(
-                                                        label = FreezeModeLabels.processLabel(modeType),
-                                                        backgroundColor = Color(modeColor),
+                                                        label = if (modeColor != null) FreezeModeLabels.processLabel(modeType) else "已冻结（方式未知）",
+                                                        backgroundColor = if (modeColor != null) Color(modeColor) else colorScheme.primary,
                                                         contentColor = Color.White
                                                     )
                                                 }
-                                                isUidFrozen -> {
+                                                RootHelper.FreezeState.RUNNING -> {
                                                     StatusTagMiuix(
-                                                        label = FreezeModeLabels.TOMBSTONE,
-                                                        backgroundColor = colorScheme.primary,
-                                                        contentColor = colorScheme.onPrimary
+                                                        label = "未冻结",
+                                                        backgroundColor = colorScheme.secondaryContainer,
+                                                        contentColor = colorScheme.onSecondaryContainer
                                                     )
                                                 }
-                                                else -> {
+                                                RootHelper.FreezeState.UNKNOWN -> {
                                                     StatusTagMiuix(
-                                                        label = "活跃等待",
+                                                        label = "冻结状态未知",
                                                         backgroundColor = colorScheme.secondaryContainer,
                                                         contentColor = colorScheme.onSecondaryContainer
                                                     )
@@ -650,30 +661,6 @@ fun AppProfileScreenMiuix(
                         }
                     }
 
-                    // 4. 未冻结原因实时诊断入口
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp)
-                    ) {
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Troubleshoot,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.primary
-                                )
-                            },
-                            title = "诊断「为什么没被冻结」",
-                            summary = "跨进程诊断未冻结原因",
-                            onClick = { onQueryUnfrozenReason(app.packageName) }
-                        )
-                    }
-
                     // 4. 冻结豁免与消息策略组
                     SmallTitle(text = "冻结豁免与保活策略")
                     Card(
@@ -694,7 +681,11 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "加入 XMillet 免冻结白名单",
-                            summary = "永不冻结此应用（开启后自动关闭消息应用与强制冻结，并同步设为系统省电策略无限制）",
+                            summary = if (isDualApp) {
+                                "此双开实例加入模块免冻结名单，并关闭冲突策略；不修改系统包名级省电策略"
+                            } else {
+                                "永不冻结此应用（开启后自动关闭消息应用与强制冻结，并同步设为系统省电策略无限制）"
+                            },
                             checked = inWhite,
                             onCheckedChange = { checked ->
                                 inWhite = checked
@@ -715,37 +706,37 @@ fun AppProfileScreenMiuix(
                                         PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false
                                     )
 
-                                    // 开启免冻结白名单：同步把系统「省电策略」改为无限制
-                                    // （模块在线时由 system_server 直接写，不需要 root）
-                                    systemUnrestricted = true
-                                    coroutineScope.launch {
-                                        val ok = SystemBatteryOptimizationHelper.setAppIgnoringBatteryOptimization(context, app.packageName)
-                                        refreshSystemPolicy()
-                                        if (!ok) {
-                                            inWhite = false
-                                            updateMembership(PrefsKeys.WHITE_APP_SET, false)
-                                            Toast.makeText(
-                                                context,
-                                                "系统省电策略写入失败：需要模块在线或 Root 授权",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                    if (!isDualApp) {
+                                        // 主用户保留系统省电策略同步动作。
+                                        coroutineScope.launch {
+                                            val ok = SystemBatteryOptimizationHelper.setAppIgnoringBatteryOptimization(context, app.packageName)
+                                            refreshSystemPolicy()
+                                            if (!ok) {
+                                                inWhite = false
+                                                updateMembership(PrefsKeys.WHITE_APP_SET, false)
+                                                Toast.makeText(
+                                                    context,
+                                                    "系统省电策略写入失败：需要模块在线或 Root 授权",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     }
                                 } else {
                                     updateMembership(PrefsKeys.WHITE_APP_SET, false)
-                                    // 关闭免冻结白名单：系统「省电策略」恢复默认
-                                    systemUnrestricted = false
-                                    coroutineScope.launch {
-                                        val ok = SystemBatteryOptimizationHelper.restoreAppBatteryOptimizationToDefault(context, app.packageName)
-                                        refreshSystemPolicy()
-                                        if (!ok) {
-                                            inWhite = true
-                                            updateMembership(PrefsKeys.WHITE_APP_SET, true)
-                                            Toast.makeText(
-                                                context,
-                                                "恢复系统省电策略失败：需要模块在线或 Root 授权",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                    if (!isDualApp) {
+                                        coroutineScope.launch {
+                                            val ok = SystemBatteryOptimizationHelper.restoreAppBatteryOptimizationToDefault(context, app.packageName)
+                                            refreshSystemPolicy()
+                                            if (!ok) {
+                                                inWhite = true
+                                                updateMembership(PrefsKeys.WHITE_APP_SET, true)
+                                                Toast.makeText(
+                                                    context,
+                                                    "恢复系统省电策略失败：需要模块在线或 Root 授权",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     }
                                 }
@@ -843,7 +834,7 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "强制冻结",
-                            summary = "剥夺系统黑名单、无限制名单与后台豁免，退后台即纳入冻结（与免冻结白名单、前台服务不冻结互斥）",
+                            summary = "向官方链路请求冻结并限制已适配的后台豁免（与免冻结白名单、前台服务不冻结互斥）",
                             checked = inForceFreeze,
                             onCheckedChange = { checked ->
                                 inForceFreeze = checked
@@ -968,7 +959,11 @@ fun AppProfileScreenMiuix(
                                 )
                             },
                             title = "当前策略",
-                            summary = systemPolicyLabel,
+                            summary = if (isDualApp) {
+                                "$systemPolicyLabel；系统策略按包名共享，不能为双开独立设置；模块名单可按实例独立设置"
+                            } else {
+                                systemPolicyLabel
+                            },
                             onClick = {
                                 runCatching {
                                     context.startActivity(
@@ -995,10 +990,10 @@ fun AppProfileScreenMiuix(
 
 /** 把系统省电策略翻译成一句话，供只读行展示。 */
 private fun readSystemPolicyLabel(context: Context, packageName: String, noRestrict: Boolean): String = when {
-    noRestrict -> "无限制（系统不会主动冻结该应用）"
+    noRestrict -> "无限制（系统包名级记录）"
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(packageName) == true -> "已忽略电池优化（AOSP 白名单）"
-    else -> "智能推荐（系统可随时冻结该应用）"
+    else -> "未记录为无限制或忽略电池优化"
 }
 
 /**
@@ -1009,13 +1004,7 @@ private fun readSystemPolicyLabel(context: Context, packageName: String, noRestr
  */
 private const val PROCESS_SCAN_DELAY_MS = 460L
 
-/**
- * 各应用最近一次进程快照的内存缓存。
- *
- * 用处：从进程列表反复进出详情页时，卡片可以直接用上次的快照占位，避免先渲染
- * 「正在扫描」再撑开成 N 行 —— 这种尺寸跳变本身就是转场卡顿的主要来源之一。
- * 只保留最近若干条，进程退出即失效，不做持久化。
- */
+/** 按包名与 UID 缓存最近一次成功快照，不做持久化。 */
 private object AppProcessSnapshotCache {
     private const val MAX_ENTRIES = 8
 
@@ -1030,7 +1019,7 @@ private object AppProcessSnapshotCache {
     fun get(cacheKey: String): List<RootHelper.ProcessRawEntry>? = entries[cacheKey]
 
     @Synchronized
-    fun put(cacheKey: String, snapshot: List<RootHelper.ProcessRawEntry>) {
-        entries[cacheKey] = snapshot
+    fun put(cacheKey: String, processes: List<RootHelper.ProcessRawEntry>) {
+        entries[cacheKey] = processes
     }
 }

@@ -535,6 +535,7 @@ object FreezeStatsCodec {
             category = category,
             rule = rule,
             rawReason = rawReason,
+            origin = parts.getOrNull(8)?.let { parseEnumOrNull<StatsEventOrigin>(it) } ?: StatsEventOrigin.UNKNOWN,
         )
     }
 
@@ -656,8 +657,20 @@ object FreezeStatsCodec {
             .append(event.category?.name.orEmpty()).append('|')
             .append(event.rule?.name.orEmpty()).append('|')
             .append(escape(event.rawReason))
+            .append('|').append(event.origin.name)
             .append('\n')
     }
+
+
+
+    private inline fun <reified E : Enum<E>> decodeEnumCounts(raw: String): Map<E, Int> =
+        raw.split(',').mapNotNull { segment ->
+            val fields = segment.split('=', limit = 2)
+            if (fields.size != 2) return@mapNotNull null
+            val key = parseEnumOrNull<E>(fields[0]) ?: return@mapNotNull null
+            val count = fields[1].toIntOrNull()?.takeIf { it >= 0 } ?: return@mapNotNull null
+            key to count
+        }.toMap()
 
     private fun encodeWakeMap(map: Map<WakeCategory, Int>): String {
         if (map.isEmpty()) return ""

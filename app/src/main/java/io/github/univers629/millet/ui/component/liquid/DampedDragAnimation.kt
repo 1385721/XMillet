@@ -13,10 +13,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.android.awaitFrame
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.time.TimeSource
+
+internal suspend fun MutatorMutex.mutateAnimations(block: suspend CoroutineScope.() -> Unit) {
+    mutate { coroutineScope(block) }
+}
 
 class DampedDragAnimation(
     private val animationScope: CoroutineScope,
@@ -130,7 +135,7 @@ class DampedDragAnimation(
 
     fun animateToValue(value: Float) {
         animationScope.launch {
-            mutatorMutex.mutate {
+            mutatorMutex.mutateAnimations {
                 press()
                 val targetValue = value.coerceIn(valueRange)
                 launch { valueAnimation.animateTo(targetValue, valueAnimationSpec) }

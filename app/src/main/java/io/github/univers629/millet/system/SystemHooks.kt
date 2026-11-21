@@ -70,9 +70,15 @@ object SystemHooks {
                     }
                 }
 
+                PrefGroup.DOZE_FLAGS -> BroadcastAndDozeHooks.onDozeConfigChanged()
+
                 PrefGroup.APP_SETS -> {
-                    if (changedKey == PrefsKeys.MESSAGE_APP_SET) {
-                        SystemState.syncMessageAppsToAurogon()
+                    when (changedKey) {
+                        PrefsKeys.MESSAGE_APP_SET,
+                        PrefsKeys.FORCE_FREEZE_SET,
+                        PrefsKeys.WHITE_APP_SET,
+                        PrefsKeys.BLOCK_THAW_SET,
+                        PrefsKeys.IGNORE_NETWORK_WAKE_SET -> SystemState.syncMessageAppsToAurogon()
                     }
                     if (changedKey == PrefsKeys.WHITE_APP_SET) {
                         // 白名单变化后把条目同步进系统免冻结名单，避免 millet 内核侧再次冻结它们

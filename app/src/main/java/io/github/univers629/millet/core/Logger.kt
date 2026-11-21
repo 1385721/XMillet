@@ -58,6 +58,19 @@ object Logger {
     @Volatile
     private var hotReloading: Boolean = false
 
+    // 优化 #1：缓存 logLevel 的解析结果，避免每条日志都做 lowercase + when 解析。
+    // 仅在 logLevel 配置字符串变化时重新解析；@Volatile 保证跨进程热重载后的可见性。
+    @Volatile
+    private var cachedLogLevelName: String? = null
+
+    @Volatile
+    private var cachedMinLevel: Level = Level.DEBUG
+
+    // 优化 #3：复用日期格式与常开 FileWriter（仅在单线程 XMillet-LogIo Handler 内访问，无线程安全问题）
+    private val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA)
+    private var localWriter: FileWriter? = null
+    private var localWriterPath: String? = null
+
     private fun ensureIoHandler(): Handler? {
         if (hotReloading) return null
         ioHandler?.let { return it }
@@ -84,6 +97,7 @@ object Logger {
             thread = ioThread
             ioThread = null
         }
+        closeLocalWriter()
         thread?.quitSafely()
     }
 
@@ -170,6 +184,8 @@ object Logger {
     fun initSystemLogRotation() {
         postIoTask {
             try {
+                // 轮转会 rename log→last.log，常开 writer 仍指向旧 inode；先关闭，下次写入时重建。
+                closeLocalWriter()
                 val dir = File(LOCAL_LOG_DIR)
                 if (!dir.exists()) {
                     dir.mkdirs()
@@ -233,19 +249,28 @@ object Logger {
         }
     }
 
+    /** 仅在配置字符串变化时重新解析日志等级，热路径只做一次引用比较。 */
+    private fun resolveMinLevel(configName: String?): Level {
+        val cachedName = cachedLogLevelName
+        if (cachedName == configName) return cachedMinLevel
+        val parsed = Level.fromConfig(configName)
+        cachedLogLevelName = configName
+        cachedMinLevel = parsed
+        return parsed
+    }
+
     private fun emit(
         level: Level,
         body: String,
         prefs: PrefsSnapshot,
         forceLocal: Boolean = false
     ) {
-        val minLevel = Level.fromConfig(prefs.logLevel)
+        val minLevel = resolveMinLevel(prefs.logLevel)
         if (level.priority < minLevel.priority && level != Level.ERROR) {
             return
         }
 
-        val formattedLine = "$TAG [${level.code}] $body"
-
+        // 优化 #1：移除原先未使用的 formattedLine 拼接，省掉每次一条无用字符串分配。
         // 1. 输出到 Modern LibXposed；框架未注入时退回 Android Logcat
         var loggedToXposed = false
         if (prefs.logType != "file") {
@@ -287,13 +312,35 @@ object Logger {
             if (!dir.exists()) {
                 dir.mkdirs()
             }
-            val file = File(LOCAL_LOG_PATH)
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())
-            FileWriter(file, true).use { writer ->
-                writer.append("$timestamp [${level.code}] $body\n")
-            }
+            // 复用常开 writer：避免每条日志都 new FileWriter + open/close fd。
+            // 日志轮转（initSystemLogRotation 把 log 改名 last.log）后，路径 inode 变化，
+            // 这里通过比对路径并在必要时重建 writer（时间戳单调兜底）来适配。
+            val writer = ensureLocalWriter()
+            val timestamp = timestampFormat.format(Date())
+            writer.append("$timestamp [${level.code}] $body\n")
+            writer.flush()
         } catch (_: Throwable) {
             // 本地文件写入失败静默降级，不抛异常
+            closeLocalWriter()
         }
+    }
+
+    /** 取当前常开 writer；文件被轮转/删除或首次使用时重建。仅在 IO Handler 线程调用。 */
+    private fun ensureLocalWriter(): FileWriter {
+        val cached = localWriter
+        if (cached != null && localWriterPath == LOCAL_LOG_PATH && File(LOCAL_LOG_PATH).exists()) {
+            return cached
+        }
+        cached?.let { runCatching { it.close() } }
+        val fresh = FileWriter(LOCAL_LOG_PATH, true)
+        localWriter = fresh
+        localWriterPath = LOCAL_LOG_PATH
+        return fresh
+    }
+
+    private fun closeLocalWriter() {
+        localWriter?.let { runCatching { it.close() } }
+        localWriter = null
+        localWriterPath = null
     }
 }

@@ -235,6 +235,12 @@ object ModernHookInstaller {
                     }
 
                     HookMode.BEFORE -> {
+                        // 优化 #2：纯透传点位（未声明 before 回调）直接 proceed，
+                        // 省掉 List→Array 转换 + 原始参数拷贝两次分配。
+                        val before = spec.before
+                        if (before == null) {
+                            return chain.proceed()
+                        }
                         val origArgs = chain.args.toTypedArray()
                         val param = UnifiedHookParamImpl(
                             thisObject = chain.thisObject,
@@ -243,7 +249,7 @@ object ModernHookInstaller {
                             originalInvoker = { chain.proceed() }
                         )
                         try {
-                            spec.before?.invoke(param)
+                            before.invoke(param)
                         } catch (t: Throwable) {
                             Logger.error("before callback [${spec.id}:${spec.name}] error", t)
                         }
@@ -275,6 +281,12 @@ object ModernHookInstaller {
                     }
 
                     HookMode.BEFORE_AND_AFTER -> {
+                        val before = spec.before
+                        val after = spec.after
+                        // 优化 #2：before 与 after 都为空时纯透传，省掉两次数组分配。
+                        if (before == null && after == null) {
+                            return chain.proceed()
+                        }
                         val origArgs = chain.args.toTypedArray()
                         val param = UnifiedHookParamImpl(
                             thisObject = chain.thisObject,
@@ -283,7 +295,7 @@ object ModernHookInstaller {
                             originalInvoker = { chain.proceed() }
                         )
                         try {
-                            spec.before?.invoke(param)
+                            before?.invoke(param)
                         } catch (t: Throwable) {
                             Logger.error("before callback [${spec.id}:${spec.name}] error", t)
                         }
@@ -297,7 +309,7 @@ object ModernHookInstaller {
                         }
                         param.setResultInternal(result)
                         try {
-                            spec.after?.invoke(param)
+                            after?.invoke(param)
                         } catch (t: Throwable) {
                             Logger.error("after callback [${spec.id}:${spec.name}] error", t)
                         }

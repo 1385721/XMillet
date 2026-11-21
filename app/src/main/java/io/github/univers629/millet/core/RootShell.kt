@@ -3,6 +3,7 @@ package io.github.univers629.millet.core
 import java.io.BufferedReader
 import java.io.DataOutputStream
 import java.io.InputStreamReader
+import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -76,13 +77,16 @@ internal object RootShell {
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     ): List<String> = synchronized(lock) {
         val session = ensureSession(mountMaster) ?: return@synchronized emptyList()
-        val sentinel = SENTINEL_PREFIX + (++sequence)
+        // 优化 #4：哨兵加入每次唯一的随机段，避免命令输出恰好等于可预测哨兵而提前结束读取；
+        // 用 printf '%s\n' 替代 echo，规避不同 shell 对 -e / 反斜杠转义的解释差异。
+        val sentinel = SENTINEL_PREFIX + (++sequence) + "_" + UUID.randomUUID().toString().replace("-", "")
         val lines = ArrayList<String>()
         var outcome: List<String>? = null
 
         try {
             session.writer.writeBytes(command)
-            session.writer.writeBytes("\necho \"$sentinel\"\n")
+            session.writer.writeBytes("\n")
+            session.writer.writeBytes("printf '%s\\n' '$sentinel'\n")
             session.writer.flush()
 
             val deadline = System.currentTimeMillis() + timeoutMs

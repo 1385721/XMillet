@@ -428,18 +428,22 @@ class FreezeStatsEngine(
             val today = ensureCurrentDayLocked(now)
             val frozenSince = activeFrozenSinceByUid.remove(uid)
             val episodeStart = freezeEpisodeStartByUid.remove(uid)
-            val jittered = episodeStart != null && now - episodeStart in 0 until FREEZE_JITTER_MS
-            if (frozenSince != null && !jittered && now > frozenSince) {
-                addFrozenDurationLocked(uid, frozenSince, now)
+            if (frozenSince == null && episodeStart == null) {
+                // 没有对应冻结记录的解冻通知（系统会对未冻结应用重复派发 Excute Service 之类事件），
+                // 不计唤醒、不写最近记录，避免唤醒数被空解冻放大。
+                return@withLock
             }
-            if (jittered && episodeStart != null) {
-            rollbackJitterFreezeLocked(today, uid, episodeStart)
+            val episode = episodeStart
+            if (episode != null && now - episode in 0 until FREEZE_JITTER_MS) {
+                rollbackJitterFreezeLocked(today, uid, episode)
                 val lastBurst = lastBurstWakeAtByUid[uid]
                 if (lastBurst != null && now - lastBurst in 0 until WAKE_BURST_WINDOW_MS) {
                     // 抖动循环仍在持续：本次唤醒并入上一个批次，不重复计数、不写最近记录。
                     return@withLock
                 }
                 lastBurstWakeAtByUid[uid] = now
+            } else if (frozenSince != null && now > frozenSince) {
+                addFrozenDurationLocked(uid, frozenSince, now)
             }
 
             today.wakeByCategory[category.ordinal]++
@@ -1591,6 +1595,8 @@ object FreezeStatsRecorder {
         val restored = runCatching { engine.restoreFromDisk() }.getOrDefault(false)
         if (restored) {
             Logger.alwaysInfo("墓碑统计已从 $STATS_FILE_PATH 恢复")
+        } else if (File(STATS_FILE_PATH).exists()) {
+            Logger.alwaysWarn("墓碑统计格式已升级（旧口径作废），历史数据已重置")
         }
         startPeriodicFlush()
         // 冷启动初期 AMS 尚未发布时由 S2_Gate 延迟挂载；仅在热重载（服务已就绪）时立即注册

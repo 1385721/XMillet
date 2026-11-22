@@ -68,6 +68,9 @@ object SystemHooks {
                             ForceFreezeBridge.applyAsync(force = true)
                         }
                     }
+                    if (changedKey == PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST) {
+                        SystemState.syncCloudFrozenWhiteListToListAppsManager(snapshot.blockCloudFrozenWhitelist)
+                    }
                 }
 
                 PrefGroup.DOZE_FLAGS -> BroadcastAndDozeHooks.onDozeConfigChanged()
@@ -124,6 +127,7 @@ object SystemHooks {
         FreezeGateHooks.buildS29ScrOffStateHook(),
         FreezeGateHooks.buildS30NotifyExecuteServicesHook(classLoader),
         FreezeGateHooks.buildS31AurogonUpdateTargetListHook(classLoader),
+        FreezeGateHooks.buildS32CloudFrozenWhiteListHook(),
         BroadcastAndDozeHooks.buildS9BroadcastSkipPolicyHook(),
         BroadcastAndDozeHooks.buildS10BroadcastQueueDeliverHook(),
         FreezeGateHooks.buildS24AllowBroadcastHook(),
@@ -170,6 +174,10 @@ object SystemHooks {
         val s22Installed = HookInstallRegistry.snapshot()
             .any { it.id == "S22" && it.state == HookInstallRegistry.State.INSTALLED }
         FreezeStatsRecorder.setDispatchThawEventActive(s22Installed)
+
+        if (PrefReader.systemPrefs.blockCloudFrozenWhitelist) {
+            SystemState.syncCloudFrozenWhiteListToListAppsManager(block = true, classLoader = classLoader)
+        }
 
         Logger.alwaysWarn("Hook 安装结果[系统侧]: ${HookInstallRegistry.summary()}")
     }

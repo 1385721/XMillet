@@ -68,6 +68,12 @@ object RomCapabilities {
             found
         }
 
+    /** 以已解析的 Class 判断方法是否存在（运行期热点路径用）。 */
+    fun hasMethod(clazz: Class<*>?, methodName: String): Boolean {
+        if (clazz == null) return false
+        return hasMethod(clazz.name, methodName, clazz.classLoader)
+    }
+
     /**
      * 判断一条 [HookSpec] 在当前宿主版本上是否可安装。
      *

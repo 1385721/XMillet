@@ -34,6 +34,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +49,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import io.github.univers629.millet.BuildConfig
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.CloudListCodec
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.OobeManager
 import io.github.univers629.millet.core.BatteryPolicyHelper
@@ -57,6 +60,7 @@ import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.SETTING_MILLET_NO_RESTRICT_APP
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
+import io.github.univers629.millet.ui.component.AppUpdateDialogMiuix
 import io.github.univers629.millet.ui.component.BottomBarMiuix
 import io.github.univers629.millet.ui.component.BottomBarDestination
 import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
@@ -69,9 +73,12 @@ import io.github.univers629.millet.ui.screen.AboutRepoScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutScreenMiuix
 import io.github.univers629.millet.ui.screen.AppProfileScreenMiuix
 import io.github.univers629.millet.ui.screen.AppsScreenMiuix
+import io.github.univers629.millet.ui.screen.CloudWhitelistScreenMiuix
 import io.github.univers629.millet.ui.screen.HomeScreenMiuix
 import io.github.univers629.millet.ui.screen.InstalledAppUiModel
 import io.github.univers629.millet.ui.screen.OobeScreenMiuix
+import io.github.univers629.millet.ui.screen.PolicyTemplateDetailScreenMiuix
+import io.github.univers629.millet.ui.screen.PolicyTemplatesScreenMiuix
 import io.github.univers629.millet.ui.screen.ProcessListScreenMiuix
 import io.github.univers629.millet.ui.screen.RunningProcessUiModel
 import io.github.univers629.millet.ui.screen.SettingsScreenMiuix
@@ -81,6 +88,8 @@ import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBar
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBarBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.theme.XMilletMiuixTheme
+import io.github.univers629.millet.ui.util.AppUpdateController
+import io.github.univers629.millet.ui.util.AppUpdateDownloadState
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -124,6 +133,9 @@ class MainActivity : ComponentActivity() {
     private sealed interface Route : NavKey {
         data object Main : Route
         data class AppProfile(val app: InstalledAppUiModel) : Route
+        data object PolicyTemplates : Route
+        data class PolicyTemplateDetail(val templateId: String) : Route
+        data object CloudWhitelist : Route
         data object Appearance : Route
         data object Oobe : Route
         data object About : Route
@@ -276,11 +288,13 @@ class MainActivity : ComponentActivity() {
         // 云名单是否已经真正读到：模块侧上报的云名单可能晚于首屏到达，
         // 首屏读云库会读到空，需要在模块上报后补读一次。
         var cloudConfigApplied by remember { mutableStateOf(false) }
+        var resolvedCloudLists by remember { mutableStateOf<CloudListCodec.CloudLists?>(null) }
         var dualAppsSyncedFromBinder by remember { mutableStateOf(false) }
         // 是否已经成功问过一次系统服务；用于区分「还没问」和「问了但没有模块」
         var systemServiceProbed by remember { mutableStateOf(false) }
         var showSystemApps by rememberSaveable { mutableStateOf(false) }
         var configVersion by remember { mutableIntStateOf(0) }
+        var policyTemplateVersion by remember { mutableIntStateOf(0) }
 
         // 开箱引导（OOBE / Provision）完成状态检查（首次安装/启动时强制进入权限向导）
         var isProvisioned by rememberSaveable {
@@ -403,7 +417,7 @@ class MainActivity : ComponentActivity() {
             isAppsRefreshing = true
             coroutineScope.launch {
                 try {
-                    val (apps, cloudLoaded, dualLoaded) = withContext(Dispatchers.IO) {
+                    val (apps, loadedCloudLists, dualLoaded) = withContext(Dispatchers.IO) {
                         val sp = PrefReader.openUiPrefs(this@MainActivity)
                         val whiteSet = PrefReader.readUiStringSet(sp, PrefsKeys.WHITE_APP_SET)
                         val msgSet = PrefReader.readUiStringSet(sp, PrefsKeys.MESSAGE_APP_SET)
@@ -559,11 +573,21 @@ class MainActivity : ComponentActivity() {
                                 .thenBy { it.packageName }
                                 .thenBy { it.isDualApp }
                         )
-                        Triple(result, !cloudConfig.isEmpty, dualLoaded)
+                        val loadedCloudLists = if (cloudConfig.isEmpty) {
+                            null
+                        } else {
+                            CloudListCodec.CloudLists(
+                                dozeWhiteList = cloudConfig.dozeWhiteList,
+                                frozenNewWhiteList = cloudConfig.frozenNewWhiteList,
+                                launchRestrict = cloudConfig.launchRestrict,
+                            )
+                        }
+                        Triple(result, loadedCloudLists, dualLoaded)
                     }
                     if (generation == appLoadGeneration) {
                         installedApps = apps
-                        cloudConfigApplied = cloudLoaded
+                        cloudConfigApplied = loadedCloudLists != null
+                        if (loadedCloudLists != null) resolvedCloudLists = loadedCloudLists
                         if (dualLoaded) dualAppsSyncedFromBinder = true
                     }
                 } catch (error: Exception) {
@@ -692,10 +716,18 @@ class MainActivity : ComponentActivity() {
         }
 
         // 仅在已完成开箱向导（进入主界面）后才执行繁重的进程扫描与全系统应用加载，避免在 OOBE 进场动画期间争抢 CPU/IO
+        val uiPrefs = remember { PrefReader.openUiPrefs(this@MainActivity) }
+        val updateUiState by AppUpdateController.uiState.collectAsState()
         LaunchedEffect(isProvisioned) {
             if (isProvisioned) {
                 refreshStatusAndRunningProcs()
                 loadInstalledApps()
+                AppUpdateController.checkOnAppLaunch(
+                    prefs = uiPrefs,
+                    currentVersionCode = BuildConfig.VERSION_CODE,
+                    currentVersionName = BuildConfig.VERSION_NAME,
+                    scope = coroutineScope,
+                )
             }
         }
 
@@ -745,6 +777,31 @@ class MainActivity : ComponentActivity() {
                     dismissText = null,
                     onConfirm = { updateNoticeDialog = false },
                     onDismiss = { updateNoticeDialog = false }
+                )
+            }
+
+            // 远端版本更新弹窗（每进程仅在打开应用时静默检查一次；避免与模块重启提示弹窗重叠）
+            val availableRelease = updateUiState.availableRelease
+            if (!updateNoticeDialog && updateUiState.dialogVisible && availableRelease != null) {
+                AppUpdateDialogMiuix(
+                    show = true,
+                    currentVersionName = BuildConfig.VERSION_NAME,
+                    release = availableRelease,
+                    downloadState = updateUiState.downloadState,
+                    onDismiss = { AppUpdateController.dismissDialog() },
+                    onIgnoreVersion = { AppUpdateController.ignoreCurrentRelease(uiPrefs) },
+                    onOpenReleasePage = {
+                        AppUpdateController.openReleasePage(this@MainActivity, availableRelease.htmlUrl)
+                    },
+                    onPrimaryAction = {
+                        when (updateUiState.downloadState) {
+                            is AppUpdateDownloadState.Ready ->
+                                AppUpdateController.installReadyApk(this@MainActivity)
+                            else ->
+                                AppUpdateController.startDownload(this@MainActivity, coroutineScope)
+                        }
+                    },
+                    onCancelDownload = { AppUpdateController.cancelDownload() },
                 )
             }
 
@@ -913,13 +970,33 @@ class MainActivity : ComponentActivity() {
                                                 onOpenAppProfile = { app ->
                                                     navigator.push(Route.AppProfile(app))
                                                 },
-                                                bottomInnerPadding = bottomNavPadding
+                                                bottomInnerPadding = bottomNavPadding,
+                                                policyVersion = configVersion,
+                                                templateVersion = policyTemplateVersion,
+                                                cloudLists = runtimeStatus.cloudLists?.takeUnless { it.isEmpty }
+                                                    ?: resolvedCloudLists,
+                                                onOpenTemplates = {
+                                                    navigator.push(Route.PolicyTemplates)
+                                                },
+                                                onOpenCloudWhitelist = {
+                                                    navigator.push(Route.CloudWhitelist)
+                                                }
                                             )
 
                                             BottomBarDestination.Settings -> SettingsScreenMiuix(
                                                 themeState = themeState,
                                                 configVersion = configVersion,
                                                 bottomInnerPadding = bottomNavPadding,
+                                                updateStatus = updateUiState.status,
+                                                availableUpdateVersion = updateUiState.availableRelease?.versionName,
+                                                onCheckForUpdates = {
+                                                    AppUpdateController.checkManually(
+                                                        context = this@MainActivity,
+                                                        currentVersionCode = BuildConfig.VERSION_CODE,
+                                                        currentVersionName = BuildConfig.VERSION_NAME,
+                                                        scope = coroutineScope,
+                                                    )
+                                                },
                                                 onOpenAppearance = { navigator.push(Route.Appearance) },
                                                 onOpenOobe = { navigator.push(Route.Oobe) },
                                                 onOpenAbout = { navigator.push(Route.About) },
@@ -961,6 +1038,62 @@ class MainActivity : ComponentActivity() {
                                     onPolicyChanged = {
                                         configVersion++
                                         loadInstalledApps()
+                                    },
+                                )
+                            }
+
+                            entry<Route.PolicyTemplates>(swipeDismiss = swipeDismiss) {
+                                PolicyTemplatesScreenMiuix(
+                                    apps = installedApps,
+                                    templateVersion = policyTemplateVersion,
+                                    onBack = { navigator.pop() },
+                                    onOpenTemplate = { templateId ->
+                                        navigator.push(Route.PolicyTemplateDetail(templateId))
+                                    },
+                                    onTemplatesChanged = {
+                                        policyTemplateVersion++
+                                    },
+                                    policyVersion = configVersion,
+                                )
+                            }
+
+                            entry<Route.PolicyTemplateDetail>(swipeDismiss = swipeDismiss) { key ->
+                                PolicyTemplateDetailScreenMiuix(
+                                    templateId = key.templateId,
+                                    apps = installedApps,
+                                    templateVersion = policyTemplateVersion,
+                                    onBack = { navigator.pop() },
+                                    onOpenAppProfile = { app ->
+                                        navigator.push(Route.AppProfile(app))
+                                    },
+                                    onPolicyChanged = {
+                                        configVersion++
+                                        loadInstalledApps()
+                                    },
+                                    onTemplatesChanged = {
+                                        policyTemplateVersion++
+                                    },
+                                    policyVersion = configVersion,
+                                )
+                            }
+
+                            entry<Route.CloudWhitelist>(swipeDismiss = swipeDismiss) {
+                                CloudWhitelistScreenMiuix(
+                                    cloudLists = runtimeStatus.cloudLists?.takeUnless { it.isEmpty }
+                                        ?: resolvedCloudLists,
+                                    apps = installedApps,
+                                    isRefreshing = isAppsRefreshing || isProcessesRefreshing,
+                                    onRefresh = {
+                                        refreshStatusAndRunningProcs()
+                                        loadInstalledApps()
+                                    },
+                                    onBack = { navigator.pop() },
+                                    onOpenAppProfile = { app ->
+                                        navigator.push(Route.AppProfile(app))
+                                    },
+                                    configVersion = configVersion,
+                                    onConfigChanged = {
+                                        configVersion++
                                     },
                                 )
                             }

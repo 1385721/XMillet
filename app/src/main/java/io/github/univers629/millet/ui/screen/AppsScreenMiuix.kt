@@ -1,5 +1,6 @@
 package io.github.univers629.millet.ui.screen
 
+import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,9 +36,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -49,19 +53,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.univers629.millet.core.CloudListCodec
+import io.github.univers629.millet.core.PolicyTemplate
+import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
+import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
+import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
@@ -149,6 +160,13 @@ enum class AppCategoryFilter(val title: String) {
     }
 }
 
+/**
+ * 应用策略页（策略中枢）：顶部是「策略模板」与「官方云白名单」并排入口卡片，下方保留按分类筛选的应用列表。
+ *
+ * @param policyVersion 策略集合变化后由宿主递增，确保仅修改「忽略网络唤醒」等不在模型里的字段时也能刷新汇总
+ * @param templateVersion 自定义模板增删改后由宿主递增，用于刷新模板数量
+ * @param cloudLists PowerKeeper 上报或兜底读到的三条云端名单；未就绪时为 null
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppsScreenMiuix(
@@ -159,7 +177,14 @@ fun AppsScreenMiuix(
     onRefresh: () -> Unit,
     onOpenAppProfile: (InstalledAppUiModel) -> Unit,
     bottomInnerPadding: Dp,
+    policyVersion: Int = 0,
+    templateVersion: Int = 0,
+    cloudLists: CloudListCodec.CloudLists? = null,
+    onOpenTemplates: () -> Unit = {},
+    onOpenCloudWhitelist: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val prefs = remember { PrefReader.openUiPrefs(context) }
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
@@ -182,6 +207,10 @@ fun AppsScreenMiuix(
             sysMatch && catMatch && queryMatch
         }
     }
+
+    // 模板与云名单概览：随 templateVersion / policyVersion / apps 刷新。
+    val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
+    val hubSummary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
 
     val pullToRefreshState = rememberPullToRefreshState()
 
@@ -261,6 +290,19 @@ fun AppsScreenMiuix(
                             onQueryChange = { searchQuery = it },
                             placeholder = "搜索应用名称、包名或 UID..."
                         )
+                    }
+
+                    // 策略中枢：左右两张入口卡（策略模板 / 官方云白名单）；搜索时收起，把空间留给结果。
+                    if (searchQuery.isBlank()) {
+                        item(key = "policy_hub") {
+                            PolicyHubCards(
+                                templateCount = templates.size,
+                                summary = hubSummary,
+                                cloudLists = cloudLists,
+                                onOpenTemplates = onOpenTemplates,
+                                onOpenCloudWhitelist = onOpenCloudWhitelist,
+                            )
+                        }
                     }
 
                     // 2. 策略分类横向胶囊筛选条
@@ -566,6 +608,145 @@ private fun AppItemCardMiuix(
                 tint = colorScheme.onSurfaceVariantActions,
                 modifier = Modifier.size(16.dp)
             )
+        }
+    }
+}
+
+/** 策略中枢卡片所需的汇总数据，一次计算后交给 UI，避免在重组中反复读 prefs。 */
+internal data class PolicyHubSummary(
+    /** 模板 ID → 当前完全匹配该模板的应用数 */
+    val usageByTemplate: Map<String, Int>,
+    /** 匹配任一模板的应用数（按包名 + UID 去重） */
+    val appliedApps: Int,
+    /** 本机已安装且命中任一云白名单的独立包数 */
+    val cloudInstalledCount: Int,
+)
+
+internal fun buildPolicyHubSummary(
+    prefs: SharedPreferences,
+    apps: List<InstalledAppUiModel>,
+    templates: List<PolicyTemplate>,
+): PolicyHubSummary {
+    val snapshot = PolicyMembershipSnapshot.read(prefs)
+    val flagsByApp = apps.mapNotNull { app ->
+        snapshot.flagsOf(app).takeIf { it.isNotEmpty() }?.let { app to it }
+    }
+    val usage = templates.associate { template ->
+        template.id to flagsByApp.count { (_, flags) -> template.matches(flags) }
+    }
+    val applied = flagsByApp.count { (_, flags) -> templates.any { it.matches(flags) } }
+    // 云名单按包名下发，双开实例与主应用算同一个。
+    val cloudInstalled = apps.asSequence()
+        .filter { it.inCloudDozeWhite || it.inCloudFrozenWhite || it.inCloudLaunchAllow }
+        .map { it.packageName }
+        .distinct()
+        .count()
+    return PolicyHubSummary(
+        usageByTemplate = usage,
+        appliedApps = applied,
+        cloudInstalledCount = cloudInstalled,
+    )
+}
+
+@Composable
+private fun PolicyHubCards(
+    templateCount: Int,
+    summary: PolicyHubSummary,
+    cloudLists: CloudListCodec.CloudLists?,
+    onOpenTemplates: () -> Unit,
+    onOpenCloudWhitelist: () -> Unit,
+) {
+    val templateSubtitle = if (summary.appliedApps > 0) {
+        "$templateCount 套模板 · ${summary.appliedApps} 个在用"
+    } else {
+        "$templateCount 套模板"
+    }
+    val cloudSubtitle = when {
+        summary.cloudInstalledCount > 0 -> "3 份名单 · 本机 ${summary.cloudInstalledCount} 个"
+        cloudLists != null && !cloudLists.isEmpty -> "已读取 · 本机无匹配"
+        else -> "尚未读取到云名单"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Max)
+            .padding(horizontal = 12.dp)
+            .padding(top = 6.dp, bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PolicyEntryCard(
+            icon = Icons.Rounded.Layers,
+            title = "策略模板",
+            subtitle = templateSubtitle,
+            onClick = onOpenTemplates,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+        )
+        PolicyEntryCard(
+            icon = Icons.Rounded.Cloud,
+            title = "官方云白名单",
+            subtitle = cloudSubtitle,
+            onClick = onOpenCloudWhitelist,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+        )
+    }
+}
+
+@Composable
+private fun PolicyEntryCard(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier,
+        onClick = onClick,
+        showIndication = true,
+        pressFeedbackType = PressFeedbackType.Tilt,
+        insideMargin = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = colorScheme.primary,
+                    modifier = Modifier.size(22.dp),
+                )
+                Icon(
+                    imageVector = MiuixIcons.Basic.ArrowRight,
+                    contentDescription = null,
+                    tint = colorScheme.onSurfaceVariantActions,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = title,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colorScheme.onSurface,
+                    maxLines = 1,
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 12.sp,
+                    color = colorScheme.onSurfaceVariantSummary,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

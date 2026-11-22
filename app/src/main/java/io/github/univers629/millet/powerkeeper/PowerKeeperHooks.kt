@@ -27,8 +27,8 @@ import io.github.univers629.millet.ipc.PowerKeeperBinderClient
  * 主要安装点：
  * - P1 : PowerKeeperApplication#onCreate() (before) —— 建立跨进程 Binder 双向链路
  * - P2 : MilletPolicy#<init>(Context) (after) —— 捕获实例、清 musicApp、union 重放 6 张内部白名单
- * - P3 : MilletPolicy#dealCloudWhiteList() (replace) —— 整方法替换直接返回 null（云白名单第一刀）
- * - P4 : MilletPolicy#onCloudWhiteListChanged() (before, 仅 OS1.0 / MIUI 14) —— 拦截云白名单热更新
+ * - P3 : MilletPolicy#dealCloudWhiteList() (before) —— 受 blockCloudFrozenWhitelist 控制，按需拦截官方云墓碑白载入
+ * - P4 : MilletPolicy#onCloudWhiteListChanged() (before, 仅 OS1.0 / MIUI 14) —— 受 blockCloudFrozenWhitelist 控制，拦截云白名单热更新
  * - P5 : MilletPolicy#dealNoRestrictApp() (after) —— 重放白名单 + 推送 MILLET_NO_RESTRICT_APP 给 system_server
  * - P6 : MilletPolicy#dealSleepModeWhiteList(List, boolean) (before) —— 无条件置 null（真机与 PA:111 实为 MilletPolicy）
  * - P7 : CommonAdapter#addPowerSaveWhitelistApps(IDeviceIdleController, String[]) (before) —— 只拦不改
@@ -69,15 +69,18 @@ object PowerKeeperHooks {
     private const val CLASS_MILLET_CONFIG = "com.miui.powerkeeper.millet.MilletConfig"
 
     /**
-     * 云端名单里需要「只拦不改」的键。
+     * `GlobalFeatureConfigureHelper#updateGlobalConfigure` 中按独立云白名单开关过滤的键。
      *
-     * 澎湃 3.0 的 `DeviceIdleController#getDozeWhiteListAppFromNewCloud()` 会把 `doze_whitelist_apps`
-     * 塞进 Bundle 调 `GlobalFeatureConfigureHelper#updateGlobalConfigure`，`frozenNew_whitelist`
-     * 与 `bright_frozen` 走同一条路 —— 这三个键合起来就是旧版 P3/P4/P6 拦下的那批名单。
+     * 写库键与原始 JSON 键大小写不同（`dozeWhiteListApps` / `FrozenNewWhiteList`），
+     * 两组均同时覆盖实际 Bundle 键与兼容键名，不再与设置页的 `blockAddPowerSaveWhitelistApps` 混用。
      */
-    private val CLOUD_WHITE_LIST_KEYS = setOf(
+    private val CLOUD_DOZE_KEYS = setOf(
         "dozeWhiteListApps",
-        "doze_whitelist_apps",
+        "doze_whitelist_apps"
+    )
+
+    private val CLOUD_FROZEN_KEYS = setOf(
+        "FrozenNewWhiteList",
         "frozenNew_whitelist",
         "bright_frozen"
     )
@@ -97,8 +100,11 @@ object PowerKeeperHooks {
                     PowerKeeperState.applyPreloadWhiteApps()
                 }
                 PrefGroup.MILLET_FLAGS -> {
-                    if (changedKey == io.github.univers629.millet.core.PrefsKeys.FREEZE_DUAL_APP) {
-                        PowerKeeperState.syncDualAppSupport(snapshot.freezeDualApp)
+                    when (changedKey) {
+                        io.github.univers629.millet.core.PrefsKeys.FREEZE_DUAL_APP ->
+                            PowerKeeperState.syncDualAppSupport(snapshot.freezeDualApp)
+                        io.github.univers629.millet.core.PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST ->
+                            PowerKeeperState.syncCloudFrozenWhiteList(snapshot.blockCloudFrozenWhitelist)
                     }
                 }
                 else -> Unit
@@ -111,6 +117,7 @@ object PowerKeeperHooks {
             buildP1ApplicationOnCreateHook(),
             buildP6DealSleepModeWhiteListHook(),
             buildP27CloudWhiteListWriteHook(),
+            buildP30CloudDozeWhiteListReadHook(),
             buildP7AddPowerSaveWhitelistHook(),
             buildP8RemovePowerSaveWhitelistHook(),
             buildP2MilletPolicyInitHook(),
@@ -149,6 +156,9 @@ object PowerKeeperHooks {
     fun installAllModern(xposed: XposedInterface, classLoader: ClassLoader) {
         registerPrefReloadCallback()
         ModernHookInstaller.installAll(xposed, classLoader, buildAllSpecs(classLoader))
+        if (PrefReader.powerKeeperPrefs.blockCloudFrozenWhitelist) {
+            PowerKeeperState.syncCloudFrozenWhiteList(block = true)
+        }
         logInstallSummary()
     }
 
@@ -249,7 +259,7 @@ object PowerKeeperHooks {
 
     /**
      * P3（FreezeDecision(0)）：MilletPolicy#dealCloudWhiteList()
-     * 【云白名单第一刀】：整方法替换（REPLACE），不调用原实现，直接返回 null，使 `mCloudWhiteList` 永远为空。
+     * 受 `blockCloudFrozenWhitelist`（官方云墓碑白总开关）控制；开启拦截时跳过原方法，使 `mCloudWhiteList` 保持为空。
      */
     private fun buildP3DealCloudWhiteListHook(): HookSpec = HookSpec(
         id = "P3",
@@ -257,18 +267,23 @@ object PowerKeeperHooks {
         targetClass = CLASS_MILLET_POLICY,
         methodName = "dealCloudWhiteList",
         paramTypes = emptyList(),
-        mode = HookMode.REPLACE,
-        replace = {
-            if (PrefReader.powerKeeperPrefs.isLog) {
-                Logger.warn("拦截云白名单更新")
+        mode = HookMode.BEFORE,
+        before = { param ->
+            if (PowerKeeperState.milletPolicyInstance == null && param.thisObject != null) {
+                PowerKeeperState.milletPolicyInstance = param.thisObject
             }
-            null
+            val prefs = PrefReader.powerKeeperPrefs
+            if (!prefs.blockCloudFrozenWhitelist) return@HookSpec
+            param.result = null
+            if (prefs.isLog) {
+                Logger.warn("拦截云墓碑白名单更新")
+            }
         }
     )
 
     /**
      * P4（FreezeDecision(1)）：MilletPolicy#onCloudWhiteListChanged()
-     * 仅在澎湃 OS1.0 与 MIUI 14 通过版本门控；目标方法存在时拦截运行期云控热更新回调。
+     * 仅在澎湃 OS1.0 与 MIUI 14 通过版本门控；受 `blockCloudFrozenWhitelist` 控制，拦截运行期云控热更新回调。
      */
     private fun buildP4OnCloudWhiteListChangedHook(): HookSpec = HookSpec(
         id = "P4",
@@ -279,7 +294,11 @@ object PowerKeeperHooks {
         mode = HookMode.BEFORE,
         gate = { VersionGate.isLegacyMilletStack },
         before = { param ->
-            Logger.alwaysInfo("拦截云名单变化")
+            if (PowerKeeperState.milletPolicyInstance == null && param.thisObject != null) {
+                PowerKeeperState.milletPolicyInstance = param.thisObject
+            }
+            if (!PrefReader.powerKeeperPrefs.blockCloudFrozenWhitelist) return@HookSpec
+            Logger.alwaysInfo("拦截云墓碑白名单热更新")
             param.result = null
         }
     )
@@ -308,7 +327,10 @@ object PowerKeeperHooks {
         methodName = "dealNoRestrictApp",
         paramTypes = emptyList(),
         mode = HookMode.AFTER,
-        after = {
+        after = { param ->
+            if (PowerKeeperState.milletPolicyInstance == null && param.thisObject != null) {
+                PowerKeeperState.milletPolicyInstance = param.thisObject
+            }
             PowerKeeperState.applyMessageAndWhiteLists()
             reportCurrentNoRestrictApps()
         }
@@ -765,32 +787,57 @@ object PowerKeeperHooks {
     )
 
     /**
-     * P27（澎湃 3.0 专属，替代已消失的 P3/P4/P6）：GlobalFeatureConfigureHelper#updateGlobalConfigure
+     * P27（全版本）：GlobalFeatureConfigureHelper#updateGlobalConfigure(Context, int, Bundle)
      *
-     * 3.0 把 millet.* 整套删掉后，云白名单 / Doze 名单 / 亮屏名单的云端下发全部收敛到这一个入口：
-     * `DeviceIdleController#getDozeWhiteListAppFromNewCloud()` 读 `doze_whitelist_apps` 后就是调它，
-     * `frozenNew_whitelist` 与 `bright_frozen` 同理。
-     *
-     * 仅过滤受保护名单键，其它云配置原样保留。开关沿用 `blockAddPowerSaveWhitelistApps`。
+     * 2 参重载最终都转发到此 3 参入口（MIUI 14 ~ OS4 镜像已核验）。
+     * 仅按独立云名单总开关（`blockCloudDozeWhitelist` / `blockCloudFrozenWhitelist`）过滤对应键，
+     * 其它云配置原样保留，不再与设置页的 `blockAddPowerSaveWhitelistApps`（P7/P8）重叠。
      */
     private fun buildP27CloudWhiteListWriteHook(): HookSpec = HookSpec(
         id = "P27",
         name = "GlobalFeatureConfigureHelper#updateGlobalConfigure",
         targetClass = CLASS_GLOBAL_FEATURE_HELPER,
         methodName = "updateGlobalConfigure",
-        paramTypes = listOf(Context::class.java, Bundle::class.java),
+        paramTypes = listOf(Context::class.java, Int::class.java, Bundle::class.java),
         mode = HookMode.BEFORE,
         before = { param ->
-            if (PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) {
-                val bundle = param.args.getOrNull(1) as? Bundle ?: return@HookSpec
-                val keys = bundle.keySet().toSet()
-                val hit = keys.intersect(CLOUD_WHITE_LIST_KEYS)
-                if (hit.isNotEmpty()) {
-                    param.args[1] = Bundle(bundle).apply { hit.forEach(::remove) }
-                    if (PrefReader.powerKeeperPrefs.isLog) {
-                        Logger.warn("屏蔽云名单下发: ${hit.joinToString(",")}")
-                    }
+            val prefs = PrefReader.powerKeeperPrefs
+            val blockedKeys = buildSet {
+                if (prefs.blockCloudDozeWhitelist) addAll(CLOUD_DOZE_KEYS)
+                if (prefs.blockCloudFrozenWhitelist) addAll(CLOUD_FROZEN_KEYS)
+            }
+            if (blockedKeys.isEmpty()) return@HookSpec
+            val bundle = param.args.getOrNull(2) as? Bundle ?: return@HookSpec
+            val hit = bundle.keySet().intersect(blockedKeys)
+            if (hit.isNotEmpty()) {
+                param.args[2] = Bundle(bundle).apply { hit.forEach(::remove) }
+                if (prefs.isLog) {
+                    Logger.warn("屏蔽云名单下发: ${hit.joinToString(",")}")
                 }
+            }
+        }
+    )
+
+    /**
+     * P30（全版本）：GlobalFeatureConfigureHelper#getDozeWhiteListApps(Bundle)
+     *
+     * 1 参 `getDozeWhiteListApps(Context)` 与 `PowerKeeperAppConfigure#fillContent` 均走此入口。
+     * 当 `blockCloudDozeWhitelist` 为真且非模块自身上报读取时，返回空可变列表以屏蔽官方云免冻名单。
+     */
+    private fun buildP30CloudDozeWhiteListReadHook(): HookSpec = HookSpec(
+        id = "P30_CLOUD_DOZE_READ",
+        name = "GlobalFeatureConfigureHelper#getDozeWhiteListApps",
+        targetClass = CLASS_GLOBAL_FEATURE_HELPER,
+        methodName = "getDozeWhiteListApps",
+        paramTypes = listOf(Bundle::class.java),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            if (PowerKeeperCloudLists.isBypassingFilter()) return@HookSpec
+            val prefs = PrefReader.powerKeeperPrefs
+            if (!prefs.blockCloudDozeWhitelist) return@HookSpec
+            param.result = ArrayList<String>()
+            if (prefs.isLog) {
+                Logger.info("拦截读取官方云免冻名单 (dozeWhiteListApps)")
             }
         }
     )

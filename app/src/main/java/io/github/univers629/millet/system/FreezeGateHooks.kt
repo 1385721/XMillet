@@ -41,6 +41,7 @@ object FreezeGateHooks {
     private const val CLASS_AUROGON_MODE = "com.miui.server.greeze.AurogonImmobulusMode"
     private const val CLASS_AUROGON_APP_INFO = "com.miui.server.greeze.AurogonAppInfo"
     private const val CLASS_RUNNING_PROCESS = "com.miui.server.greeze.RunningProcess"
+    private const val CLASS_LIST_APPS_MANAGER = "com.miui.server.greeze.power.ListAppsManager"
 
     /** 统计边界深度超过该时长未更新，视为上次调用未配对退出，归零自愈。 */
     private const val STATS_DEPTH_STALE_NS = 200_000_000L
@@ -1247,6 +1248,31 @@ object FreezeGateHooks {
             val self = param.thisObject ?: return@HookSpec
             SystemState.addDualAppToAurogonTargetList(self, uid)
             param.result = null
+        }
+    )
+
+    /**
+     * S32（OS3 / OS4）：ListAppsManager#dealCloudWhiteList(String)
+     * 拦截系统侧官方云墓碑白名单注入；开启 `blockCloudFrozenWhitelist` 时跳过原方法，
+     * 同时记录最近一次原始串以便用户在 UI 放行后免重启热恢复。
+     */
+    fun buildS32CloudFrozenWhiteListHook(): HookSpec = HookSpec(
+        id = "S32_CLOUD_FROZEN_WL",
+        name = "ListAppsManager#dealCloudWhiteList",
+        targetClass = CLASS_LIST_APPS_MANAGER,
+        methodName = "dealCloudWhiteList",
+        paramTypes = listOf(String::class.java),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val declaringClass = (param.method as? java.lang.reflect.Method)?.declaringClass
+            val rawValues = param.args.getOrNull(0) as? String
+            SystemState.recordCloudFrozenWhiteListRaw(declaringClass, rawValues)
+            val prefs = PrefReader.systemPrefs
+            if (!prefs.blockCloudFrozenWhitelist) return@HookSpec
+            param.result = null
+            if (prefs.isLog) {
+                Logger.warn("系统侧拦截官方云墓碑白名单下发")
+            }
         }
     )
 

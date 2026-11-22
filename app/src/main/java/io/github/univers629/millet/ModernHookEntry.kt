@@ -77,12 +77,17 @@ class ModernHookEntry : XposedModule() {
             Logger.alwaysWarn("XMillet 热重载：缺少上一代装机上下文，放弃本次热重载，请重启设备")
             return false
         }
-        // powerkeeper / App 的注册信息也一起带过去：热重载换掉类加载器后，
-        // SystemBinderService 里的回调表会清空并销毁旧 Binder 链路，随后在新代重装后通知客户端重绑新 Binder。
-        val carriedSnapshot = if (savedRole == ROLE_SYSTEM_SERVER || savedRole == ROLE_PACKAGE_SYSTEM) {
-            runCatching { SystemBinderService.exportRegistrationSnapshot() }.getOrNull()
-        } else {
-            null
+        // powerkeeper / App 的注册信息与 PowerKeeper 宿主实例句柄一起带过去（均为宿主或框架对象，不携带模块类实例）：
+        // system_server 侧重装后通知客户端重绑新 Binder；powerkeeper 侧保留 MilletPolicy 等启动期构造器句柄，避免热重载后失联。
+        val carriedSnapshot = when (savedRole) {
+            ROLE_SYSTEM_SERVER, ROLE_PACKAGE_SYSTEM ->
+                runCatching { SystemBinderService.exportRegistrationSnapshot() }.getOrNull()
+            ROLE_POWERKEEPER -> arrayOf(
+                PowerKeeperState.milletPolicyInstance,
+                PowerKeeperState.powerKeeperManagerInstance,
+                PowerKeeperState.brightScenarioInstance
+            )
+            else -> null
         }
         param.setSavedInstanceState(arrayOf<Any?>(savedRole, savedLoader, carriedSnapshot))
         Logger.alwaysWarn("XMillet 热重载：接受重装请求（$savedRole）")
@@ -136,6 +141,7 @@ class ModernHookEntry : XposedModule() {
                 }
                 ROLE_POWERKEEPER -> {
                     PowerKeeperState.reacquireApplicationContext()
+                    PowerKeeperState.restoreHostHandles(carriedSnapshot)
                     bootstrapPowerKeeper(savedLoader)
                 }
                 else -> Logger.alwaysWarn("XMillet 热重载：未知装机角色 $savedRole，跳过重装")
@@ -211,6 +217,8 @@ class ModernHookEntry : XposedModule() {
             Logger.alwaysWarn(
                 "配置自检[$scene]: isLog=${prefs.isLog}, simplifyLog=${prefs.simplifyLog}, " +
                     "disableKill=${prefs.disableKill}, disableCharge=${prefs.disableCharge}, " +
+                    "blockCloudDoze=${prefs.blockCloudDozeWhitelist}, " +
+                    "blockCloudFrozen=${prefs.blockCloudFrozenWhitelist}, " +
                     "freezeStats=${prefs.freezeStats}, " +
                     "enableDoze=${prefs.enableDoze}, messageAppSet=${prefs.messageAppSet.size}, " +
                     "whiteAppSet=${prefs.whiteAppSet.size}, ignoreNetworkWake=${prefs.ignoreNetworkWakeSet.size}"

@@ -26,6 +26,8 @@ object BackupRestoreHelper {
         PrefsKeys.DISABLE_CHARGE,
         PrefsKeys.DISABLE_SCREEN_ON_THAW,
         PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
+        PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST,
+        PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST,
         PrefsKeys.BATTERY_CHANGE_OBSERVE,
         PrefsKeys.LOG_TO_LOCAL,
         PrefsKeys.DOZE_LOG,

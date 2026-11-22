@@ -115,6 +115,15 @@ object PrefReader {
             ) {
                 dispatchSystemReloadCallback(PrefsKeys.FREEZE_DUAL_APP, PrefGroup.MILLET_FLAGS, updated)
             }
+            if (changedKey == PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST ||
+                prev.blockCloudFrozenWhitelist != updated.blockCloudFrozenWhitelist
+            ) {
+                dispatchSystemReloadCallback(
+                    PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST,
+                    PrefGroup.MILLET_FLAGS,
+                    updated
+                )
+            }
         }
         if (group == null || group == PrefGroup.DOZE_FLAGS) {
             if (changedKey == PrefsKeys.ENABLE_DOZE || prev.enableDoze != updated.enableDoze) {
@@ -178,6 +187,23 @@ object PrefReader {
                 Logger.error("onPowerKeeperGroupReloaded [${PrefsKeys.FREEZE_DUAL_APP}] failed", t)
             }
         }
+        val cloudFrozenChanged = prev.blockCloudFrozenWhitelist != updated.blockCloudFrozenWhitelist
+        if ((group == PrefGroup.MILLET_FLAGS && changedKey == PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST) ||
+            (group == null && cloudFrozenChanged)
+        ) {
+            try {
+                onPowerKeeperGroupReloaded?.invoke(
+                    PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST,
+                    PrefGroup.MILLET_FLAGS,
+                    updated
+                )
+            } catch (t: Throwable) {
+                Logger.error(
+                    "onPowerKeeperGroupReloaded [${PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST}] failed",
+                    t
+                )
+            }
+        }
     }
 
     /**
@@ -190,6 +216,8 @@ object PrefReader {
             "配置快照[$scene][$tag]: isLog=${snapshot.isLog}, simplifyLog=${snapshot.simplifyLog}, " +
                 "disableKill=${snapshot.disableKill}, disableCharge=${snapshot.disableCharge}, " +
                 "disableScreenOnThaw=${snapshot.disableScreenOnThaw}, " +
+                "blockCloudDoze=${snapshot.blockCloudDozeWhitelist}, " +
+                "blockCloudFrozen=${snapshot.blockCloudFrozenWhitelist}, " +
                 "freezeStats=${snapshot.freezeStats}, freezeDualApp=${snapshot.freezeDualApp}, " +
                 "enableDoze=${snapshot.enableDoze}, whiteAppSet=${snapshot.whiteAppSet.size}, " +
                 "messageAppSet=${snapshot.messageAppSet.size}, ignoreNetworkWake=${snapshot.ignoreNetworkWakeSet.size}"
@@ -237,6 +265,14 @@ object PrefReader {
                 blockAddPowerSaveWhitelistApps = getBooleanOrDefault(
                     raw,
                     PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS
+                ),
+                blockCloudDozeWhitelist = getBooleanOrDefault(
+                    raw,
+                    PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST
+                ),
+                blockCloudFrozenWhitelist = getBooleanOrDefault(
+                    raw,
+                    PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST
                 ),
                 batteryChangeObserve = getBooleanOrDefault(raw, PrefsKeys.BATTERY_CHANGE_OBSERVE),
                 logToLocal = getBooleanOrDefault(raw, PrefsKeys.LOG_TO_LOCAL),

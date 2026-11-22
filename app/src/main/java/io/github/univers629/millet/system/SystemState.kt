@@ -9,6 +9,7 @@ import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsSnapshot
+import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.VersionGate
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -912,6 +913,162 @@ object SystemState {
 
     private const val CLASS_AUROGON_MODE = "com.miui.server.greeze.AurogonImmobulusMode"
     private const val CLASS_DEVICE_IDLE_CONTROLLER = "com.android.server.DeviceIdleController"
+    private const val CLASS_LIST_APPS_MANAGER = "com.miui.server.greeze.power.ListAppsManager"
+    private const val VOICE_ASSIST_PACKAGE = "com.miui.voiceassist"
+
+    private val LIST_APPS_CLOUD_FIELDS = listOf("mCloudWhiteList", "USE_CLOUD_WHITE_LIST")
+    private val LIST_APPS_DATA_WHITE_FIELDS = listOf("mUseDataWhiteList", "USE_DATA_WHITE_LIST")
+    private val LIST_APPS_BUILTIN_WHITE_FIELDS = listOf(
+        "mDataWhiteList",
+        "DATA_WHITE_LIST",
+        "mMiDataWhiteList",
+        "MI_DATA_WHITE_LIST",
+        "mSleepModeList",
+        "SLEEP_MODE_LIST",
+        "mSystemWhiteList",
+        "SYSTEM_WHITE_LIST"
+    )
+
+    @Volatile
+    var listAppsManagerClass: Class<*>? = null
+
+    @Volatile
+    private var lastCloudFrozenWhiteListRaw: String? = null
+
+    private val cloudFrozenWhiteListLock = Any()
+    private val cachedCloudFrozenEntries = LinkedHashSet<String>()
+
+    /** 记录 S32 捕获到的 OS3/OS4 `ListAppsManager` 类与最近一次云墓碑白名单原始串。 */
+    fun recordCloudFrozenWhiteListRaw(clazz: Class<*>?, values: String?) {
+        if (clazz != null) listAppsManagerClass = clazz
+        if (!values.isNullOrBlank()) {
+            lastCloudFrozenWhiteListRaw = values
+        }
+    }
+
+    /** 仅供单测清理静态缓存。 */
+    internal fun resetCloudFrozenWhiteListCacheForTest() {
+        synchronized(cloudFrozenWhiteListLock) {
+            listAppsManagerClass = null
+            lastCloudFrozenWhiteListRaw = null
+            cachedCloudFrozenEntries.clear()
+        }
+    }
+
+    /**
+     * 热同步 OS3/OS4 `ListAppsManager` 的云端墓碑白名单。
+     *
+     * OS3 字段为 `mCloudWhiteList` / `mUseDataWhiteList`，OS4 字段为 `USE_CLOUD_WHITE_LIST` /
+     * `USE_DATA_WHITE_LIST`，均通过能力探测动态定位；旧 ROM 不存在该类时静默跳过。
+     */
+    fun syncCloudFrozenWhiteListToListAppsManager(block: Boolean, classLoader: ClassLoader? = null) {
+        val loader = classLoader
+            ?: listAppsManagerClass?.classLoader
+            ?: greezeService?.javaClass?.classLoader
+            ?: aurogonService?.javaClass?.classLoader
+            ?: SystemState::class.java.classLoader
+        val clazz = listAppsManagerClass
+            ?: XReflect.findClassIfExists(CLASS_LIST_APPS_MANAGER, loader)?.also { listAppsManagerClass = it }
+            ?: return
+        val userWhite = AppUidUtils.policyPackagesForUser(
+            PrefReader.systemPrefs.whiteAppSet,
+            AppUidUtils.PRIMARY_USER_ID
+        )
+        try {
+            val changed = syncListAppsManagerClass(clazz, block, userWhite)
+            if (changed > 0) {
+                if (block) {
+                    Logger.alwaysInfo("系统侧云墓碑白名单已热屏蔽（移除 $changed 项）")
+                } else {
+                    Logger.alwaysInfo("系统侧云墓碑白名单已热恢复（恢复 $changed 项）")
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("热同步 ListAppsManager 云墓碑白名单失败", t)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    internal fun syncListAppsManagerClass(
+        clazz: Class<*>,
+        block: Boolean,
+        userWhitePackages: Set<String> = emptySet(),
+    ): Int {
+        synchronized(cloudFrozenWhiteListLock) {
+            val cloudSet = resolveStaticMutableSet(clazz, LIST_APPS_CLOUD_FIELDS)
+            val dataWhiteSet = resolveStaticMutableSet(clazz, LIST_APPS_DATA_WHITE_FIELDS)
+                ?: resolveUseDataWhiteSetByMethod(clazz)
+
+            if (block) {
+                if (cloudSet == null || cloudSet.isEmpty()) return 0
+                val snapshot = ArrayList(cloudSet)
+                cachedCloudFrozenEntries.addAll(snapshot)
+                cloudSet.clear()
+
+                val protectedEntries = LinkedHashSet<String>().apply {
+                    add(VOICE_ASSIST_PACKAGE)
+                    addAll(userWhitePackages)
+                    for (fieldName in LIST_APPS_BUILTIN_WHITE_FIELDS) {
+                        if (!RomCapabilities.hasField(clazz, fieldName)) continue
+                        val raw = runCatching { XReflect.getStaticObjectField(clazz, fieldName) }.getOrNull()
+                        if (raw is Collection<*>) {
+                            for (item in raw) {
+                                if (item is String && item.isNotEmpty()) add(item)
+                            }
+                        }
+                    }
+                }
+                if (dataWhiteSet != null) {
+                    for (pkg in snapshot) {
+                        if (pkg !in protectedEntries) {
+                            dataWhiteSet.remove(pkg)
+                        }
+                    }
+                }
+                return snapshot.size
+            } else {
+                val raw = lastCloudFrozenWhiteListRaw
+                if (!raw.isNullOrBlank() && RomCapabilities.hasMethod(clazz, "dealCloudWhiteList")) {
+                    val beforeSize = cloudSet?.size ?: 0
+                    val invoked = runCatching {
+                        XReflect.callStaticMethod(clazz, "dealCloudWhiteList", raw)
+                    }.isSuccess
+                    if (invoked) {
+                        val afterSize = cloudSet?.size ?: 0
+                        return if (cloudSet != null) (afterSize - beforeSize).coerceAtLeast(0) else 1
+                    }
+                }
+                if (cachedCloudFrozenEntries.isEmpty()) return 0
+                var restored = 0
+                for (pkg in cachedCloudFrozenEntries) {
+                    var touched = false
+                    if (cloudSet != null && cloudSet.add(pkg)) touched = true
+                    if (dataWhiteSet != null && dataWhiteSet.add(pkg)) touched = true
+                    if (touched) restored++
+                }
+                return restored
+            }
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun resolveStaticMutableSet(clazz: Class<*>, fieldNames: List<String>): MutableSet<String>? {
+        for (fieldName in fieldNames) {
+            if (!RomCapabilities.hasField(clazz, fieldName)) continue
+            val value = runCatching { XReflect.getStaticObjectField(clazz, fieldName) }.getOrNull()
+            if (value is MutableSet<*>) {
+                return value as MutableSet<String>
+            }
+        }
+        return null
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun resolveUseDataWhiteSetByMethod(clazz: Class<*>): MutableSet<String>? {
+        if (!RomCapabilities.hasMethod(clazz, "getUseDataWhiteList")) return null
+        val value = runCatching { XReflect.callStaticMethod(clazz, "getUseDataWhiteList") }.getOrNull()
+        return value as? MutableSet<String>
+    }
 
     /**
      * `ServiceManager.getService("deviceidle")` 返回的是 `DeviceIdleController$BinderService`，

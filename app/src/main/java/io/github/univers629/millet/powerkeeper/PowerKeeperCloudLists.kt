@@ -20,6 +20,11 @@ object PowerKeeperCloudLists {
 
     private const val CLASS_HELPER = "com.miui.powerkeeper.provider.GlobalFeatureConfigureHelper"
 
+    /** 模块自身读取原始云名单上报给 UI 时置 true，使 P30 读取拦截放行本次调用。 */
+    private val bypassReadFilter = ThreadLocal<Boolean>()
+
+    internal fun isBypassingFilter(): Boolean = bypassReadFilter.get() == true
+
     /** 返回 null 表示官方接口不可用（旧 ROM / 反射失败），调用方应走兜底路径。 */
     fun read(context: Context?): CloudListCodec.CloudLists? {
         val ctx = context ?: return null
@@ -29,9 +34,17 @@ object PowerKeeperCloudLists {
                 return null
             }
 
-        val doze = readDozeWhiteList(helper, ctx)
-        val frozenRaw = invokeString(helper, "getCloudFrozenNewWhiteList", ctx)
-        val launchRaw = invokeString(helper, "getCloudLaunchRestrict", ctx)
+        bypassReadFilter.set(true)
+        val doze: Set<String>
+        val frozenRaw: String?
+        val launchRaw: String?
+        try {
+            doze = readDozeWhiteList(helper, ctx)
+            frozenRaw = invokeString(helper, "getCloudFrozenNewWhiteList", ctx)
+            launchRaw = invokeString(helper, "getCloudLaunchRestrict", ctx)
+        } finally {
+            bypassReadFilter.remove()
+        }
 
         if (doze.isEmpty() && frozenRaw.isNullOrEmpty() && launchRaw.isNullOrEmpty()) {
             return null

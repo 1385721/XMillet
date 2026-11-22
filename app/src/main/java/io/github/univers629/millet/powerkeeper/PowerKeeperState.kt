@@ -71,6 +71,14 @@ object PowerKeeperState {
     @Volatile
     var brightScenarioInstance: Any? = null
 
+    /** 热重载后恢复上一代携带过来的 PowerKeeper 宿主对象句柄（均为宿主类加载器实例）。 */
+    fun restoreHostHandles(snapshot: Array<*>?) {
+        if (snapshot == null) return
+        if (milletPolicyInstance == null) milletPolicyInstance = snapshot.getOrNull(0)
+        if (powerKeeperManagerInstance == null) powerKeeperManagerInstance = snapshot.getOrNull(1)
+        if (brightScenarioInstance == null) brightScenarioInstance = snapshot.getOrNull(2)
+    }
+
     /** 模块定义的亮屏白名单基础集合（4 项） */
     private val BASE_BRIGHT_WHITE_APPS: Set<String> = linkedSetOf(
         "com.xiaomi.smarthome",
@@ -378,10 +386,21 @@ object PowerKeeperState {
         miuiBuiltInDataWhiteSet?.let { return it }
         val captured = LinkedHashSet<String>()
         var instanceReady = false
+        val cloudSnapshot = try {
+            if (RomCapabilities.hasField(policy.javaClass, "mCloudWhiteList")) {
+                (XReflect.getObjectField(policy, "mCloudWhiteList") as? Collection<String>)?.toSet().orEmpty()
+            } else {
+                emptySet()
+            }
+        } catch (_: Throwable) {
+            emptySet()
+        }
         try {
             val existing = XReflect.getObjectField(policy, "mUseDataWhiteList") as? Collection<String>
             if (existing != null) {
-                captured.addAll(existing)
+                for (item in existing) {
+                    if (item !in cloudSnapshot) captured.add(item)
+                }
                 instanceReady = true
             }
         } catch (_: Throwable) {
@@ -400,6 +419,67 @@ object PowerKeeperState {
             miuiBuiltInDataWhiteSet = captured
         }
         return captured
+    }
+
+    private fun resolveMilletPolicyInstance(): Any? {
+        milletPolicyInstance?.let { return it }
+        val loader = appClassLoader ?: applicationContext?.classLoader ?: return null
+        val clazz = XReflect.findClassIfExists("com.miui.powerkeeper.millet.MilletPolicy", loader) ?: return null
+        for (field in clazz.declaredFields) {
+            if (!java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+            if (!clazz.isAssignableFrom(field.type)) continue
+            val instance = runCatching {
+                field.isAccessible = true
+                field.get(null)
+            }.getOrNull()
+            if (instance != null) {
+                milletPolicyInstance = instance
+                return instance
+            }
+        }
+        return null
+    }
+
+    /**
+     * 热同步 OS1/OS2 `MilletPolicy` 的云墓碑白名单（`mCloudWhiteList` / `mUseDataWhiteList`）。
+     *
+     * - `block = true`：先快照内置白名单，再清空 `mCloudWhiteList` 并从 `mUseDataWhiteList` 移除其条目，最后重放内置与用户白名单；
+     * - `block = false`：重新调用 `dealCloudWhiteList()` 载入官方云名单，再重放用户策略保持强制冻结优先级。
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun syncCloudFrozenWhiteList(block: Boolean) {
+        val policy = resolveMilletPolicyInstance() ?: return
+        val clazz = policy.javaClass
+        try {
+            if (block) {
+                captureOrGetBuiltInDataWhiteSet(policy)
+                val cloudSet = if (RomCapabilities.hasField(clazz, "mCloudWhiteList")) {
+                    XReflect.getObjectField(policy, "mCloudWhiteList") as? MutableSet<String>
+                } else {
+                    null
+                }
+                val useWhiteSet = if (RomCapabilities.hasField(clazz, "mUseDataWhiteList")) {
+                    XReflect.getObjectField(policy, "mUseDataWhiteList") as? MutableSet<String>
+                } else {
+                    null
+                }
+                if (cloudSet != null && cloudSet.isNotEmpty()) {
+                    val removed = ArrayList(cloudSet)
+                    cloudSet.clear()
+                    useWhiteSet?.removeAll(removed)
+                    Logger.alwaysInfo("云墓碑白名单已热屏蔽（移除 ${removed.size} 项）")
+                }
+                applyMessageAndWhiteLists()
+            } else {
+                if (RomCapabilities.hasMethod(clazz, "dealCloudWhiteList")) {
+                    XReflect.callMethod(policy, "dealCloudWhiteList")
+                    Logger.alwaysInfo("云墓碑白名单已热恢复")
+                }
+                applyMessageAndWhiteLists()
+            }
+        } catch (t: Throwable) {
+            Logger.error("热同步云墓碑白名单失败", t)
+        }
     }
 
     // ==================== UID / 包名查询辅助方法 ====================

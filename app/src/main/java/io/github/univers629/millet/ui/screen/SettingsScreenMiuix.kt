@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,6 +69,7 @@ import io.github.univers629.millet.ui.component.TombStatsIcon
 import io.github.univers629.millet.ui.component.XMilletIcons
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
+import io.github.univers629.millet.ui.util.AppUpdateStatus
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.BugreportHelper
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
@@ -107,6 +109,9 @@ fun SettingsScreenMiuix(
     themeState: UiThemeState,
     configVersion: Int = 0,
     bottomInnerPadding: Dp,
+    updateStatus: AppUpdateStatus = AppUpdateStatus.Idle,
+    availableUpdateVersion: String? = null,
+    onCheckForUpdates: () -> Unit = {},
     onOpenAppearance: () -> Unit = {},
     onOpenOobe: () -> Unit = {},
     onOpenAbout: () -> Unit,
@@ -656,6 +661,32 @@ fun SettingsScreenMiuix(
                             title = "权限配置向导",
                             summary = "重新检查所需应用权限",
                             onClick = onOpenOobe
+                        )
+                        val updateSummary = when (updateStatus) {
+                            AppUpdateStatus.Checking -> "正在检查更新…"
+                            AppUpdateStatus.Available -> if (!availableUpdateVersion.isNullOrBlank()) {
+                                "发现新版本 v$availableUpdateVersion，点击查看"
+                            } else {
+                                "发现新版本，点击查看"
+                            }
+                            AppUpdateStatus.UpToDate -> "当前已是最新版本 (${BuildConfig.VERSION_NAME})"
+                            AppUpdateStatus.Failed -> "检查失败，点击重试"
+                            AppUpdateStatus.Idle -> "检查 GitHub Releases 是否有新版本"
+                        }
+                        ArrowPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.SystemUpdate,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "检查更新",
+                            summary = updateSummary,
+                            onClick = onCheckForUpdates
                         )
                         ArrowPreference(
                             startAction = {

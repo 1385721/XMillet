@@ -56,8 +56,6 @@ object BroadcastAndDozeHooks {
     /** 熄屏后等待多久再接管 Doze（毫秒） */
     private const val DOZE_SCHEDULE_DELAY_MS = 10_000L
 
-    /** 深睡被 ROM 拒绝（典型是 10 分钟内有时钟闹钟）时，退化为浅睡后多久重试升级（毫秒） */
-    private const val DEEP_DOZE_RETRY_DELAY_MS = 5 * 60 * 1000L
     private const val SKIP_FROZEN_BROADCAST_REASON = "Skip frozen process by XMillet"
 
     /** DeviceIdleController$Shell 实例缓存（用于执行深度睡眠 shell 指令） */
@@ -68,7 +66,6 @@ object BroadcastAndDozeHooks {
     private val dozeLifecycle = ConditionalDozeLifecycle()
     private var deepDozeAlarmListener: AlarmManager.OnAlarmListener? = null
     private var deepDozeAlarmToken: Long? = null
-    private var deepDozeRetryListener: AlarmManager.OnAlarmListener? = null
 
     private val receiverLifecycleLock = Any()
 
@@ -510,7 +507,6 @@ object BroadcastAndDozeHooks {
     }
 
     private fun cancelDeepDozeAlarmLocked() {
-        cancelDeepDozeRetryLocked()
         val listener = deepDozeAlarmListener
         deepDozeAlarmListener = null
         deepDozeAlarmToken = null
@@ -520,47 +516,6 @@ object BroadcastAndDozeHooks {
                 ctx?.getSystemService(AlarmManager::class.java)?.cancel(listener)
             }
         }
-    }
-
-    /** 深睡被 ROM 状态机拒绝时，用一次性闹钟在 5 分钟后重试升级，不依赖屏幕事件。 */
-    private fun scheduleDeepDozeRetryLocked() {
-        cancelDeepDozeRetryLocked()
-        val handler = screenHandlerInstance ?: return
-        val am = SystemState.systemContext?.getSystemService(AlarmManager::class.java) ?: return
-        val listener = AlarmManager.OnAlarmListener { handler.post { retryDeepDoze() } }
-        deepDozeRetryListener = listener
-        val retryAt = SystemClock.elapsedRealtime() + DEEP_DOZE_RETRY_DELAY_MS
-        val scheduled = runCatching {
-            am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, retryAt, "XMillet.DozeRetry", listener, handler)
-        }.isSuccess
-        if (!scheduled) {
-            runCatching {
-                am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, retryAt, "XMillet.DozeRetry", listener, handler)
-            }.onFailure { deepDozeRetryListener = null }
-        }
-    }
-
-    private fun cancelDeepDozeRetryLocked() {
-        val listener = deepDozeRetryListener
-        deepDozeRetryListener = null
-        if (listener == null) return
-        runCatching {
-            val ctx = screenReceiverContext ?: SystemState.systemContext
-            ctx?.getSystemService(AlarmManager::class.java)?.cancel(listener)
-        }
-    }
-
-    private fun retryDeepDoze() = withDozeLock {
-        deepDozeRetryListener = null
-        val conditions = readDozeConditions()
-        if (hotReloading || !conditions.enabled || !conditions.permitsIdle) {
-            // 条件已经不再允许：收起浅睡兜底，避免留下强制标记。
-            releaseDeepDozeLocked("retry")
-            return@withDozeLock
-        }
-        Logger.alwaysWarn("深睡升级重试")
-        releaseDeepDozeLocked("retry-upgrade")
-        screenHandlerInstance?.let { scheduleDeepDoze(it) }
     }
 
     private fun idleStateLocked(): Int? = runCatching {
@@ -748,8 +703,7 @@ object BroadcastAndDozeHooks {
             if (deepEntered) {
                 Logger.alwaysWarn("深度睡眠成功")
             } else {
-                Logger.alwaysWarn("浅睡兜底生效，${DEEP_DOZE_RETRY_DELAY_MS / 60_000} 分钟后重试深睡")
-                scheduleDeepDozeRetryLocked()
+                Logger.alwaysWarn("浅睡兜底生效，下次熄屏时再尝试进入深睡")
             }
         }
     }
@@ -882,6 +836,10 @@ object BroadcastAndDozeHooks {
     private fun handleScreenBroadcast(action: String?) {
         if (action == null) return
         Logger.alwaysWarn("屏幕广播:$action hot=$hotReloading ready=${SystemState.isGreezeReady}")
+        when (action) {
+            Intent.ACTION_SCREEN_ON -> ForegroundState.setScreenState(true)
+            Intent.ACTION_SCREEN_OFF -> ForegroundState.setScreenState(false)
+        }
         if (action == Intent.ACTION_SCREEN_ON || action == Intent.ACTION_POWER_CONNECTED) {
             cancelAndReleaseDoze(if (action == Intent.ACTION_SCREEN_ON) "screen" else "charging")
         }

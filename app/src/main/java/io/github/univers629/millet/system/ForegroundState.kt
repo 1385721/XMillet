@@ -9,7 +9,7 @@ import android.os.SystemClock
 import io.github.univers629.millet.core.Logger
 
 /**
- * 前台/可见进程的无锁快照。
+ * 前台/可见进程的只读快照，事件驱动，不注册任何周期任务。
  *
  * 钩子会在持有平台锁的线程上执行（例如焦点切换时持有 `WindowManagerGlobalLock`，
  * 广播投递时持有 `ActivityManagerService` 锁）。这些线程里再调用
@@ -17,13 +17,15 @@ import io.github.univers629.millet.core.Logger
  * `ActivityManagerProcLock`，与 AMS 线程「持 ProcLock 等 WindowManagerGlobalLock」形成环路，
  * 最终触发 system_server watchdog 重启。
  *
- * 因此前台状态改由独立线程周期采样，钩子只读取一个不可变快照；快照过期或尚未建立时
- * 返回 `null`，调用方按「可能在前台」处理（放行、不拦截），宁可少冻也不参与锁等待。
+ * 因此前台状态由独立线程按需采样，钩子只读取不可变快照：
+ * - 屏幕熄灭时直接视为「无可见应用」，不读 AMS，也不保留采样线程；
+ * - 屏幕亮起、或钩子发现快照过期时，才请求一次采样，且 5 秒内重复请求会被合并；
+ * - 快照缺失或过期时返回 `null`，调用方按「可能在前台」放行，宁可少冻也不参与锁等待。
  */
 object ForegroundState {
 
-    /** 采样周期。 */
-    private const val REFRESH_INTERVAL_MS = 2_000L
+    /** 两次采样请求的最小间隔，避免钩子密集触发时变成轮询。 */
+    private const val MIN_REFRESH_INTERVAL_MS = 5_000L
 
     /** 快照有效期，超过后视为不可用。 */
     private const val SNAPSHOT_TTL_MS = 8_000L
@@ -40,40 +42,32 @@ object ForegroundState {
     @Volatile
     private var snapshot: Snapshot? = null
 
+    /** 最近一次屏幕状态；null 表示尚未得知。 */
+    @Volatile
+    private var screenOn: Boolean? = null
+
     @Volatile
     private var refreshHandler: Handler? = null
 
     @Volatile
     private var refreshThread: HandlerThread? = null
 
+    private var lastRequestAtElapsed = 0L
+
     private val lock = Any()
 
     /** 测试注入的时钟，默认使用 `elapsedRealtime`。 */
     internal var nowProvider: () -> Long = { SystemClock.elapsedRealtime() }
 
-    private val refreshTask = object : Runnable {
-        override fun run() {
-            runCatching { refresh() }.onFailure { Logger.error("刷新前台快照失败", it) }
-            refreshHandler?.postDelayed(this, REFRESH_INTERVAL_MS)
-        }
-    }
-
-    /** 启动采样线程；重复调用无副作用。 */
+    /** 注入时调用：记录初始屏幕状态，不启动任何周期任务。 */
     fun start(context: Context?) {
         if (context == null) return
-        synchronized(lock) {
-            if (refreshHandler != null) return
-            val thread = try {
-                HandlerThread(THREAD_NAME).apply { start() }
-            } catch (t: Throwable) {
-                Logger.error("启动前台采样线程失败", t)
-                return
-            }
-            val handler = Handler(thread.looper)
-            refreshThread = thread
-            refreshHandler = handler
-            handler.post(refreshTask)
-        }
+        val interactive = runCatching {
+            context.getSystemService(Context.POWER_SERVICE)
+                ?.let { it as? android.os.PowerManager }
+                ?.isInteractive
+        }.getOrNull()
+        setScreenState(interactive)
     }
 
     /** 热重载前回收采样线程。 */
@@ -83,6 +77,44 @@ object ForegroundState {
             refreshThread?.quitSafely()
             refreshHandler = null
             refreshThread = null
+            snapshot = null
+            lastRequestAtElapsed = 0L
+        }
+    }
+
+    /**
+     * 屏幕亮灭广播回调：只更新状态。
+     *
+     * 熄屏时立即生成「无可见应用」快照并停止采样；亮屏时才请一次快照。
+     */
+    fun setScreenState(on: Boolean?) {
+        screenOn = on
+        when (on) {
+            false -> {
+                snapshot = Snapshot(nowProvider(), emptySet(), emptySet(), emptyMap())
+                releaseHandler()// 熄屏后不再保留采样线程
+            }
+            true -> requestRefresh()
+            null -> Unit
+        }
+    }
+
+    /**
+     * 事件驱动地请求一次后台采样；[MIN_REFRESH_INTERVAL_MS] 内重复调用会被合并。
+     */
+    fun requestRefresh() {
+        val now = nowProvider()
+        synchronized(lock) {
+            if (now - lastRequestAtElapsed < MIN_REFRESH_INTERVAL_MS) return
+            lastRequestAtElapsed = now
+        }
+        if (screenOn == false) {
+            snapshot = Snapshot(now, emptySet(), emptySet(), emptyMap())
+            return
+        }
+        val handler = ensureHandler() ?: return
+        handler.post {
+            runCatching { refresh() }.onFailure { Logger.error("刷新前台快照失败", it) }
         }
     }
 
@@ -93,11 +125,12 @@ object ForegroundState {
      */
     fun isForeground(packageName: String?): Boolean? {
         if (packageName.isNullOrEmpty()) return null
-        val fresh = freshSnapshot()
-        if (fresh != null) return packageName in fresh.visiblePackages
-        // 快照缺失时顺带重试启动采样线程（systemContext 可能晚于服务重新获取才就绪）。
-        start(SystemState.systemContext)
-        return null
+        if (screenOn == false) return false
+        val fresh = freshSnapshot() ?: run {
+            requestRefresh()
+            return null
+        }
+        return packageName in fresh.visiblePackages
     }
 
     /**
@@ -106,8 +139,9 @@ object ForegroundState {
      * @return true 可见；false 明确不可见；null 快照不可用（调用方按「可能在前台」保守处理）
      */
     fun isUidVisible(uid: Int): Boolean? {
+        if (screenOn == false) return false
         val fresh = freshSnapshot() ?: run {
-            start(SystemState.systemContext)
+            requestRefresh()
             return null
         }
         return uid in fresh.visibleUids
@@ -127,7 +161,40 @@ object ForegroundState {
         snapshot = value
     }
 
+    /** 仅测试使用：复位屏幕状态，避免用例之间互相影响。 */
+    internal fun installScreenStateForTest(on: Boolean?) {
+        screenOn = on
+    }
+
+    private fun releaseHandler() {
+        synchronized(lock) {
+            refreshHandler?.removeCallbacksAndMessages(null)
+            refreshThread?.quitSafely()
+            refreshHandler = null
+            refreshThread = null
+        }
+    }
+
+    private fun ensureHandler(): Handler? {
+        synchronized(lock) {
+            refreshHandler?.let { return it }
+            // 单元测试没有 system_server Context，直接不建线程。
+            if (SystemState.systemContext == null) return null
+            val thread = try {
+                HandlerThread(THREAD_NAME).apply { start() }
+            } catch (t: Throwable) {
+                Logger.error("启动前台采样线程失败", t)
+                return null
+            }
+            val handler = Handler(thread.looper)
+            refreshThread = thread
+            refreshHandler = handler
+            return handler
+        }
+    }
+
     private fun refresh() {
+        if (screenOn == false) return
         val context = SystemState.systemContext ?: return
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
         val token = Binder.clearCallingIdentity()

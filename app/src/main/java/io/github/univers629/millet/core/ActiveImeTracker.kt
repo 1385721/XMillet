@@ -71,6 +71,7 @@ object ActiveImeTracker {
             lastRefreshUptimeMs = 0L
             unregisterObserverLocked()
         }
+        runCatching { refreshExecutor.shutdownNow() }
     }
 
     private fun unregisterObserverLocked(): Boolean {

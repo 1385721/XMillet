@@ -64,7 +64,7 @@ import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
-import io.github.univers629.millet.ui.component.HookCheckDialogMiuix
+import io.github.univers629.millet.ui.component.HookCheckSheetMiuix
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
@@ -169,38 +169,6 @@ fun HomeScreenMiuix(
                     ?: PowerKeeperBinderClient.KernelFreezerReport()
             }
         }
-    }
-
-    if (showHookCheckDialog) {
-        HookCheckDialogMiuix(
-            show = true,
-            runtimeStatus = runtimeStatus,
-            kernelFreezer = kernelReport.mode,
-            kernelEvidenceConfirmed = kernelReport.confirmed,
-            kernelEvidenceSource = kernelReport.evidence,
-            milletBackendState = kernelReport.backend,
-            frameworkState = frameworkState,
-            onRequestScope = {
-                XposedPrefsBridge.requestMissingScopes { _, message ->
-                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                    onRefresh()
-                }
-            },
-            onHotReloadStale = {
-                XposedPrefsBridge.hotReloadStaleTargets { _, _, summary ->
-                    Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
-                    onRefresh()
-                }
-            },
-            onRefresh = {
-                kernelProbeGeneration++
-                scope.launch(Dispatchers.IO) {
-                    XposedPrefsBridge.refreshFrameworkState()
-                }
-                onRefresh()
-            },
-            onDismiss = { showHookCheckDialog = false }
-        )
     }
 
 
@@ -389,6 +357,36 @@ fun HomeScreenMiuix(
                     Spacer(Modifier.height(bottomInnerPadding))
                 }
             }
+
+            HookCheckSheetMiuix(
+                show = showHookCheckDialog,
+                runtimeStatus = runtimeStatus,
+                kernelFreezer = kernelReport.mode,
+                kernelEvidenceConfirmed = kernelReport.confirmed,
+                kernelEvidenceSource = kernelReport.evidence,
+                milletBackendState = kernelReport.backend,
+                frameworkState = frameworkState,
+                onRequestScope = {
+                    XposedPrefsBridge.requestMissingScopes { _, message ->
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        onRefresh()
+                    }
+                },
+                onHotReloadStale = {
+                    XposedPrefsBridge.hotReloadStaleTargets { _, _, summary ->
+                        Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
+                        onRefresh()
+                    }
+                },
+                onRefresh = {
+                    kernelProbeGeneration++
+                    scope.launch(Dispatchers.IO) {
+                        XposedPrefsBridge.refreshFrameworkState()
+                    }
+                    onRefresh()
+                },
+                onDismiss = { showHookCheckDialog = false }
+            )
         }
     }
 }

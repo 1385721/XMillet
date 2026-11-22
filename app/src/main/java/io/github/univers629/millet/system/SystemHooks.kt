@@ -183,7 +183,7 @@ object SystemHooks {
         runCatching { BroadcastAndDozeHooks.onHotReloading() }
         runCatching { SystemBinderService.onHotReloading() }
         runCatching { ForegroundState.stop() }
-        runCatching { io.github.univers629.millet.core.UidPackageCache.clear() }
+        runCatching { io.github.univers629.millet.core.UidPackageCache.shutdown() }
         PrefReader.onSystemGroupReloaded = null
     }
 

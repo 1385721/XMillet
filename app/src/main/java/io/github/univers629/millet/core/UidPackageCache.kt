@@ -73,6 +73,15 @@ object UidPackageCache {
         inFlight.clear()
     }
 
+    /** 热重载前回收解析线程，避免旧代线程与 ClassLoader 驻留。 */
+    fun shutdown() {
+        clear()
+        synchronized(executorLock) {
+            executor?.shutdownNow()
+            executor = null
+        }
+    }
+
     private fun query(context: Context, uid: Int): String? {
         val token = Binder.clearCallingIdentity()
         return try {

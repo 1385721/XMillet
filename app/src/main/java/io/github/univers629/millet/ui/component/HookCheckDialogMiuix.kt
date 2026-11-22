@@ -7,35 +7,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,18 +32,9 @@ import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.HookCoverage
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.theme.isInDarkTheme
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
-import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Info
-import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
-import top.yukonga.miuix.kmp.window.WindowDialog
 
 /**
  * Hook 点位与系统环境状态等级。
@@ -539,147 +516,8 @@ private fun buildCoverageEntry(
     )
 }
 
-/**
- * 依据 Droidspaces 规范设计、遵循 Miuix 规范的 Hook 点位与运行环境检测弹窗。
- */
 @Composable
-fun HookCheckDialogMiuix(
-    show: Boolean,
-    runtimeStatus: PowerKeeperBinderClient.RuntimeStatusSnapshot,
-    kernelFreezer: RootHelper.KernelFreezer = RootHelper.KernelFreezer.UNKNOWN,
-    frameworkState: XposedPrefsBridge.XposedFrameworkState = XposedPrefsBridge.XposedFrameworkState(),
-    onRequestScope: (() -> Unit)? = null,
-    onHotReloadStale: (() -> Unit)? = null,
-    onRefresh: () -> Unit,
-    onDismiss: () -> Unit,
-    kernelEvidenceConfirmed: Boolean = false,
-    kernelEvidenceSource: String = "UNCONFIRMED",
-    milletBackendState: String = "UNCONFIRMED"
-) {
-    val configuration = LocalConfiguration.current
-    val screenHeight = configuration.screenHeightDp.dp
-    // 居中宽屏/横屏弹窗（如平板横屏）可用高度明显小于竖屏底部弹窗，须以容器上限 + weight(1f)
-    // 优先保证头部总览与底部操作栏不被裁剪或与 LazyColumn 重叠。
-    val isCompactOrWideWindow =
-        configuration.screenHeightDp < 500 || configuration.screenWidthDp > configuration.screenHeightDp
-    val maxDialogBodyHeight = if (isCompactOrWideWindow) {
-        (screenHeight * 0.56f).coerceIn(200.dp, 460.dp)
-    } else {
-        (screenHeight * 0.68f).coerceIn(260.dp, 620.dp)
-    }
-    val diagnostics = remember(runtimeStatus, kernelFreezer, frameworkState, kernelEvidenceConfirmed, kernelEvidenceSource, milletBackendState) {
-        generateHookDiagnostics(runtimeStatus, kernelFreezer, frameworkState, kernelEvidenceConfirmed, kernelEvidenceSource, milletBackendState)
-    }
-    // 仅辅助框架信息可选；官方策略链路与真实冻结证据始终参与总览。
-    val requiredDiagnostics = diagnostics.filterNot { it.optional }
-    val passedCount = requiredDiagnostics.count { it.level == HookDiagnosticLevel.PASSED }
-    val totalCount = requiredDiagnostics.size
-
-    val overallLevel = when {
-        requiredDiagnostics.all { it.level == HookDiagnosticLevel.PASSED } -> HookDiagnosticLevel.PASSED
-        requiredDiagnostics.any { it.level == HookDiagnosticLevel.FAILED } -> HookDiagnosticLevel.FAILED
-        else -> HookDiagnosticLevel.WARNING
-    }
-
-    WindowDialog(
-        show = show,
-        modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
-        title = "运行环境与服务检测",
-        onDismissRequest = onDismiss,
-        content = {
-            val dismissState = LocalDismissState.current
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = maxDialogBodyHeight)
-                    .padding(top = 4.dp)
-            ) {
-                // 1. 顶部总览状态卡片 (对齐 Droidspaces 状态头)
-                OverallStatusHeader(
-                    level = overallLevel,
-                    passedCount = passedCount,
-                    totalCount = totalCount
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                // 2. 诊断项目列表（占剩余高度，避免挤压底部按钮）
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f, fill = false),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(diagnostics, key = { it.id }) { item ->
-                        DiagnosticItemCard(item = item)
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                // 2.5 按需显示 LibXposed 快捷修复操作（缺失作用域授权 / 过期目标进程热重载）
-                val showRequestScopeAction = onRequestScope != null &&
-                    frameworkState.isServiceConnected &&
-                    frameworkState.missingScopes.isNotEmpty()
-                val showHotReloadAction = onHotReloadStale != null &&
-                    frameworkState.isServiceConnected &&
-                    frameworkState.staleTargets.isNotEmpty()
-                if (showRequestScopeAction || showHotReloadAction) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (showRequestScopeAction) {
-                            TextButton(
-                                text = "授权作用域",
-                                onClick = onRequestScope,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        if (showHotReloadAction) {
-                            TextButton(
-                                text = "热重载 (${frameworkState.staleTargets.size})",
-                                onClick = onHotReloadStale,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                }
-
-                // 3. 底部操作栏
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(
-                        text = "重新检测",
-                        onClick = onRefresh,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    Spacer(Modifier.width(12.dp))
-
-                    TextButton(
-                        text = "完成",
-                        onClick = {
-                            onDismiss()
-                            dismissState?.invoke()
-                        },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.textButtonColorsPrimary()
-                    )
-                }
-            }
-        }
-    )
-}
-
-@Composable
-private fun OverallStatusHeader(
+internal fun OverallStatusHeader(
     level: HookDiagnosticLevel,
     passedCount: Int,
     totalCount: Int
@@ -776,114 +614,3 @@ private fun OverallStatusHeader(
     }
 }
 
-@Composable
-private fun DiagnosticItemCard(item: HookDiagnosticEntry) {
-    val statusColor = when (item.level) {
-        HookDiagnosticLevel.PASSED -> Color(0xFF34C759)
-        HookDiagnosticLevel.WARNING -> Color(0xFFFF9500)
-        HookDiagnosticLevel.FAILED -> Color(0xFFFF3B30)
-    }
-
-    val tagLabel = when (item.level) {
-        HookDiagnosticLevel.PASSED -> "PASS"
-        HookDiagnosticLevel.WARNING -> "WARN"
-        HookDiagnosticLevel.FAILED -> "FAIL"
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.defaultColors(
-            color = colorScheme.surfaceContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = when (item.level) {
-                        HookDiagnosticLevel.PASSED -> Icons.Rounded.CheckCircle
-                        HookDiagnosticLevel.WARNING -> Icons.Rounded.Warning
-                        HookDiagnosticLevel.FAILED -> Icons.Rounded.Cancel
-                    },
-                    contentDescription = null,
-                    tint = statusColor,
-                    modifier = Modifier.size(20.dp)
-                )
-
-                Spacer(Modifier.width(10.dp))
-
-                Text(
-                    text = item.title,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colorScheme.onSurface,
-                    modifier = Modifier.weight(1f)
-                )
-
-                StatusTagMiuix(
-                    label = tagLabel,
-                    backgroundColor = statusColor.copy(alpha = 0.18f),
-                    contentColor = statusColor
-                )
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            // 目标类或挂载点代码签名
-            Text(
-                text = item.targetClassOrMethod,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = colorScheme.onSurfaceVariantSummary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(colorScheme.surface.copy(alpha = 0.5f))
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
-
-            Spacer(Modifier.height(6.dp))
-
-            // 状态描述
-            Text(
-                text = item.detailText,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
-                color = colorScheme.onSurfaceVariantSummary
-            )
-
-            // 操作建议提示
-            if (item.suggestion != null) {
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(statusColor.copy(alpha = 0.12f))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = MiuixIcons.Info,
-                        contentDescription = null,
-                        tint = statusColor,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = item.suggestion,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = statusColor
-                    )
-                }
-            }
-        }
-    }
-}

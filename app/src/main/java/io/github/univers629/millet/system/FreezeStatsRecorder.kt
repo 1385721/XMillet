@@ -30,7 +30,6 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -65,8 +64,7 @@ class FreezeStatsEngine(
         const val MAX_RAW_REASONS_PER_APP = 16
         const val TOP_RAW_REASONS_LIMIT = 5
         const val MAX_UID_PKG_CACHE = 512
-        const val PERIODIC_SAVE_INTERVAL_MS = 30L * 60_000L
-        const val SOURCE_NOTE_FALLBACK = "本机缺少 dispatchThawEvent，唤醒次数由 thawUid / thawUids 推断"
+            const val SOURCE_NOTE_FALLBACK = "本机缺少 dispatchThawEvent，唤醒次数由 thawUid / thawUids 推断"
 
         private val WAKE_CATEGORY_COUNT = WakeCategory.entries.size
         private val INTERCEPT_RULE_COUNT = InterceptRule.entries.size
@@ -1574,9 +1572,6 @@ object FreezeStatsRecorder {
     private val lifecycleLock = Any()
 
     @Volatile
-    private var periodicExecutor: ScheduledExecutorService? = null
-
-    @Volatile
     private var screenReceiver: BroadcastReceiver? = null
 
     @Volatile
@@ -1588,7 +1583,7 @@ object FreezeStatsRecorder {
     private var screenRetryHandler: Handler? = null
 
     /**
-     * 启动 / 热重载后初始化统计引擎：恢复本地持久化、启动 30 分钟定时落盘并尽量挂上亮灭屏监听。
+     * 启动 / 热重载后初始化统计引擎：恢复本地持久化，并尽量挂上亮灭屏监听；落盘由事件触发（含熄屏）。
      */
     fun init() {
         runCatching { cachedBootId }
@@ -1598,7 +1593,6 @@ object FreezeStatsRecorder {
         } else if (File(STATS_FILE_PATH).exists()) {
             Logger.alwaysWarn("墓碑统计格式已升级（旧口径作废），历史数据已重置")
         }
-        startPeriodicFlush()
         // 冷启动初期 AMS 尚未发布时由 S2_Gate 延迟挂载；仅在热重载（服务已就绪）时立即注册
         if (SystemState.isGreezeReady) {
             SystemState.systemContext?.let { registerScreenReceiver(it) }
@@ -1606,10 +1600,9 @@ object FreezeStatsRecorder {
     }
 
     /**
-     * 热重载卸载前同步落盘，并释放定时器与广播接收器，避免旧一代泄漏。
+     * 热重载卸载前同步落盘，并释放广播接收器，避免旧一代泄漏。
      */
     fun onHotReloading() {
-        stopPeriodicFlush()
         unregisterScreenReceiver()
         runCatching { engine.saveSync() }
     }
@@ -1775,30 +1768,4 @@ object FreezeStatsRecorder {
         }
     }
 
-    private fun startPeriodicFlush() {
-        synchronized(lifecycleLock) {
-            if (periodicExecutor != null) return
-            val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
-                Thread(runnable, "XMillet-StatsFlush").apply { isDaemon = true }
-            }
-            executor.scheduleWithFixedDelay(
-                {
-                    Logger.postIoTask {
-                        engine.saveIfDirty()
-                    }
-                },
-                FreezeStatsEngine.PERIODIC_SAVE_INTERVAL_MS,
-                FreezeStatsEngine.PERIODIC_SAVE_INTERVAL_MS,
-                TimeUnit.MILLISECONDS,
-            )
-            periodicExecutor = executor
-        }
-    }
-
-    private fun stopPeriodicFlush() {
-        synchronized(lifecycleLock) {
-            periodicExecutor?.shutdownNow()
-            periodicExecutor = null
-        }
-    }
 }

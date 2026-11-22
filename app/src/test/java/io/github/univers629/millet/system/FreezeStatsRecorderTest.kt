@@ -718,7 +718,7 @@ class FreezeStatsRecorderTest {
         assertTrue(engine.restoreFromDisk())
         engine.recordFreeze(10373, "new")
         engine.onScreenStateChanged(false)
-        elapsed += FreezeStatsEngine.PERIODIC_SAVE_INTERVAL_MS + 1L
+        elapsed += 31L * 60_000L
         assertFalse(engine.saveIfDirty())
         assertFalse(engine.saveSync())
         assertFalse(engine.reset())

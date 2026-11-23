@@ -16,7 +16,7 @@
 [<img src="https://github.com/LSPosed.png" height="20" alt="LSPosed">](https://github.com/LSPosed)
 ![LSPosed](https://img.shields.io/badge/LSPosed-API%20102-FF4088?style=flat-square)
 [<img src="https://github.com/compose-miuix-ui.png" height="20" alt="Miuix">](https://github.com/compose-miuix-ui/miuix)
-![Miuix](https://img.shields.io/badge/Miuix-0.9.4-C9603F?style=flat-square)
+![Miuix](https://img.shields.io/badge/Miuix-0.9.5--beta03-C9603F?style=flat-square)
 
 </div>
 
@@ -31,7 +31,7 @@
 
 - **支持范围**：Android 13+（minSdk 33），实机适配 HyperOS 1.0 / 2.0 / 3.0 / 4.0（Android 13 ~ 17）
 - **LSPosed 作用域**：仅需勾选「系统框架 (`system`)」与「电量与性能 (`com.miui.powerkeeper`)」
-- **交互设计**：基于 [Miuix](https://github.com/compose-miuix-ui/miuix)（`0.9.4`）构建，支持液态玻璃悬浮底栏、实时毛玻璃模糊、动态取色（Monet）、首次引导（OOBE）与桌面图标隐藏
+- **交互设计**：基于 [Miuix](https://github.com/compose-miuix-ui/miuix)（`0.9.5-beta03`）构建，支持液态玻璃悬浮底栏、玻璃顶栏、渐进式模糊、实时毛玻璃模糊、动态取色（Monet）、首次引导（OOBE）与桌面图标隐藏
 
 ## 界面预览
 
@@ -68,7 +68,7 @@
 
 ## 版本适配与 Hook 探测
 
-模块在注入前会对目标类与方法逐一探测：系统侧共 **36 个**点位、电量侧共 **30 个**点位（合计 **66 个**）。当 HyperOS 3.0 / 4.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
+模块在注入前会对目标类与方法逐一探测：系统侧共 **37 个**点位、电量侧共 **31 个**点位（合计 **68 个**）。当 HyperOS 3.0 / 4.0 等新版本移除部分旧接口（如 `com.miui.powerkeeper.millet` 相关点位）时，对应 Hook 会自动安全跳过，并在应用内自检弹窗标明「版本差异」，避免误报异常。
 
 环境通过还要求实际冻结证据、官方冻结链路关键 Hook 的实装记录，以及 ROM 后端启用标志和所需 monitor 注册状态。确认路径要求 Millet 与 PowerMillet 启用，不要求传统 Greeze 开关同时开启；只有传统开关开启不能证明官方后台策略已运行，未核实的替代路径保持未确认。只有节点、类、句柄或启动加速冻结样本不足以全部通过。缺少可读样本、权限或运行证据时标记未确认；后端关闭或 monitor 未完整注册时不通过。monitor 注册不等于内核握手或后续调度保证，不按第三方内核名称判断兼容性。
 
@@ -78,12 +78,12 @@
 
 | 设备 | 代号 | 系统版本 | Android | 内核 | Root | LSPosed | Hook 实装（系统侧 + 电量侧） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 25/36 + 26/30 |
-| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf-gb57830672689` | Magisk | v2.2.1-log (7939) | 28/36 + 27/30 |
-| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8-gc44b714366cc-abogki519650608-4k` | KernelSU | v2.2.1 (7940) | 30/36 + 19/30 |
+| Redmi K40 游戏增强版 (M2012K10C) | `ares` | OS1.0.4.0.TKJCNXM | 13 (SDK 33) | `4.14.186-g844fd19c6` | Magisk | v2.2.1-log (7940) | 26/37 + 27/31 |
+| Xiaomi Pad 5 Pro 12.4 (22081281AC) | `dagu` | OS2.0.10.0.ULZCNXM | 14 (SDK 34) | `4.19.157-perf-gb57830672689` | Magisk | v2.2.1-log (7939) | 29/37 + 28/31 |
+| REDMI K80 Pro (24122RKC7C) | `miro` | OS3.0.304.0.WOMCNXM | 16 (SDK 36) | `6.6.118-android15-8-gc44b714366cc-abogki519650608-4k` | KernelSU | v2.2.1 (7940) | 31/37 + 20/31 |
 | Xiaomi 15 (24129PN74C) | `dada` | OS4.0.4.0.XOCCNXM | 17 (SDK 37) | `6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k` | KernelSU | v2.2.1 (7939) | 29/30* + 14/28* |
 
-> `ares`、`dagu` 与 `miro` 为当前版本（系统侧 36、电量侧 30）默认关闭 `simplifyLog` 下的实测值（开启 `simplifyLog` 后可额外启用 `S16–S18` 等日志点位）；标注 `*` 的 `dada` 为早期 `30 + 28` 点位基线下的历史核验数据，尚未按当前基线复测。
+> `ares`、`dagu` 与 `miro` 为当前版本（系统侧 37、电量侧 31）默认关闭 `simplifyLog` 下的实测值（开启 `simplifyLog` 后可额外启用 `S16–S18` 等日志点位）；标注 `*` 的 `dada` 为早期 `30 + 28` 点位基线下的历史核验数据，尚未按当前基线复测。
 
 ## 使用与构建
 

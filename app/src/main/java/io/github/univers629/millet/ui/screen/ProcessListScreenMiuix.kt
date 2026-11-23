@@ -237,7 +237,11 @@ fun ProcessListScreenMiuix(
                             query = searchQuery,
                             onQueryChange = { searchQuery = it },
                             placeholder = "搜索进程名称、包名或 PID/UID...",
-                            horizontalPadding = 0.dp
+                            horizontalPadding = 0.dp,
+                            topPadding = 4.dp,
+                            // 搜索栏的语义边界比视觉胶囊高约 1.3dp，补 1dp 让「搜索→筛选」
+                            // 与 10dp 行距对齐（440dpi 实测 28px）
+                            bottomPadding = 1.dp
                         )
                     }
 

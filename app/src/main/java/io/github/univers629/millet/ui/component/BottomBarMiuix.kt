@@ -149,7 +149,8 @@ fun BoxScope.BottomBarMiuix(
     val enableBlur = LocalEnableBlur.current
     val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
     val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
-    val progressive = LocalEnableProgressiveBlur.current && enableBlur && blurBackdrop != null
+    // 渐进式模糊依赖非空 backdrop，把前提收进类型，后续不必重复判空
+    val progressiveBackdrop = blurBackdrop?.takeIf { LocalEnableProgressiveBlur.current && enableBlur }
 
     val items = destinations.map { destination ->
         NavigationItem(
@@ -167,14 +168,14 @@ fun BoxScope.BottomBarMiuix(
         val surface = colorScheme.surface
         BlurredBar(
             backdrop = blurBackdrop,
-            blurActive = enableBlur && !progressive,
+            blurActive = enableBlur && progressiveBackdrop == null,
             modifier = modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .then(
-                    if (progressive && blurBackdrop != null) {
+                    if (progressiveBackdrop != null) {
                         Modifier.progressiveTextureBlur(
-                            backdrop = blurBackdrop,
+                            backdrop = progressiveBackdrop,
                             shape = RectangleShape,
                             blurRadius = 60f,
                             gradient = ProgressiveBlur.Bottom,

@@ -43,10 +43,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldDecorator
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -320,7 +327,8 @@ fun AppsScreenMiuix(
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .padding(horizontal = 12.dp)
+                                .padding(top = 4.dp, bottom = 10.dp)
                         ) {
                             GlassDropdownPreference(
                                 title = "策略分类",
@@ -370,11 +378,21 @@ internal fun MiuixCapsuleSearchBar(
     onQueryChange: (String) -> Unit,
     placeholder: String,
     horizontalPadding: Dp = 12.dp,
+    topPadding: Dp = 8.dp,
+    bottomPadding: Dp = 4.dp,
 ) {
+    // TextFieldState 是输入框自身的真相来源，外部 query 只负责初始值与程序化重置
+    val state = rememberTextFieldState(query)
+    LaunchedEffect(query) {
+        if (state.text.toString() != query) state.setTextAndPlaceCursorAtEnd(query)
+    }
+    // 每次改动单向回传给调用方，调用方仍用 String 持有查询条件
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() }.collect { onQueryChange(it) }
+    }
     BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        singleLine = true,
+        state = state,
+        lineLimits = TextFieldLineLimits.SingleLine,
         textStyle = TextStyle(
             fontWeight = FontWeight.Medium,
             fontSize = 16.sp,
@@ -385,10 +403,10 @@ internal fun MiuixCapsuleSearchBar(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = horizontalPadding)
-            .padding(top = 8.dp, bottom = 4.dp)
+            .padding(top = topPadding, bottom = bottomPadding)
             .heightIn(min = 45.dp)
             .background(colorScheme.surfaceContainerHigh, CircleShape),
-        decorationBox = { innerTextField ->
+        decorator = TextFieldDecorator { innerTextField ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -405,7 +423,7 @@ internal fun MiuixCapsuleSearchBar(
                     modifier = Modifier.weight(1f),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    if (query.isEmpty()) {
+                    if (state.text.isEmpty()) {
                         Text(
                             text = placeholder,
                             fontSize = 15.sp,
@@ -415,7 +433,7 @@ internal fun MiuixCapsuleSearchBar(
                     innerTextField()
                 }
                 AnimatedVisibility(
-                    visible = query.isNotEmpty(),
+                    visible = state.text.isNotEmpty(),
                     enter = fadeIn() + scaleIn(),
                     exit = fadeOut() + scaleOut(),
                 ) {
@@ -430,7 +448,7 @@ internal fun MiuixCapsuleSearchBar(
                                 interactionSource = null,
                                 indication = null
                             ) {
-                                onQueryChange("")
+                                state.clearText()
                             },
                     )
                 }

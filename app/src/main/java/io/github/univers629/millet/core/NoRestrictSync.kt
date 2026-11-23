@@ -11,10 +11,9 @@ import android.provider.Settings
  * 写它不需要改内核，也不需要特殊权限 —— 本模块的 system 作用域运行在
  * uid 1000 的 system_server 里，天然持有 WRITE_SETTINGS。
  *
- * 同步采用「只为自己写过的条目负责」的策略：
- * - [TRACKING_KEY] 记录上一次由本模块写进系统名单的包名；
- * - 本次计算结果 = (系统名单 - 上次本模块写入的) ∪ 本次白名单，
- * 因此既不会覆盖小米或其它应用写进去的条目，也能在移除应用后正确回收。
+ * [TRACKING_KEY] 记录本模块新添加或历史已记账的主用户包名。
+ * 同步保留未记账的系统条目，仅回收已记账且不再需要的条目。
+ * 包名级设置无法识别同名条目的后续外部写入。
  */
 object NoRestrictSync {
 
@@ -62,13 +61,8 @@ object NoRestrictSync {
         desired: Set<String>
     ): LinkedHashSet<String> {
         val next = LinkedHashSet(current)
-        next.removeAll(writtenByUs)
-        for (name in desired) {
-            val trimmed = name.trim()
-            if (trimmed.isNotEmpty()) {
-                next.add(trimmed)
-            }
-        }
+        next.removeAll(AppUidUtils.policyPackagesForUser(writtenByUs, AppUidUtils.PRIMARY_USER_ID))
+        next.addAll(AppUidUtils.policyPackagesForUser(desired, AppUidUtils.PRIMARY_USER_ID))
         return next
     }
 
@@ -82,17 +76,21 @@ object NoRestrictSync {
             Logger.alwaysWarn("免冻结名单同步跳过: 没有可用的 Context")
             return false
         }
-        val wanted = LinkedHashSet<String>()
-        for (name in desired) {
-            val trimmed = name.trim()
-            if (trimmed.isNotEmpty()) {
-                wanted.add(trimmed)
-            }
+        // 系统表按包名生效，双开目标不能投影为主用户包名。
+        val wanted = AppUidUtils.policyPackagesForUser(desired.toSet(), AppUidUtils.PRIMARY_USER_ID)
+        val (current, written) = try {
+            split(Settings.System.getString(context.contentResolver, SYSTEM_KEY)) to
+                split(Settings.System.getString(context.contentResolver, TRACKING_KEY))
+        } catch (t: Throwable) {
+            Logger.alwaysWarn("免冻结名单同步读取失败: ${t.message}")
+            return false
         }
-        val current = readSystemList(context)
-        val written = split(readSetting(context, TRACKING_KEY))
         val next = resolve(current, written, wanted)
-        if (next == current && written == wanted) {
+        val owned = LinkedHashSet<String>()
+        for (name in wanted) {
+            if (name in written || name !in current) owned.add(name)
+        }
+        if (next == current && written == owned) {
             Logger.alwaysInfo(
                 "免冻结名单无需变更: 系统 ${current.size} 项, 白名单 ${wanted.size} 项"
             )
@@ -100,7 +98,7 @@ object NoRestrictSync {
         }
         return try {
             putSetting(context, SYSTEM_KEY, next.joinToString(SEPARATOR))
-            putSetting(context, TRACKING_KEY, wanted.joinToString(SEPARATOR))
+            putSetting(context, TRACKING_KEY, owned.joinToString(SEPARATOR))
             val added = next.count { it !in current }
             val removed = current.count { it !in next }
             Logger.alwaysInfo(
@@ -121,6 +119,6 @@ object NoRestrictSync {
     }
 
     private fun putSetting(context: Context, key: String, value: String) {
-        Settings.System.putString(context.contentResolver, key, value)
+        check(Settings.System.putString(context.contentResolver, key, value)) { "Cannot write system setting $key" }
     }
 }

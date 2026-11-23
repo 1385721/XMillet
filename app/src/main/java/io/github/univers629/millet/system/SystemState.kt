@@ -2,9 +2,14 @@ package io.github.univers629.millet.system
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import io.github.univers629.millet.core.UidPackageCache
+import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.PrefsSnapshot
+import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.VersionGate
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -54,31 +59,14 @@ object SystemState {
     /**
      * 判断包名当前是否处于系统前台或用户可见状态（如分屏/小窗/顶层 Activity）。
      *
-     * 优先匹配 [lastToFrontPackage]；若未曾触发过 toFront 解冻（例如此前未冻结或冷启动未记入），
-     * 兜底通过 `ActivityManagerService#getPackageImportance` 实时查询，避免亮屏保持冻结误伤当前前台应用。
+     * 先匹配 [lastToFrontPackage]；否则读 [ForegroundState] 的异步快照。快照缺失时按「可能在前台」
+     * 放行，避免钩子线程为了判定去等待平台锁（曾因此在 WMS 锁内等 AMS 锁，触发 watchdog 重启）。
      */
     fun isPackageCurrentlyForeground(packageName: String?): Boolean {
         if (packageName.isNullOrEmpty()) return false
         if (lastToFrontPackage == packageName) return true
-        val token = android.os.Binder.clearCallingIdentity()
-        return try {
-            val maxVisibleImportance = android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
-            val ams = amsInstance
-            if (ams != null) {
-                val importance = XReflect.callMethod(ams, "getPackageImportance", packageName) as? Int
-                importance != null && importance in 1..maxVisibleImportance
-            } else {
-                val am = systemContext?.getSystemService(android.app.ActivityManager::class.java)
-                am?.runningAppProcesses?.any { proc ->
-                    proc.importance in 1..maxVisibleImportance &&
-                        proc.pkgList?.any { it == packageName } == true
-                } == true
-            }
-        } catch (_: Throwable) {
-            false
-        } finally {
-            android.os.Binder.restoreCallingIdentity(token)
-        }
+        // 快照不可用时按「可能在前台」放行：钩子线程不能为了判定去等待平台锁。
+        return ForegroundState.isForeground(packageName) ?: true
     }
 
     /** S2 构造器直接传入的系统 Context 备份 */
@@ -158,6 +146,21 @@ object SystemState {
         }
     }
 
+    /** 查询失败或返回类型不兼容时返回 null，成功时保留合法空数组。 */
+    fun getFrozenUidsArrayOrNull(): IntArray? {
+        val service = greezeService ?: return null
+        return try {
+            val raw = XReflect.callMethod(service, "getFrozenUids", 9999)
+            when (raw) {
+                is IntArray -> raw
+                is Collection<*> -> raw.map { it as? Int ?: return null }.toIntArray()
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     /**
      * 一键解冻当前所有已冻结的 UID（供 XMillet 主页快捷操作调用）。
      * @return 触发解冻的 UID 数量
@@ -166,15 +169,18 @@ object SystemState {
         val service = greezeService ?: return 0
         val uids = getFrozenUidsArray()
         if (uids.isEmpty()) return 0
-        var count = 0
-        for (uid in uids) {
-            try {
-                XReflect.callMethod(service, "thawUid", uid, 1000, "toFrontActivity")
-                count++
-            } catch (_: Throwable) {
+        return FreezeStatsRecorder.withModuleBatch(uids.toList()) { accepted ->
+            var count = 0
+            for (uid in uids) {
+                try {
+                    val result = XReflect.callMethod(service, "thawUid", uid, 1000, "toFrontActivity")
+                    if (result == true) accepted.add(uid)
+                    count++
+                } catch (_: Throwable) {
+                }
             }
+            count
         }
-        return count
     }
 
     /**
@@ -206,6 +212,70 @@ object SystemState {
 
     // ==================== 2. AurogonImmobulusMode 反射方法封装 ====================
 
+    private class MessageProjection {
+        val removed = LinkedHashSet<String>()
+        val added = LinkedHashSet<String>()
+    }
+
+    private class BroadcastProjection {
+        val removed = LinkedHashMap<String, MutableList<String>>()
+        val added = LinkedHashMap<String, MutableList<String>>()
+    }
+
+    private val messageProjections = java.util.IdentityHashMap<MutableList<String>, MessageProjection>()
+    private val broadcastProjections =
+        java.util.IdentityHashMap<MutableMap<String, MutableList<String>>, BroadcastProjection>()
+
+    private fun canRestrictMessagePackage(packageName: String, prefs: PrefsSnapshot): Boolean {
+        val ctx = systemContext ?: return false
+        val token = android.os.Binder.clearCallingIdentity()
+        return try {
+            @Suppress("DEPRECATION")
+            val info = ctx.packageManager.getApplicationInfo(packageName, 0)
+            val uid = info.uid
+            if (!AppUidUtils.isManagedAppUid(uid) || AppUidUtils.userIdOf(uid) != AppUidUtils.PRIMARY_USER_ID ||
+                info.flags and ApplicationInfo.FLAG_SYSTEM != 0 ||
+                AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, packageName, uid) ||
+                ActiveImeTracker.isProtectedSystemServiceApp(ctx, packageName, prefs, uid) ||
+                isPackageCurrentlyForeground(packageName)
+            ) return false
+            val uidPackages = ctx.packageManager.getPackagesForUid(uid) ?: return false
+            if (uidPackages.size != 1 || uidPackages[0] != packageName) return false
+            val dualUid = AppUidUtils.dualUidOf(uid)
+            if (dualUid > 0 && ctx.packageManager.getPackagesForUid(dualUid)?.contains(packageName) == true) return false
+            // 快照不可用时不收紧（按「可能可见」处理），避免在钩子线程里等待 AMS 锁。
+            ForegroundState.isForeground(packageName) == false
+        } catch (_: Throwable) {
+            false
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    private fun syncMessageProjection(current: MutableList<String>, additions: Set<String>, removals: Set<String>) {
+        synchronized(messageProjections) {
+            val state = messageProjections.getOrPut(current) { MessageProjection() }
+            for (pkg in state.removed.toList()) {
+                if (pkg !in removals) {
+                    if (pkg !in current) current.add(pkg)
+                    state.removed.remove(pkg)
+                }
+            }
+            for (pkg in state.added.toList()) {
+                if (pkg !in additions) {
+                    current.removeAll(setOf(pkg))
+                    state.added.remove(pkg)
+                }
+            }
+            for (pkg in removals) {
+                if (current.removeAll(setOf(pkg)) && !state.added.remove(pkg)) state.removed.add(pkg)
+            }
+            for (pkg in additions) {
+                if (pkg !in removals && pkg !in current && current.add(pkg)) state.added.add(pkg)
+            }
+        }
+    }
+
     /**
      * 查询指定 uid 是否拥有活跃的前台服务（FGS）。
      * 真机声明：`com.miui.server.greeze.AurogonImmobulusMode#checkAppFgService(int) : boolean`
@@ -232,20 +302,26 @@ object SystemState {
     @Suppress("UNCHECKED_CAST")
     fun syncMessageAppsToAurogon() {
         val aurogon = aurogonService ?: return
-        val messageApps = PrefReader.systemPrefs.messageAppSet
+        // ROM 消息名单按包名生效，双开策略不能投影为主用户包名。
+        val prefs = PrefReader.systemPrefs
+        val suppressMessageApps = LinkedHashSet<String>().apply {
+            addAll(AppUidUtils.policyPackagesForUser(prefs.forceFreezeSet, AppUidUtils.PRIMARY_USER_ID))
+            addAll(AppUidUtils.policyPackagesForUser(prefs.blockThawSet, AppUidUtils.PRIMARY_USER_ID))
+            addAll(AppUidUtils.policyPackagesForUser(prefs.ignoreNetworkWakeSet, AppUidUtils.PRIMARY_USER_ID))
+        }.filterTo(LinkedHashSet()) { canRestrictMessagePackage(it, prefs) }
+        val messageApps = AppUidUtils.policyPackagesForUser(prefs.messageAppSet, AppUidUtils.PRIMARY_USER_ID)
+            .filterTo(LinkedHashSet()) { it !in suppressMessageApps }
         try {
             val list = XReflect.getStaticObjectField(aurogon.javaClass, "mMessageApp") as? MutableList<String>
             if (list != null) {
-                list.clear()
-                list.addAll(messageApps)
+                syncMessageProjection(list, messageApps, suppressMessageApps)
             }
         } catch (_: Throwable) {
             // 部分 MIUI 版本字段为实例成员
             try {
                 val instanceList = XReflect.getObjectField(aurogon, "mMessageApp") as? MutableList<String>
                 if (instanceList != null) {
-                    instanceList.clear()
-                    instanceList.addAll(messageApps)
+                    syncMessageProjection(instanceList, messageApps, suppressMessageApps)
                 }
             } catch (t: Throwable) {
                 Logger.error("syncMessageAppsToAurogon mMessageApp failed", t)
@@ -263,10 +339,33 @@ object SystemState {
                         "android.net.wifi.STATE_CHANGE",
                         "android.net.conn.CONNECTIVITY_CHANGE"
                     )
-                    for (pkg in messageApps) {
-                        targetMap[pkg] = ArrayList(allowedActions)
+                    synchronized(broadcastProjections) {
+                        val state = broadcastProjections.getOrPut(targetMap) { BroadcastProjection() }
+                        for ((pkg, actions) in state.removed.toMap()) {
+                            if (pkg !in suppressMessageApps) {
+                                if (pkg !in targetMap) targetMap[pkg] = actions
+                                state.removed.remove(pkg)
+                            }
+                        }
+                        for ((pkg, actions) in state.added.toMap()) {
+                            if (pkg !in messageApps) {
+                                if (targetMap[pkg] === actions && actions == allowedActions) targetMap.remove(pkg)
+                                state.added.remove(pkg)
+                            }
+                        }
+                        for (pkg in suppressMessageApps) {
+                            val actions = targetMap.remove(pkg) ?: continue
+                            val added = state.added.remove(pkg)
+                            if (actions !== added || actions != allowedActions) state.removed[pkg] = actions
+                        }
+                        for (pkg in messageApps) {
+                            if (pkg !in targetMap) {
+                                val actions = ArrayList(allowedActions)
+                                targetMap[pkg] = actions
+                                state.added[pkg] = actions
+                            }
+                        }
                     }
-                    targetMap.keys.retainAll(messageApps)
                 }
             } catch (_: Throwable) {
             }
@@ -280,12 +379,23 @@ object SystemState {
      */
     fun getPackageNameForUid(uid: Int): String? {
         if (uid <= 0) return null
+        // 钩子线程可能持有平台锁，这里只读缓存；未命中时投递后台解析（见 UidPackageCache）。
+        UidPackageCache.lookup(uid)?.let { return it }
+        UidPackageCache.requestResolve(uid, systemContext)
+        return null
+    }
+
+    /** 统计仅归属到完整 UID 的唯一包名；共享 UID、查询失败或未知归属返回 null。 */
+    fun getUniquePackageNameForStatsUid(uid: Int): String? {
+        if (uid <= 0) return null
         val ctx = systemContext ?: return null
+        val token = android.os.Binder.clearCallingIdentity()
         return try {
-            val pkgs = ctx.packageManager.getPackagesForUid(uid)
-            pkgs?.firstOrNull()
+            ctx.packageManager.getPackagesForUid(uid)?.singleOrNull()?.takeIf { it.isNotBlank() }
         } catch (_: Throwable) {
             null
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
         }
     }
 
@@ -323,33 +433,50 @@ object SystemState {
      */
     fun formatAppLabelOnly(uid: Int): String {
         if (uid == 99000) return "Android System WebView"
-        val ctx = systemContext ?: return "uid:$uid"
-        return try {
+        return resolveAppLabelCached(uid) ?: "uid:$uid"
+    }
+
+    /** uid -> (应用名, 写入时间)。墓碑日志每次冻结/解冻都会对整张冻结表取名，避免反复查询 PMS。 */
+    private val appLabelCache = ConcurrentHashMap<Int, Pair<String, Long>>()
+
+    /** 缓存有效期：应用改名/更新后最多 10 分钟内刷新，无需监听包变更广播。 */
+    private const val APP_LABEL_CACHE_TTL_MS = 10 * 60 * 1000L
+    private const val APP_LABEL_CACHE_MAX = 512
+
+    private fun resolveAppLabelCached(uid: Int): String? {
+        val now = android.os.SystemClock.uptimeMillis()
+        appLabelCache[uid]?.let { (label, ts) ->
+            if (now - ts < APP_LABEL_CACHE_TTL_MS) return label
+        }
+        val ctx = systemContext ?: return null
+        val token = android.os.Binder.clearCallingIdentity()
+        val label = try {
             val pm = ctx.packageManager
-            val pkg = pm.getPackagesForUid(uid)?.firstOrNull() ?: return "uid:$uid"
+            val pkg = pm.getPackagesForUid(uid)?.firstOrNull() ?: return null
             @Suppress("DEPRECATION")
             val appInfo = pm.getApplicationInfo(pkg, 0)
             pm.getApplicationLabel(appInfo).toString()
         } catch (_: Throwable) {
-            "uid:$uid"
+            return null
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
         }
+        if (appLabelCache.size >= APP_LABEL_CACHE_MAX) appLabelCache.clear()
+        appLabelCache[uid] = label to now
+        return label
+    }
+
+    /** 供包变更场景主动失效（可选调用）。 */
+    fun invalidateAppLabel(uid: Int) {
+        appLabelCache.remove(uid)
     }
 
     /**
      * 格式化 `应用名@uid`（用于 S6 freezeUids 日志）。
      */
     fun formatAppLabelAndUid(uid: Int): String {
-        val ctx = systemContext ?: return "uid@$uid"
-        return try {
-            val pm = ctx.packageManager
-            val pkg = pm.getPackagesForUid(uid)?.firstOrNull() ?: return "uid@$uid"
-            @Suppress("DEPRECATION")
-            val appInfo = pm.getApplicationInfo(pkg, 0)
-            val label = pm.getApplicationLabel(appInfo).toString()
-            "$label@$uid"
-        } catch (_: Throwable) {
-            "uid@$uid"
-        }
+        val label = resolveAppLabelCached(uid) ?: return "uid@$uid"
+        return "$label@$uid"
     }
 
     /**
@@ -402,16 +529,8 @@ object SystemState {
                 ?: return null
             val pkgName = appInfo.packageName ?: return null
             val appUid = appInfo.uid
-            val runningUid = try {
-                XReflect.getIntField(processRecord, "uid")
-            } catch (_: Throwable) {
-                appUid
-            }
-            val userId = try {
-                XReflect.getIntField(processRecord, "userId")
-            } catch (_: Throwable) {
-                0
-            }
+            val runningUid = XReflect.getIntFieldOr(processRecord, "uid", default = appUid)
+            val userId = XReflect.getIntFieldOr(processRecord, "userId", default = 0)
             val procName = (XReflect.getObjectField(processRecord, "processName") as? String)
                 ?: pkgName
             val isSys = pkgName == "android" ||
@@ -526,14 +645,16 @@ object SystemState {
             pidFreezeLock.unlock()
         }
 
-        if (emitThawTombstone) {
-            Logger.alwaysWarn(
-                "墓碑日志(T):由于[$effectiveReason],解冻应用[${formatAppLabelOnly(uid)}],冻结列表:${getFrozenAppNames()}"
-            )
-        } else if (emitFreezeTombstone) {
-            Logger.alwaysWarn(
-                "墓碑日志(F):由于[$effectiveReason],冻结应用[${formatAppLabelOnly(uid)}],冻结列表:${getFrozenAppNames()}"
-            )
+        if (emitThawTombstone || emitFreezeTombstone) {
+            // 完整冻结列表仅在详细日志(isLog)下输出；默认只输出数量，避免每次冻结/解冻遍历整张冻结表取应用名。
+            val frozenSummary = if (PrefReader.systemPrefs.isLog) {
+                "冻结列表:${getFrozenAppNames()}"
+            } else {
+                "冻结数:${getFrozenUidsArray().size}"
+            }
+            val tag = if (emitThawTombstone) "墓碑日志(T)" else "墓碑日志(F)"
+            val action = if (emitThawTombstone) "解冻应用" else "冻结应用"
+            Logger.alwaysWarn("$tag:由于[$effectiveReason],$action[${formatAppLabelOnly(uid)}],$frozenSummary")
         }
         return record
     }
@@ -589,8 +710,10 @@ object SystemState {
             aurogonService = findInstanceOfType(greeze, CLASS_AUROGON_MODE)
         }
         if (deviceIdleController == null) {
-            deviceIdleController = resolveSystemService("deviceidle")
-                ?: resolveSystemService("device_idle")
+            deviceIdleController = unwrapServiceImplementation(
+                resolveSystemService("deviceidle") ?: resolveSystemService("device_idle"),
+                CLASS_DEVICE_IDLE_CONTROLLER,
+            )
         }
         aurogonService?.let { aurogon ->
             hasAurogonIsUidValid = io.github.univers629.millet.core.RomCapabilities.hasMethod(
@@ -600,6 +723,7 @@ object SystemState {
             )
             syncDualAppSupportToAurogon(io.github.univers629.millet.core.PrefReader.systemPrefs.freezeDualApp)
         }
+        ForegroundState.start(systemContext)
         return true
     }
 
@@ -799,6 +923,186 @@ object SystemState {
     }
 
     private const val CLASS_AUROGON_MODE = "com.miui.server.greeze.AurogonImmobulusMode"
+    private const val CLASS_DEVICE_IDLE_CONTROLLER = "com.android.server.DeviceIdleController"
+    private const val CLASS_LIST_APPS_MANAGER = "com.miui.server.greeze.power.ListAppsManager"
+    private const val VOICE_ASSIST_PACKAGE = "com.miui.voiceassist"
+
+    private val LIST_APPS_CLOUD_FIELDS = listOf("mCloudWhiteList", "USE_CLOUD_WHITE_LIST")
+    private val LIST_APPS_DATA_WHITE_FIELDS = listOf("mUseDataWhiteList", "USE_DATA_WHITE_LIST")
+    private val LIST_APPS_BUILTIN_WHITE_FIELDS = listOf(
+        "mDataWhiteList",
+        "DATA_WHITE_LIST",
+        "mMiDataWhiteList",
+        "MI_DATA_WHITE_LIST",
+        "mSleepModeList",
+        "SLEEP_MODE_LIST",
+        "mSystemWhiteList",
+        "SYSTEM_WHITE_LIST"
+    )
+
+    @Volatile
+    var listAppsManagerClass: Class<*>? = null
+
+    @Volatile
+    private var lastCloudFrozenWhiteListRaw: String? = null
+
+    private val cloudFrozenWhiteListLock = Any()
+    private val cachedCloudFrozenEntries = LinkedHashSet<String>()
+
+    /** 记录 S32 捕获到的 OS3/OS4 `ListAppsManager` 类与最近一次云墓碑白名单原始串。 */
+    fun recordCloudFrozenWhiteListRaw(clazz: Class<*>?, values: String?) {
+        if (clazz != null) listAppsManagerClass = clazz
+        if (!values.isNullOrBlank()) {
+            lastCloudFrozenWhiteListRaw = values
+        }
+    }
+
+    /** 仅供单测清理静态缓存。 */
+    internal fun resetCloudFrozenWhiteListCacheForTest() {
+        synchronized(cloudFrozenWhiteListLock) {
+            listAppsManagerClass = null
+            lastCloudFrozenWhiteListRaw = null
+            cachedCloudFrozenEntries.clear()
+        }
+    }
+
+    /**
+     * 热同步 OS3/OS4 `ListAppsManager` 的云端墓碑白名单。
+     *
+     * OS3 字段为 `mCloudWhiteList` / `mUseDataWhiteList`，OS4 字段为 `USE_CLOUD_WHITE_LIST` /
+     * `USE_DATA_WHITE_LIST`，均通过能力探测动态定位；旧 ROM 不存在该类时静默跳过。
+     */
+    fun syncCloudFrozenWhiteListToListAppsManager(block: Boolean, classLoader: ClassLoader? = null) {
+        val loader = classLoader
+            ?: listAppsManagerClass?.classLoader
+            ?: greezeService?.javaClass?.classLoader
+            ?: aurogonService?.javaClass?.classLoader
+            ?: SystemState::class.java.classLoader
+        val clazz = listAppsManagerClass
+            ?: XReflect.findClassIfExists(CLASS_LIST_APPS_MANAGER, loader)?.also { listAppsManagerClass = it }
+            ?: return
+        val userWhite = AppUidUtils.policyPackagesForUser(
+            PrefReader.systemPrefs.whiteAppSet,
+            AppUidUtils.PRIMARY_USER_ID
+        )
+        try {
+            val changed = syncListAppsManagerClass(clazz, block, userWhite)
+            if (changed > 0) {
+                if (block) {
+                    Logger.alwaysInfo("系统侧云墓碑白名单已热屏蔽（移除 $changed 项）")
+                } else {
+                    Logger.alwaysInfo("系统侧云墓碑白名单已热恢复（恢复 $changed 项）")
+                }
+            }
+        } catch (t: Throwable) {
+            Logger.error("热同步 ListAppsManager 云墓碑白名单失败", t)
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    internal fun syncListAppsManagerClass(
+        clazz: Class<*>,
+        block: Boolean,
+        userWhitePackages: Set<String> = emptySet(),
+    ): Int {
+        synchronized(cloudFrozenWhiteListLock) {
+            val cloudSet = resolveStaticMutableSet(clazz, LIST_APPS_CLOUD_FIELDS)
+            val dataWhiteSet = resolveStaticMutableSet(clazz, LIST_APPS_DATA_WHITE_FIELDS)
+                ?: resolveUseDataWhiteSetByMethod(clazz)
+
+            if (block) {
+                if (cloudSet == null || cloudSet.isEmpty()) return 0
+                val snapshot = ArrayList(cloudSet)
+                cachedCloudFrozenEntries.addAll(snapshot)
+                cloudSet.clear()
+
+                val protectedEntries = LinkedHashSet<String>().apply {
+                    add(VOICE_ASSIST_PACKAGE)
+                    addAll(userWhitePackages)
+                    for (fieldName in LIST_APPS_BUILTIN_WHITE_FIELDS) {
+                        if (!RomCapabilities.hasField(clazz, fieldName)) continue
+                        val raw = runCatching { XReflect.getStaticObjectField(clazz, fieldName) }.getOrNull()
+                        if (raw is Collection<*>) {
+                            for (item in raw) {
+                                if (item is String && item.isNotEmpty()) add(item)
+                            }
+                        }
+                    }
+                }
+                if (dataWhiteSet != null) {
+                    for (pkg in snapshot) {
+                        if (pkg !in protectedEntries) {
+                            dataWhiteSet.remove(pkg)
+                        }
+                    }
+                }
+                return snapshot.size
+            } else {
+                val raw = lastCloudFrozenWhiteListRaw
+                if (!raw.isNullOrBlank() && RomCapabilities.hasMethod(clazz, "dealCloudWhiteList")) {
+                    val beforeSize = cloudSet?.size ?: 0
+                    val invoked = runCatching {
+                        XReflect.callStaticMethod(clazz, "dealCloudWhiteList", raw)
+                    }.isSuccess
+                    if (invoked) {
+                        val afterSize = cloudSet?.size ?: 0
+                        return if (cloudSet != null) (afterSize - beforeSize).coerceAtLeast(0) else 1
+                    }
+                }
+                if (cachedCloudFrozenEntries.isEmpty()) return 0
+                var restored = 0
+                for (pkg in cachedCloudFrozenEntries) {
+                    var touched = false
+                    if (cloudSet != null && cloudSet.add(pkg)) touched = true
+                    if (dataWhiteSet != null && dataWhiteSet.add(pkg)) touched = true
+                    if (touched) restored++
+                }
+                return restored
+            }
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun resolveStaticMutableSet(clazz: Class<*>, fieldNames: List<String>): MutableSet<String>? {
+        for (fieldName in fieldNames) {
+            if (!RomCapabilities.hasField(clazz, fieldName)) continue
+            val value = runCatching { XReflect.getStaticObjectField(clazz, fieldName) }.getOrNull()
+            if (value is MutableSet<*>) {
+                return value as MutableSet<String>
+            }
+        }
+        return null
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun resolveUseDataWhiteSetByMethod(clazz: Class<*>): MutableSet<String>? {
+        if (!RomCapabilities.hasMethod(clazz, "getUseDataWhiteList")) return null
+        val value = runCatching { XReflect.callStaticMethod(clazz, "getUseDataWhiteList") }.getOrNull()
+        return value as? MutableSet<String>
+    }
+
+    /**
+     * `ServiceManager.getService("deviceidle")` 返回的是 `DeviceIdleController$BinderService`，
+     * 而 Doze 状态机字段（mForceIdle / mState / mScreenOn）都在外层 `DeviceIdleController` 上。
+     * 找到持有目标类型的合成外指字段时解一层，避免句柄类型错位让 Doze 控制整体失效。
+     */
+    private fun unwrapServiceImplementation(service: Any?, expectedTypeName: String): Any? {
+        if (service == null) return null
+        if (service.javaClass.name == expectedTypeName) return service
+        val expectedType = runCatching {
+            Class.forName(expectedTypeName, false, service.javaClass.classLoader)
+        }.getOrNull() ?: return service
+        for (field in service.javaClass.declaredFields) {
+            if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+            if (!expectedType.isAssignableFrom(field.type)) continue
+            val value = runCatching {
+                field.isAccessible = true
+                field.get(service)
+            }.getOrNull()
+            if (value != null) return value
+        }
+        return service
+    }
 
     private fun resolveSystemService(name: String): Any? = try {
         Class.forName("android.os.ServiceManager")

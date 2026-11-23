@@ -1,9 +1,14 @@
 package io.github.univers629.millet.powerkeeper
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import io.github.univers629.millet.core.UidPackageCache
+import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RomCapabilities
 import java.lang.ref.WeakReference
 
@@ -58,60 +63,20 @@ object PowerKeeperState {
     @Volatile
     var milletPolicyInstance: Any? = null
 
-    /** P15 捕获的 com.miui.powerkeeper.millet.BluetoothEvent 实例 */
-    @Volatile
-    var bluetoothEventInstance: Any? = null
-
-    /** P16 捕获的 com.miui.powerkeeper.millet.bright.BrightController 实例 */
-    @Volatile
-    var brightControllerInstance: Any? = null
-
-    /** P17 捕获的 com.miui.powerkeeper.millet.FreezeBinder 实例 */
-    @Volatile
-    var freezeBinderInstance: Any? = null
-
     /** P18 捕获的 com.miui.powerkeeper.PowerKeeperManager 实例 */
     @Volatile
     var powerKeeperManagerInstance: Any? = null
-
-    /** P19 捕获的 com.miui.powerkeeper.utils.ProcessObserver 实例 */
-    @Volatile
-    var processObserverInstance: Any? = null
 
     /** P20 捕获的 com.miui.powerkeeper.millet.bright.BrightScenarioBase 实例 */
     @Volatile
     var brightScenarioInstance: Any? = null
 
-    /** P23 捕获的 com.miui.powerkeeper.controller.FrozenAppController 实例（澎湃 3.0 起替代 MilletPolicy/FreezeBinder） */
-    @Volatile
-    var frozenAppControllerInstance: Any? = null
-
-    /** P28 捕获的 com.miui.powerkeeper.controller.ActiveStateController 实例（澎湃 3.0 起管理 MILLET_NO_RESTRICT_APP） */
-    @Volatile
-    var activeStateControllerInstance: Any? = null
-
-    /**
-     * 解析澎湃 3.0+ 的 FrozenAppController 实例：优先用 P23 已捕获句柄，兜底从 PowerKeeperManager 取。
-     */
-    fun resolveFrozenAppController(): Any? {
-        frozenAppControllerInstance?.let { return it }
-        val mgr = powerKeeperManagerInstance ?: return null
-        val ctrl = runCatching { XReflect.callMethod(mgr, "getFrozenAppController") }.getOrNull()
-            ?: runCatching { XReflect.getObjectField(mgr, "mFrozenAppController") }.getOrNull()
-        if (ctrl != null) frozenAppControllerInstance = ctrl
-        return ctrl
-    }
-
-    /**
-     * 解析澎湃 3.0+ 的 ActiveStateController 实例：优先用 P28 已捕获句柄，兜底从 PowerKeeperManager 取。
-     */
-    fun resolveActiveStateController(): Any? {
-        activeStateControllerInstance?.let { return it }
-        val mgr = powerKeeperManagerInstance ?: return null
-        val ctrl = runCatching { XReflect.callMethod(mgr, "getActiveStateController") }.getOrNull()
-            ?: runCatching { XReflect.getObjectField(mgr, "mActiveStateController") }.getOrNull()
-        if (ctrl != null) activeStateControllerInstance = ctrl
-        return ctrl
+    /** 热重载后恢复上一代携带过来的 PowerKeeper 宿主对象句柄（均为宿主类加载器实例）。 */
+    fun restoreHostHandles(snapshot: Array<*>?) {
+        if (snapshot == null) return
+        if (milletPolicyInstance == null) milletPolicyInstance = snapshot.getOrNull(0)
+        if (powerKeeperManagerInstance == null) powerKeeperManagerInstance = snapshot.getOrNull(1)
+        if (brightScenarioInstance == null) brightScenarioInstance = snapshot.getOrNull(2)
     }
 
     /** 模块定义的亮屏白名单基础集合（4 项） */
@@ -160,6 +125,69 @@ object PowerKeeperState {
     @Volatile
     private var miuiBuiltInDataWhiteSet: Set<String>? = null
 
+    private class ListProjection {
+        val removed = LinkedHashSet<String>()
+        val added = LinkedHashSet<String>()
+    }
+
+    private val listProjections = java.util.IdentityHashMap<MutableCollection<String>, ListProjection>()
+
+    /** 包名表无法隔离共享 UID 或双开；查询不完整时保留原生豁免。 */
+    private fun canRestrictPackage(packageName: String, prefs: PrefsSnapshot): Boolean {
+        val ctx = applicationContext ?: return false
+        val token = android.os.Binder.clearCallingIdentity()
+        return try {
+            @Suppress("DEPRECATION")
+            val info = ctx.packageManager.getApplicationInfo(packageName, 0)
+            val uid = info.uid
+            if (!AppUidUtils.isManagedAppUid(uid) || AppUidUtils.userIdOf(uid) != AppUidUtils.PRIMARY_USER_ID ||
+                info.flags and ApplicationInfo.FLAG_SYSTEM != 0 ||
+                AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, packageName, uid) ||
+                ActiveImeTracker.isProtectedSystemServiceApp(ctx, packageName, prefs, uid)
+            ) return false
+            val uidPackages = ctx.packageManager.getPackagesForUid(uid) ?: return false
+            if (uidPackages.size != 1 || uidPackages[0] != packageName) return false
+            val dualUid = AppUidUtils.dualUidOf(uid)
+            if (dualUid > 0 && ctx.packageManager.getPackagesForUid(dualUid)?.contains(packageName) == true) return false
+            // 钩子线程可能持有平台锁，前台可见性只读异步快照；未知时保守保留原生豁免。
+            val visible = io.github.univers629.millet.system.ForegroundState.isUidVisible(uid) ?: return false
+            !visible
+        } catch (_: Throwable) {
+            false
+        } finally {
+            android.os.Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    /** 只回收本次实际增删项，不替换云端或构造器保留的其它表项。 */
+    private fun syncListProjection(
+        current: MutableCollection<String>,
+        additions: Set<String>,
+        removals: Set<String>,
+    ) {
+        synchronized(listProjections) {
+            val state = listProjections.getOrPut(current) { ListProjection() }
+            for (pkg in state.removed.toList()) {
+                if (pkg !in removals) {
+                    if (pkg !in current) current.add(pkg)
+                    state.removed.remove(pkg)
+                }
+            }
+            for (pkg in state.added.toList()) {
+                if (pkg !in additions) {
+                    current.removeAll(setOf(pkg))
+                    state.added.remove(pkg)
+                }
+            }
+            for (pkg in removals) {
+                if (current.removeAll(setOf(pkg)) && !state.added.remove(pkg)) state.removed.add(pkg)
+            }
+            for (pkg in additions) {
+                if (pkg !in removals && pkg !in current && current.add(pkg)) state.added.add(pkg)
+            }
+        }
+    }
+
     /**
      * 清空 `MilletPolicy.musicApp` 静态列表（P2 构造器调用）。
      */
@@ -182,13 +210,26 @@ object PowerKeeperState {
         val policy = milletPolicyInstance ?: return
         val policyClass = policy.javaClass
         val prefs = PrefReader.powerKeeperPrefs
+        // ROM 包名表只投影主用户策略，不写入双开目标。
+        val forceFreezeApps = AppUidUtils.policyPackagesForUser(prefs.forceFreezeSet, AppUidUtils.PRIMARY_USER_ID)
+            .filterTo(LinkedHashSet()) { canRestrictPackage(it, prefs) }
+        val whiteApps = AppUidUtils.policyPackagesForUser(prefs.whiteAppSet, AppUidUtils.PRIMARY_USER_ID)
+        val suppressMessageApps = LinkedHashSet(forceFreezeApps).apply {
+            addAll(AppUidUtils.policyPackagesForUser(prefs.blockThawSet, AppUidUtils.PRIMARY_USER_ID))
+            addAll(AppUidUtils.policyPackagesForUser(prefs.ignoreNetworkWakeSet, AppUidUtils.PRIMARY_USER_ID))
+        }.filterTo(LinkedHashSet()) { canRestrictPackage(it, prefs) }
+        val messageApps = AppUidUtils.policyPackagesForUser(prefs.messageAppSet, AppUidUtils.PRIMARY_USER_ID)
+            .filterTo(LinkedHashSet()) { it !in suppressMessageApps }
+        val staticRemovals = REMOVED_STATIC_WHITE_APPS.filterTo(LinkedHashSet()) { canRestrictPackage(it, prefs) }
+        val dataRemovals = REMOVED_DATA_WHITE_APPS.filterTo(LinkedHashSet()) { canRestrictPackage(it, prefs) }
+        val builtInBlack = captureOrGetBuiltInSystemBlackSet(policy)
+        val builtInWhite = captureOrGetBuiltInDataWhiteSet(policy)
 
         // 1. MESSAGE_APPS（静态 List<String>）：合并用户配置的消息应用集合
         try {
             val messageList = XReflect.getStaticObjectField(policyClass, "MESSAGE_APPS") as? MutableList<String>
             if (messageList != null) {
-                messageList.clear()
-                messageList.addAll(prefs.messageAppSet)
+                syncListProjection(messageList, messageApps, suppressMessageApps)
                 if (prefs.isLog) {
                     Logger.warn("设置消息应用:$messageList")
                 }
@@ -202,13 +243,12 @@ object PowerKeeperState {
         //    Android 13 / 澎湃 1.0（PowerKeeper 4.2.00）没有它，直接跳过而不是抛异常。
         try {
             val mergedBright = LinkedHashSet(BASE_BRIGHT_WHITE_APPS)
-            mergedBright.removeAll(prefs.forceFreezeSet)
+            mergedBright.removeAll(forceFreezeApps)
 
             if (RomCapabilities.hasField(policyClass, "BRIGHT_WHITE_APPS")) {
                 val brightList = XReflect.getStaticObjectField(policyClass, "BRIGHT_WHITE_APPS") as? MutableList<String>
                 if (brightList != null) {
-                    brightList.clear()
-                    brightList.addAll(mergedBright)
+                    syncListProjection(brightList, mergedBright, forceFreezeApps)
                     if (prefs.isLog) {
                         Logger.warn("系统内置亮屏白名单:$brightList")
                     }
@@ -228,8 +268,7 @@ object PowerKeeperState {
                         "BRIGHT_WHITE_APPS"
                     ) as? MutableList<String>
                     if (scenarioBrightList != null) {
-                        scenarioBrightList.clear()
-                        scenarioBrightList.addAll(mergedBright)
+                        syncListProjection(scenarioBrightList, mergedBright, forceFreezeApps)
                     }
                 } catch (_: Throwable) {
                 }
@@ -238,26 +277,24 @@ object PowerKeeperState {
             Logger.error("系统内置亮屏白名单:${t.message}")
         }
 
-        // 3. whiteApps（静态 List<String>）：只减不整表替换（剔除广告组件与应用商店）
+        // 3. whiteApps（静态 List<String>）：保留安全豁免，记录实际移除项以便撤回策略。
         try {
-            val whiteApps = XReflect.getStaticObjectField(policyClass, "whiteApps") as? MutableList<String>
-            if (whiteApps != null) {
-                whiteApps.removeAll(REMOVED_STATIC_WHITE_APPS)
-                XReflect.setStaticObjectField(policyClass, "whiteApps", whiteApps)
+            val staticWhiteList = XReflect.getStaticObjectField(policyClass, "whiteApps") as? MutableList<String>
+            if (staticWhiteList != null) {
+                syncListProjection(staticWhiteList, emptySet(), staticRemovals + forceFreezeApps)
                 if (prefs.isLog) {
-                    Logger.warn("设置白名单:$whiteApps")
+                    Logger.warn("设置白名单:$staticWhiteList")
                 }
             }
         } catch (t: Throwable) {
             Logger.error("设置白名单失败:${t.message}")
         }
 
-        // 4. mDataWhiteList（静态 List<String>）：剔除 11 项阅读器/钱包/企业微信内置豁免
+        // 4. mDataWhiteList（静态 List<String>）：仅剔除非安全策略目标。
         try {
             val dataWhiteList = XReflect.getStaticObjectField(policyClass, "mDataWhiteList") as? MutableList<String>
             if (dataWhiteList != null) {
-                dataWhiteList.removeAll(REMOVED_DATA_WHITE_APPS)
-                XReflect.setStaticObjectField(policyClass, "mDataWhiteList", dataWhiteList)
+                syncListProjection(dataWhiteList, emptySet(), dataRemovals + forceFreezeApps)
                 if (prefs.isLog) {
                     Logger.warn("设置白名单:$dataWhiteList")
                 }
@@ -268,17 +305,13 @@ object PowerKeeperState {
 
         // 5. mUseSystemBlackList（实例 Set<String>）：MIUI 内置黑名单 ∪ forceFreezeSet \ whiteAppSet（修正缺陷 #3）
         try {
-            val builtInBlack = captureOrGetBuiltInSystemBlackSet(policy)
             val unionBlack = LinkedHashSet<String>(builtInBlack)
-            unionBlack.addAll(prefs.forceFreezeSet)
-            unionBlack.removeAll(prefs.whiteAppSet)
+            unionBlack.addAll(forceFreezeApps)
+            unionBlack.removeAll(whiteApps)
 
             val currentSet = XReflect.getObjectField(policy, "mUseSystemBlackList") as? MutableSet<String>
             if (currentSet != null) {
-                currentSet.clear()
-                currentSet.addAll(unionBlack)
-            } else {
-                XReflect.setObjectField(policy, "mUseSystemBlackList", unionBlack)
+                syncListProjection(currentSet, unionBlack, whiteApps)
             }
             if (prefs.isLog) {
                 Logger.warn("内置黑名单:${XReflect.getObjectField(policy, "mUseSystemBlackList")}")
@@ -289,18 +322,14 @@ object PowerKeeperState {
 
         // 6. mUseDataWhiteList（实例 Set<String>）：MIUI 内置数据白名单 ∪ whiteAppSet \ forceFreezeSet（修正缺陷 #3）
         try {
-            val builtInWhite = captureOrGetBuiltInDataWhiteSet(policy)
             val unionWhite = LinkedHashSet<String>(builtInWhite)
-            unionWhite.removeAll(REMOVED_DATA_WHITE_APPS)
-            unionWhite.removeAll(prefs.forceFreezeSet)
-            unionWhite.addAll(prefs.whiteAppSet)
+            unionWhite.removeAll(dataRemovals)
+            unionWhite.removeAll(forceFreezeApps)
+            unionWhite.addAll(whiteApps)
 
             val currentSet = XReflect.getObjectField(policy, "mUseDataWhiteList") as? MutableSet<String>
             if (currentSet != null) {
-                currentSet.clear()
-                currentSet.addAll(unionWhite)
-            } else {
-                XReflect.setObjectField(policy, "mUseDataWhiteList", unionWhite)
+                syncListProjection(currentSet, unionWhite, dataRemovals + forceFreezeApps)
             }
             if (prefs.isLog) {
                 Logger.warn("内置用户白名单:${XReflect.getObjectField(policy, "mUseDataWhiteList")}")
@@ -311,16 +340,18 @@ object PowerKeeperState {
     }
 
     /**
-     * P20：重建 `BrightScenarioBase.preloadWhiteApps`（剔除 `forceFreezeSet`）。
+     * P20：增量同步 `BrightScenarioBase.preloadWhiteApps` 的非安全强制冻结差集。
      */
+    @Suppress("UNCHECKED_CAST")
     fun applyPreloadWhiteApps() {
         val loader = appClassLoader ?: brightScenarioInstance?.javaClass?.classLoader ?: return
         try {
             val clazz = XReflect.findClassIfExists(CLASS_BRIGHT_SCENARIO_BASE, loader) ?: return
-            val updated = ArrayList(BASE_PRELOAD_WHITE_APPS).apply {
-                removeAll(PrefReader.powerKeeperPrefs.forceFreezeSet)
-            }
-            XReflect.setStaticObjectField(clazz, "preloadWhiteApps", updated)
+            val prefs = PrefReader.powerKeeperPrefs
+            val forceFreezeApps = AppUidUtils.policyPackagesForUser(prefs.forceFreezeSet, AppUidUtils.PRIMARY_USER_ID)
+                .filterTo(LinkedHashSet()) { canRestrictPackage(it, prefs) }
+            val current = XReflect.getStaticObjectField(clazz, "preloadWhiteApps") as? MutableList<String> ?: return
+            syncListProjection(current, BASE_PRELOAD_WHITE_APPS.toSet() - forceFreezeApps, forceFreezeApps)
         } catch (t: Throwable) {
             Logger.error("更新 preloadWhiteApps 失败:${t.message}")
         }
@@ -355,10 +386,21 @@ object PowerKeeperState {
         miuiBuiltInDataWhiteSet?.let { return it }
         val captured = LinkedHashSet<String>()
         var instanceReady = false
+        val cloudSnapshot = try {
+            if (RomCapabilities.hasField(policy.javaClass, "mCloudWhiteList")) {
+                (XReflect.getObjectField(policy, "mCloudWhiteList") as? Collection<String>)?.toSet().orEmpty()
+            } else {
+                emptySet()
+            }
+        } catch (_: Throwable) {
+            emptySet()
+        }
         try {
             val existing = XReflect.getObjectField(policy, "mUseDataWhiteList") as? Collection<String>
             if (existing != null) {
-                captured.addAll(existing)
+                for (item in existing) {
+                    if (item !in cloudSnapshot) captured.add(item)
+                }
                 instanceReady = true
             }
         } catch (_: Throwable) {
@@ -379,39 +421,156 @@ object PowerKeeperState {
         return captured
     }
 
+    private fun resolveMilletPolicyInstance(): Any? {
+        milletPolicyInstance?.let { return it }
+        val loader = appClassLoader ?: applicationContext?.classLoader ?: return null
+        val clazz = XReflect.findClassIfExists("com.miui.powerkeeper.millet.MilletPolicy", loader) ?: return null
+        for (field in clazz.declaredFields) {
+            if (!java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+            if (!clazz.isAssignableFrom(field.type)) continue
+            val instance = runCatching {
+                field.isAccessible = true
+                field.get(null)
+            }.getOrNull()
+            if (instance != null) {
+                milletPolicyInstance = instance
+                return instance
+            }
+        }
+        return null
+    }
+
+    /**
+     * 热同步 OS1/OS2 `MilletPolicy` 的云墓碑白名单（`mCloudWhiteList` / `mUseDataWhiteList`）。
+     *
+     * - `block = true`：先快照内置白名单，再清空 `mCloudWhiteList` 并从 `mUseDataWhiteList` 移除其条目，最后重放内置与用户白名单；
+     * - `block = false`：重新调用 `dealCloudWhiteList()` 载入官方云名单，再重放用户策略保持强制冻结优先级。
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun syncCloudFrozenWhiteList(block: Boolean) {
+        val policy = resolveMilletPolicyInstance() ?: return
+        val clazz = policy.javaClass
+        try {
+            if (block) {
+                captureOrGetBuiltInDataWhiteSet(policy)
+                val cloudSet = if (RomCapabilities.hasField(clazz, "mCloudWhiteList")) {
+                    XReflect.getObjectField(policy, "mCloudWhiteList") as? MutableSet<String>
+                } else {
+                    null
+                }
+                val useWhiteSet = if (RomCapabilities.hasField(clazz, "mUseDataWhiteList")) {
+                    XReflect.getObjectField(policy, "mUseDataWhiteList") as? MutableSet<String>
+                } else {
+                    null
+                }
+                if (cloudSet != null && cloudSet.isNotEmpty()) {
+                    val removed = ArrayList(cloudSet)
+                    cloudSet.clear()
+                    useWhiteSet?.removeAll(removed)
+                    Logger.alwaysInfo("云墓碑白名单已热屏蔽（移除 ${removed.size} 项）")
+                }
+                applyMessageAndWhiteLists()
+            } else {
+                if (RomCapabilities.hasMethod(clazz, "dealCloudWhiteList")) {
+                    XReflect.callMethod(policy, "dealCloudWhiteList")
+                    Logger.alwaysInfo("云墓碑白名单已热恢复")
+                }
+                applyMessageAndWhiteLists()
+            }
+        } catch (t: Throwable) {
+            Logger.error("热同步云墓碑白名单失败", t)
+        }
+    }
+
+    // ==================== 系统设置手动省电策略短时租约（P31/P32 ↔ P7/P8） ====================
+
+    /**
+     * 用户在系统设置「省电策略」手动修改应用策略后的短时放行租约（15 秒）。
+     *
+     * HyperOS 写入 `PowerSaveConfigureManager#setPowerSaveAppConfigure` 后，
+     * PowerKeeper 会在约 1 秒后经 `CommonAdapter#add/removePowerSaveWhitelistApps`
+     * 同步 Doze 白名单；若被 P7/P8 拦截，下次进页面时 `getPowerSaveAppConfigure` 会因为
+     * `isIgnoringBatteryOptimizations == false` 将「无限制」强行回退为「智能推荐」。
+     */
+    internal const val USER_POWER_SAVE_LEASE_MS = 15_000L
+
+    private data class PowerSaveLease(val expectAdd: Boolean, val expireAtMs: Long)
+
+    private val userPowerSaveLeases = java.util.concurrent.ConcurrentHashMap<String, PowerSaveLease>()
+    private val inGetPowerSaveConfigureDepth = object : ThreadLocal<Int>() {
+        override fun initialValue(): Int = 0
+    }
+
+    fun enterGetPowerSaveConfigure() {
+        val current = inGetPowerSaveConfigureDepth.get() ?: 0
+        inGetPowerSaveConfigureDepth.set(current + 1)
+    }
+
+    fun exitGetPowerSaveConfigure() {
+        val current = inGetPowerSaveConfigureDepth.get() ?: 0
+        if (current <= 1) inGetPowerSaveConfigureDepth.remove()
+        else inGetPowerSaveConfigureDepth.set(current - 1)
+    }
+
+    fun isInsideGetPowerSaveConfigure(): Boolean = (inGetPowerSaveConfigureDepth.get() ?: 0) > 0
+
+    fun recordUserPowerSaveIntent(
+        packageName: String?,
+        expectAdd: Boolean,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime(),
+    ) {
+        if (packageName.isNullOrBlank()) return
+        if (isInsideGetPowerSaveConfigure()) return
+        pruneExpiredPowerSaveLeases(nowMs)
+        userPowerSaveLeases[packageName] = PowerSaveLease(
+            expectAdd = expectAdd,
+            expireAtMs = nowMs + USER_POWER_SAVE_LEASE_MS,
+        )
+    }
+
+    /** 按短时租约过滤 `CommonAdapter#add/removePowerSaveWhitelistApps` 的包名数组。 */
+    internal fun filterPowerSaveWhitelistMutation(
+        packages: Array<String>,
+        isAdd: Boolean,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime(),
+    ): Pair<List<String>, List<String>> {
+        val allowed = ArrayList<String>()
+        val blocked = ArrayList<String>()
+        for (pkg in packages) {
+            val lease = userPowerSaveLeases[pkg]
+            if (lease != null && lease.expireAtMs >= nowMs && lease.expectAdd == isAdd) {
+                allowed.add(pkg)
+            } else {
+                if (lease != null && lease.expireAtMs < nowMs) {
+                    userPowerSaveLeases.remove(pkg, lease)
+                }
+                blocked.add(pkg)
+            }
+        }
+        return allowed to blocked
+    }
+
+    private fun pruneExpiredPowerSaveLeases(nowMs: Long) {
+        if (userPowerSaveLeases.size < 16) return
+        val it = userPowerSaveLeases.entries.iterator()
+        while (it.hasNext()) {
+            if (it.next().value.expireAtMs < nowMs) it.remove()
+        }
+    }
+
+    internal fun clearUserPowerSaveLeasesForTest() {
+        userPowerSaveLeases.clear()
+        inGetPowerSaveConfigureDepth.remove()
+    }
+
     // ==================== UID / 包名查询辅助方法 ====================
 
     fun getPackageNameForUid(uid: Int): String? {
         if (uid <= 0) return null
-        val ctx = applicationContext ?: return null
-        return try {
-            ctx.packageManager.getPackagesForUid(uid)?.firstOrNull()
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    fun getPackageUid(context: Context?, packageName: String): Int {
-        val ctx = context ?: applicationContext ?: return 0
-        return try {
-            @Suppress("DEPRECATION")
-            ctx.packageManager.getApplicationInfo(packageName, 0).uid
-        } catch (_: Throwable) {
-            0
-        }
-    }
-
-    fun getDualPackageUid(context: Context?, packageName: String): Int {
-        val ctx = context ?: applicationContext ?: return 0
-        val primaryUid = getPackageUid(ctx, packageName)
-        val dualUid = io.github.univers629.millet.core.AppUidUtils.dualUidOf(primaryUid)
-        if (dualUid <= 0) return 0
-        return try {
-            val pkgs = ctx.packageManager.getPackagesForUid(dualUid)
-            if (pkgs != null && packageName in pkgs) dualUid else 0
-        } catch (_: Throwable) {
-            0
-        }
+        // 钩子线程可能持有平台锁，只读缓存；未命中时后台解析。
+        UidPackageCache.lookup(uid)?.let { return it }
+        UidPackageCache.requestResolve(uid, applicationContext)
+        return null
     }
 
     fun syncDualAppSupport(enabled: Boolean) {

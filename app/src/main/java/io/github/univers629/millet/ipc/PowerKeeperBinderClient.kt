@@ -20,7 +20,6 @@ import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.StatsWindow
 import io.github.univers629.millet.powerkeeper.PowerKeeperCloudLists
-import io.github.univers629.millet.powerkeeper.UnfrozenReasonResolver
 
 /**
  * powerkeeper 与 App 侧共用的跨进程 Binder 客户端代理及粘性广播握手器。
@@ -99,10 +98,7 @@ object PowerKeeperBinderClient {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** App 侧收到「未冻结原因」或「版本更新提示」时的 UI 回调 */
-    @Volatile
-    var onAppUnfrozenReasonReceived: ((pkg: String, reason: String) -> Unit)? = null
-
+    /** App 侧收到版本更新提示时的 UI 回调 */
     @Volatile
     var onAppUpdateNoticeReceived: (() -> Unit)? = null
 
@@ -267,19 +263,10 @@ object PowerKeeperBinderClient {
             }
             return
         }
-        val queryPkg = MilletIpcContract.decodeUnfrozenQueryOrNull(message)
-        if (queryPkg != null) {
-            // 收到「查询某包为什么没被冻结」指令 -> 执行 40 步诊断链并回传结果
-            Logger.postIoTask {
-                val reason = UnfrozenReasonResolver.resolve(context, queryPkg)
-                reportUnfrozenReason(queryPkg, reason)
-            }
-        } else {
-            // 收到配置键名 -> 延迟 200ms 重载 powerkeeper 侧对应配置分组
-            mainHandler.postDelayed({
-                PrefReader.reloadPowerKeeperByKey(message)
-            }, 200L)
-        }
+        // 收到配置键名 -> 延迟 200ms 重载 powerkeeper 侧对应配置分组
+        mainHandler.postDelayed({
+            PrefReader.reloadPowerKeeperByKey(message)
+        }, 200L)
     }
 
     private fun handleAppInboundMessage(message: String) {
@@ -296,13 +283,6 @@ object PowerKeeperBinderClient {
         if (message == MilletIpcContract.MSG_IS_UPDATE) {
             mainHandler.post { onAppUpdateNoticeReceived?.invoke() }
             return
-        }
-        val parsed = MilletIpcContract.decodeUnfrozenResponseOrNull(message)
-        if (parsed != null) {
-            val (pkg, reason) = parsed
-            mainHandler.post {
-                onAppUnfrozenReasonReceived?.invoke(pkg, reason)
-            }
         }
     }
 
@@ -360,14 +340,15 @@ object PowerKeeperBinderClient {
     /**
      * 通知 system_server 与 powerkeeper 某个配置键已发生更新（事务码 4）。
      */
-    fun notifyPrefChanged(prefKey: String) {
-        val binder = remoteSystemBinder ?: return
+    fun notifyPrefChanged(prefKey: String): Boolean {
+        val binder = remoteSystemBinder ?: return false
         val data = Parcel.obtain()
-        try {
+        return try {
             data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
             data.writeString(prefKey)
             binder.transact(MilletIpcContract.TX_NOTIFY_PREF_CHANGED, data, null, IBinder.FLAG_ONEWAY)
         } catch (_: Throwable) {
+            false
         } finally {
             data.recycle()
         }
@@ -461,23 +442,18 @@ object PowerKeeperBinderClient {
      * 读取 system_server 采集的应用进程快照（事务码 14）。
      *
      * system_server 有权限直接读 `/proc/<pid>/…`，所以这条路径不需要 App 起 root shell。
-     * @return 进程列表；系统服务未连接或快照不可用时返回 null，调用方可以回退到 root 采集。
+     * @return 快照；未连接或解析失败返回 null，合法空快照与失败分别处理。
      */
-    fun queryProcessSnapshot(): List<io.github.univers629.millet.core.RootHelper.ProcessRawEntry>? {
+    fun queryProcessSnapshot(): io.github.univers629.millet.core.ProcessSnapshotCodec.Snapshot? {
         val binder = remoteSystemBinder ?: return null
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-            binder.transact(MilletIpcContract.TX_GET_PROCESS_SNAPSHOT, data, reply, 0)
+            if (!binder.transact(MilletIpcContract.TX_GET_PROCESS_SNAPSHOT, data, reply, 0)) return null
             reply.readException()
             val payload = reply.readString()
-            if (payload.isNullOrEmpty()) {
-                null
-            } else {
-                val parsed = io.github.univers629.millet.core.ProcessSnapshotCodec.decode(payload)
-                parsed.ifEmpty { null }
-            }
+            io.github.univers629.millet.core.ProcessSnapshotCodec.decodeSnapshot(payload)
         } catch (t: Throwable) {
             Logger.error("queryProcessSnapshot failed", t)
             null
@@ -493,20 +469,42 @@ object PowerKeeperBinderClient {
      * `/sys/fs/cgroup` 与 `/proc/<pid>/wchan` 在 App 侧读不到，原来只能 root 采样；现在由模块在
      * system_server 里判定后经 Binder 回传。返回 null 表示模块未连接（调用方可退回 root 探测）。
      */
-    fun queryKernelFreezer(): io.github.univers629.millet.core.RootHelper.KernelFreezer? {
+    data class KernelFreezerReport(
+        val mode: io.github.univers629.millet.core.RootHelper.KernelFreezer =
+            io.github.univers629.millet.core.RootHelper.KernelFreezer.UNKNOWN,
+        val evidence: String = "UNCONFIRMED",
+        val backend: String = "UNCONFIRMED"
+    ) {
+        val confirmed: Boolean
+            get() = when (mode) {
+                io.github.univers629.millet.core.RootHelper.KernelFreezer.CGROUP_V2 ->
+                    evidence == "CGROUP_V2_FROZEN" || evidence == "WCHAN_V2"
+                io.github.univers629.millet.core.RootHelper.KernelFreezer.CGROUP_V1 ->
+                    evidence == "CGROUP_V1_FROZEN" || evidence == "WCHAN_V1"
+                else -> false
+            }
+    }
+
+    fun queryKernelFreezer(): io.github.univers629.millet.core.RootHelper.KernelFreezer? =
+        queryKernelFreezerReport()?.mode
+
+    fun queryKernelFreezerReport(): KernelFreezerReport? {
         val binder = remoteSystemBinder ?: return null
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-            binder.transact(MilletIpcContract.TX_GET_KERNEL_FREEZER, data, reply, 0)
+            if (!binder.transact(MilletIpcContract.TX_GET_KERNEL_FREEZER, data, reply, 0)) return null
             reply.readException()
-            when (reply.readString()?.trim()?.uppercase()) {
+            val mode = when (reply.readString()?.trim()?.uppercase()) {
                 "V2" -> io.github.univers629.millet.core.RootHelper.KernelFreezer.CGROUP_V2
                 "V1" -> io.github.univers629.millet.core.RootHelper.KernelFreezer.CGROUP_V1
                 "NONE" -> io.github.univers629.millet.core.RootHelper.KernelFreezer.NONE
-                else -> null
+                else -> io.github.univers629.millet.core.RootHelper.KernelFreezer.UNKNOWN
             }
+            val evidence = if (reply.dataAvail() > 0) reply.readString().orEmpty() else "UNCONFIRMED"
+            val backend = if (reply.dataAvail() > 0) reply.readString().orEmpty() else "UNCONFIRMED"
+            KernelFreezerReport(mode, evidence, backend)
         } catch (t: Throwable) {
             Logger.error("queryKernelFreezer failed", t)
             null
@@ -570,6 +568,51 @@ object PowerKeeperBinderClient {
         } catch (t: Throwable) {
             Logger.error("resetFreezeStats failed", t)
             false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    /**
+     * 按需批量查询完整 UID 的成员包名（事务码 20），由调用方在 IO 刷新中执行。
+     *
+     * @return 成功查询的 UID 映射；缺失键表示该 UID 未知，空列表表示成功但无成员。
+     * 未连接、旧端不支持、整批失败或去重后超过 512 个 UID 时返回 null。
+     */
+    fun queryUidPackages(uids: Collection<Int>): Map<Int, List<String>>? {
+        val requestedUids = LinkedHashSet<Int>()
+        for (uid in uids) {
+            requestedUids.add(uid)
+            if (requestedUids.size > MilletIpcContract.MAX_UID_PACKAGES_QUERY) return null
+        }
+        if (requestedUids.isEmpty()) return emptyMap()
+        val binder = remoteSystemBinder ?: return null
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
+            data.writeIntArray(requestedUids.toIntArray())
+            if (!binder.transact(MilletIpcContract.TX_QUERY_UID_PACKAGES, data, reply, 0) || reply.dataAvail() < 4) {
+                return null
+            }
+            reply.readException()
+            if (reply.dataAvail() < 4) return null
+            val count = reply.readInt()
+            if (count !in 0..requestedUids.size) return null
+            val packages = LinkedHashMap<Int, List<String>>(count)
+            repeat(count) {
+                if (reply.dataAvail() < 8) return null
+                val uid = reply.readInt()
+                if (uid !in requestedUids || packages.containsKey(uid)) return null
+                val members = reply.createStringArrayList() ?: return null
+                if (members.any { it.isNullOrBlank() }) return null
+                packages[uid] = members.distinct()
+            }
+            packages
+        } catch (t: Throwable) {
+            Logger.error("queryUidPackages failed", t)
+            null
         } finally {
             reply.recycle()
             data.recycle()
@@ -715,41 +758,6 @@ object PowerKeeperBinderClient {
             0
         } finally {
             reply.recycle()
-            data.recycle()
-        }
-    }
-
-    /**
-     * App 侧请求诊断「为什么该包未被冻结」（事务码 12）。
-     */
-    fun requestUnfrozenReason(packageName: String) {
-        val binder = remoteSystemBinder ?: return
-        val data = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-            data.writeString(packageName)
-            binder.transact(MilletIpcContract.TX_QUERY_UNFROZEN_REASON, data, null, IBinder.FLAG_ONEWAY)
-        } catch (t: Throwable) {
-            Logger.error("获取冻结失败理由发生异常", t)
-        } finally {
-            data.recycle()
-        }
-    }
-
-    /**
-     * powerkeeper 侧回传「未冻结原因」诊断结果到 system_server（事务码 13）。
-     */
-    fun reportUnfrozenReason(packageName: String, reason: String) {
-        val binder = remoteSystemBinder ?: return
-        val data = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-            data.writeString(packageName)
-            data.writeString(reason)
-            binder.transact(MilletIpcContract.TX_REPORT_UNFROZEN_REASON, data, null, IBinder.FLAG_ONEWAY)
-        } catch (t: Throwable) {
-            Logger.error("回传未冻结原因发生异常", t)
-        } finally {
             data.recycle()
         }
     }

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,6 +69,7 @@ import io.github.univers629.millet.ui.component.TombStatsIcon
 import io.github.univers629.millet.ui.component.XMilletIcons
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
+import io.github.univers629.millet.ui.util.AppUpdateStatus
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.BugreportHelper
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
@@ -107,6 +109,9 @@ fun SettingsScreenMiuix(
     themeState: UiThemeState,
     configVersion: Int = 0,
     bottomInnerPadding: Dp,
+    updateStatus: AppUpdateStatus = AppUpdateStatus.Idle,
+    availableUpdateVersion: String? = null,
+    onCheckForUpdates: () -> Unit = {},
     onOpenAppearance: () -> Unit = {},
     onOpenOobe: () -> Unit = {},
     onOpenAbout: () -> Unit,
@@ -390,7 +395,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "亮屏时保持冻结",
-                            summary = "拦截 Greezer 的 screen on 解冻；前台拉起仍会正常唤醒",
+                            summary = "屏幕亮起时，不让系统批量解冻后台应用。此项不控制手机进入深度睡眠",
                             checked = disableScreenOnThaw,
                             onCheckedChange = {
                                 disableScreenOnThaw = it
@@ -409,7 +414,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "禁止篡改省电白名单",
-                            summary = "拦截 CommonAdapter#add/removePowerSaveWhitelistApps自动改动",
+                            summary = "拦截电量与性能后台自动增删省电白名单（保留你在系统设置里的手动修改）",
                             checked = blockPowerSaveWhitelist,
                             onCheckedChange = {
                                 blockPowerSaveWhitelist = it
@@ -432,7 +437,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "控制双开应用冻结",
-                            summary = "绕过系统对双开空间 (UID 999xxxx) 的冻结限制，复用主应用策略",
+                            summary = "接管双开空间（用户 999）的冻结，应用策略单独设置；原生包名级名单仍可能共享",
                             checked = freezeDualApp,
                             onCheckedChange = {
                                 freezeDualApp = it
@@ -464,7 +469,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "启用 Doze 省电控制增强",
-                            summary = "接管 DeviceIdleController，息屏10秒后自动推入 Deep Doze",
+                            summary = "息屏且未充电时，约 10 秒后尝试进入深度睡眠。亮屏或充电时，退出本模块开启的强制睡眠",
                             checked = enableDoze,
                             onCheckedChange = {
                                 enableDoze = it
@@ -702,6 +707,32 @@ fun SettingsScreenMiuix(
                             title = "权限配置向导",
                             summary = "重新检查所需应用权限",
                             onClick = onOpenOobe
+                        )
+                        val updateSummary = when (updateStatus) {
+                            AppUpdateStatus.Checking -> "正在检查更新…"
+                            AppUpdateStatus.Available -> if (!availableUpdateVersion.isNullOrBlank()) {
+                                "发现新版本 v$availableUpdateVersion，点击查看"
+                            } else {
+                                "发现新版本，点击查看"
+                            }
+                            AppUpdateStatus.UpToDate -> "当前已是最新版本 (${BuildConfig.VERSION_NAME})"
+                            AppUpdateStatus.Failed -> "检查失败，点击重试"
+                            AppUpdateStatus.Idle -> "检查 GitHub Releases 是否有新版本"
+                        }
+                        ArrowPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.SystemUpdate,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "检查更新",
+                            summary = updateSummary,
+                            onClick = onCheckForUpdates
                         )
                         ArrowPreference(
                             startAction = {

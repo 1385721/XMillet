@@ -1,6 +1,7 @@
 package io.github.univers629.millet.core
 
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
+import io.github.univers629.millet.ipc.HookCoverage
 import io.github.univers629.millet.ui.component.HookDiagnosticLevel
 import io.github.univers629.millet.ui.component.generateHookDiagnostics
 import org.junit.Assert.assertEquals
@@ -65,6 +66,84 @@ class XposedComplianceTest {
     @Test
     fun activeImeTracker_onHotReloadingIsIdempotentWithoutContext() {
         ActiveImeTracker.onHotReloading()
+        ActiveImeTracker.onHotReloading()
+        val stopped = ActiveImeTracker::class.java.getDeclaredField("hotReloading").apply {
+            isAccessible = true
+        }
+        assertTrue(stopped.getBoolean(ActiveImeTracker))
         assertEquals(null, ActiveImeTracker.resolveDefaultImePackage(null))
+    }
+
+    @Test
+    fun kernelEvidence_requiresKnownSourceAndMatchingMode() {
+        assertTrue(PowerKeeperBinderClient.KernelFreezerReport(RootHelper.KernelFreezer.CGROUP_V2, "CGROUP_V2_FROZEN").confirmed)
+        assertTrue(PowerKeeperBinderClient.KernelFreezerReport(RootHelper.KernelFreezer.CGROUP_V1, "WCHAN_V1").confirmed)
+        assertFalse(PowerKeeperBinderClient.KernelFreezerReport(RootHelper.KernelFreezer.CGROUP_V2, "WCHAN_V1").confirmed)
+        assertFalse(PowerKeeperBinderClient.KernelFreezerReport(RootHelper.KernelFreezer.CGROUP_V2).confirmed)
+        assertFalse(PowerKeeperBinderClient.KernelFreezerReport(RootHelper.KernelFreezer.UNKNOWN, "CGROUP_V2_FROZEN").confirmed)
+    }
+
+    @Test
+    fun diagnostics_doNotAcceptClassPresenceAsOfficialRegistration() {
+        val wire = HookInstallRegistry.Wire(installed = 1, total = 1)
+        val runtime = PowerKeeperBinderClient.RuntimeStatusSnapshot(
+            binderAlive = true,
+            greezeReady = true,
+            powerKeeperConnected = true,
+            hookCoverage = HookCoverage(sys = wire, pk = wire, capabilities = mapOf(HookCoverage.CAP_CONTROLLER to true))
+        )
+        val entries = generateHookDiagnostics(runtime)
+        assertEquals(HookDiagnosticLevel.WARNING, entries.first { it.id == "powerkeeper" }.level)
+        assertEquals(HookDiagnosticLevel.WARNING, entries.first { it.id == "kernel_freezer" }.level)
+    }
+
+    @Test
+    fun diagnostics_requireBothPositiveLedgers() {
+        val wire = HookInstallRegistry.Wire(installed = 1, total = 1)
+        val caps = mapOf("greeze_registered" to true, "controller_registered" to true)
+        val base = PowerKeeperBinderClient.RuntimeStatusSnapshot(
+            binderAlive = true, greezeReady = true, powerKeeperConnected = true,
+            hookCoverage = HookCoverage(sys = wire, pk = wire, capabilities = caps)
+        )
+        assertEquals(HookDiagnosticLevel.PASSED, generateHookDiagnostics(base).first { it.id == "powerkeeper" }.level)
+        for (invalid in listOf(HookInstallRegistry.Wire(), HookInstallRegistry.Wire(installed = 0, total = 0),
+            HookInstallRegistry.Wire(installed = 1, total = 3),
+            HookInstallRegistry.Wire(installed = 1, total = 3, unsupported = listOf("same"), gated = listOf("same")))) {
+            val runtime = base.copy(hookCoverage = base.hookCoverage.copy(pk = invalid))
+            assertEquals(HookDiagnosticLevel.WARNING, generateHookDiagnostics(runtime).first { it.id == "powerkeeper" }.level)
+            assertEquals(HookDiagnosticLevel.WARNING, generateHookDiagnostics(runtime).first { it.id == "hook_coverage" }.level)
+        }
+    }
+    @Test
+    fun backendReadiness_requiresEnabledFlagsAndAllMonitors() {
+        val classify = io.github.univers629.millet.system.KernelFreezerDetector::classifyBackend
+        assertEquals("READY", classify(true, true, true, 7, 7))
+        assertEquals("MONITORS_UNREADY", classify(true, true, true, 3, 7))
+        assertEquals("DISABLED", classify(false, true, true, 7, 7))
+        assertEquals("READY", classify(true, false, true, 7, 7))
+        assertEquals("UNCONFIRMED", classify(true, true, false, 7, 7))
+        assertEquals("DISABLED", classify(true, false, false, 7, 7))
+        assertEquals("UNCONFIRMED", classify(null, true, true, 7, 7))
+        assertEquals("UNCONFIRMED", classify(true, true, true, null, 7))
+        assertEquals("UNCONFIRMED", classify(true, true, true, 7, 0))
+    }
+
+    @Test
+    fun diagnostics_doNotSubstituteLaunchFreezeForBackendReadiness() {
+        val wire = HookInstallRegistry.Wire(installed = 1, total = 1)
+        val runtime = PowerKeeperBinderClient.RuntimeStatusSnapshot(
+            binderAlive = true, greezeReady = true, powerKeeperConnected = true,
+            hookCoverage = HookCoverage(sys = wire, pk = wire,
+                capabilities = mapOf("greeze_registered" to true, "controller_registered" to true))
+        )
+        for (backend in listOf("UNCONFIRMED", "MONITORS_UNREADY", "DISABLED")) {
+            val entries = generateHookDiagnostics(runtime, RootHelper.KernelFreezer.CGROUP_V2,
+                kernelEvidenceConfirmed = true, kernelEvidenceSource = "CGROUP_V2_FROZEN", milletBackendState = backend)
+            assertEquals(HookDiagnosticLevel.PASSED, entries.first { it.id == "kernel_freezer" }.level)
+            val backendEntry = entries.first { it.id == "millet_backend" }
+            assertFalse(backendEntry.optional)
+            assertFalse(backendEntry.level == HookDiagnosticLevel.PASSED)
+            assertFalse(entries.filterNot { it.optional }.all { it.level == HookDiagnosticLevel.PASSED })
+        }
     }
 }

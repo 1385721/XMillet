@@ -64,7 +64,7 @@ import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
-import io.github.univers629.millet.ui.component.HookCheckDialogMiuix
+import io.github.univers629.millet.ui.component.HookCheckSheetMiuix
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
@@ -113,10 +113,9 @@ data class RunningProcessUiModel(
     val freezerTypes: Set<RootHelper.FreezerType> = emptySet(),
     val processCount: Int = 1,
     val frozenCount: Int = 0,
+    val unknownCount: Int = 0,
     val memSizeKb: Long = 0L,
     val formattedMemSize: String = "",
-    /** greeze 记账里是否把这个 uid 标成冻结；与 [isFrozen]（内核实际状态）可能不一致 */
-    val bookkeepingFrozen: Boolean = false,
     val isDualApp: Boolean = false,
     val applicationInfo: android.content.pm.ApplicationInfo? = null
 )
@@ -135,7 +134,7 @@ fun HomeScreenMiuix(
     },
     onOpenAbout: () -> Unit = {},
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit = { _, _ -> },
-    onQueryUnfrozenReason: (packageName: String) -> Unit = {},
+    snapshotUnavailable: Boolean = false,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val context = LocalContext.current
@@ -147,58 +146,29 @@ fun HomeScreenMiuix(
 
     var showTopPopup by remember { mutableStateOf(false) }
     var showHookCheckDialog by remember { mutableStateOf(false) }
-    var kernelFreezer by remember { mutableStateOf(RootHelper.KernelFreezer.UNKNOWN) }
+    var kernelReport by remember { mutableStateOf(PowerKeeperBinderClient.KernelFreezerReport()) }
+    var kernelProbeGeneration by remember { mutableStateOf(0) }
     val frameworkState by XposedPrefsBridge.frameworkState.collectAsState()
 
-    // 「已冻结」口径以进程快照里的内核证据为准（wchan = do_freezer_trap /
-    // __refrigerator，或进程处于 D 状态）。greeze 的记账名单不参与判定——被 hook
-    // 拦下或已经解冻的 uid 仍会留在记账里，用它判定就会出现「列表说已冻结、
-    // 点进去进程都在跑」。记账只在拿不到进程快照（无 Root）时作为兜底。
+    // 应用全部已采集进程确认冻结时计入；主应用与双开分别统计，记账不替代快照。
     val frozenApps = remember(runningProcesses) {
         runningProcesses.filter { it.isFrozen }
     }
     val frozenAppCount = remember(frozenApps) {
-        frozenApps.map { it.packageName }.distinct().size
+        frozenApps.map { "${it.packageName}:${it.uid}" }.distinct().size
     }
 
     // 打开检测弹窗时在 IO 线程探测内核冻结器类型与 XposedService 状态
-    LaunchedEffect(showHookCheckDialog) {
+    LaunchedEffect(showHookCheckDialog, kernelProbeGeneration) {
         if (showHookCheckDialog) {
-            kernelFreezer = withContext(Dispatchers.IO) {
+            kernelReport = withContext(Dispatchers.IO) {
                 XposedPrefsBridge.refreshFrameworkState()
                 // system_server 才有 /sys/fs/cgroup 与 /proc/<pid>/wchan 的读权限；
                 // App 侧自行探测需要 root，会弹一次超级用户提示，因此不做回退。
-                PowerKeeperBinderClient.queryKernelFreezer() ?: RootHelper.KernelFreezer.UNKNOWN
+                PowerKeeperBinderClient.queryKernelFreezerReport()
+                    ?: PowerKeeperBinderClient.KernelFreezerReport()
             }
         }
-    }
-
-    if (showHookCheckDialog) {
-        HookCheckDialogMiuix(
-            show = true,
-            runtimeStatus = runtimeStatus,
-            kernelFreezer = kernelFreezer,
-            frameworkState = frameworkState,
-            onRequestScope = {
-                XposedPrefsBridge.requestMissingScopes { _, message ->
-                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                    onRefresh()
-                }
-            },
-            onHotReloadStale = {
-                XposedPrefsBridge.hotReloadStaleTargets { _, _, summary ->
-                    Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
-                    onRefresh()
-                }
-            },
-            onRefresh = {
-                scope.launch(Dispatchers.IO) {
-                    XposedPrefsBridge.refreshFrameworkState()
-                }
-                onRefresh()
-            },
-            onDismiss = { showHookCheckDialog = false }
-        )
     }
 
 
@@ -302,13 +272,22 @@ fun HomeScreenMiuix(
                 }
 
                 // 2. 统计看板卡片组
+                if (snapshotUnavailable) {
+                    item {
+                        WarningCard(
+                            message = "进程快照不可用，保留上次结果；冻结统计暂不代表当前状态。",
+                            level = WarningLevel.Notice,
+                            onClick = onRefresh
+                        )
+                    }
+                }
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         DataSummaryCard(
-                            title = "当前已冻结",
+                            title = if (snapshotUnavailable) "上次已冻结" else "当前已冻结",
                             count = frozenAppCount,
                             unit = "应用",
                             modifier = Modifier.weight(1f),
@@ -378,6 +357,36 @@ fun HomeScreenMiuix(
                     Spacer(Modifier.height(bottomInnerPadding))
                 }
             }
+
+            HookCheckSheetMiuix(
+                show = showHookCheckDialog,
+                runtimeStatus = runtimeStatus,
+                kernelFreezer = kernelReport.mode,
+                kernelEvidenceConfirmed = kernelReport.confirmed,
+                kernelEvidenceSource = kernelReport.evidence,
+                milletBackendState = kernelReport.backend,
+                frameworkState = frameworkState,
+                onRequestScope = {
+                    XposedPrefsBridge.requestMissingScopes { _, message ->
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        onRefresh()
+                    }
+                },
+                onHotReloadStale = {
+                    XposedPrefsBridge.hotReloadStaleTargets { _, _, summary ->
+                        Toast.makeText(context, summary, Toast.LENGTH_SHORT).show()
+                        onRefresh()
+                    }
+                },
+                onRefresh = {
+                    kernelProbeGeneration++
+                    scope.launch(Dispatchers.IO) {
+                        XposedPrefsBridge.refreshFrameworkState()
+                    }
+                    onRefresh()
+                },
+                onDismiss = { showHookCheckDialog = false }
+            )
         }
     }
 }

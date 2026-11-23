@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
  * 职责：
  * 1. 通过 S1（ActivityManagerService#registerReceiverWithFeature）向 powerkeeper 与模块 App 派发本 Binder 句柄。
  * 2. 维护已注册客户端（`"PowerKeeper"` 与 `"XMillet"`）的回调 Binder 及 DeathRecipient。
- * 3. 处理全部 13 个事务码：配置热更新广播、MILLET_NO_RESTRICT_APP 镜像查询、实时运行状态与未冻结原因双向路由等。
+ * 3. 处理配置热更新广播、MILLET_NO_RESTRICT_APP 镜像查询、实时运行状态与进程快照等事务。
  */
 class SystemBinderService : Binder() {
 
@@ -156,46 +156,6 @@ class SystemBinderService : Binder() {
                     true
                 }
 
-                MilletIpcContract.TX_QUERY_UNFROZEN_REASON -> {
-                    data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-                    val target = data.readString()
-                    if (!target.isNullOrEmpty()) {
-                        val (pkg, userId) = io.github.univers629.millet.core.AppUidUtils.decodeQueryTarget(target)
-                        val uid = if (userId == io.github.univers629.millet.core.AppUidUtils.DUAL_APP_USER_ID) {
-                            SystemState.getDualPackageUid(pkg)
-                        } else {
-                            SystemState.getPackageUid(pkg)
-                        }
-                        if (uid > 0 && SystemState.isUidFrozen(uid)) {
-                            sendToClient(
-                                MilletIpcContract.CLIENT_XMILLET_APP,
-                                MilletIpcContract.encodeUnfrozenResponse(target, "已冻结")
-                            )
-                        } else {
-                            sendToClient(
-                                MilletIpcContract.CLIENT_POWER_KEEPER,
-                                MilletIpcContract.encodeUnfrozenQuery(target)
-                            )
-                        }
-                    }
-                    reply?.writeNoException()
-                    true
-                }
-
-                MilletIpcContract.TX_REPORT_UNFROZEN_REASON -> {
-                    data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
-                    val pkg = data.readString()
-                    val reason = data.readString()
-                    if (!pkg.isNullOrEmpty() && !reason.isNullOrEmpty()) {
-                        sendToClient(
-                            MilletIpcContract.CLIENT_XMILLET_APP,
-                            MilletIpcContract.encodeUnfrozenResponse(pkg, reason)
-                        )
-                    }
-                    reply?.writeNoException()
-                    true
-                }
-
                 MilletIpcContract.TX_APPLY_BATTERY_POLICY -> {
                     data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
                     val pkg = data.readString()
@@ -219,8 +179,11 @@ class SystemBinderService : Binder() {
                 MilletIpcContract.TX_GET_KERNEL_FREEZER -> {
                     data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
                     // /sys/fs/cgroup 与 /proc/<pid>/wchan 在 App 侧被 SELinux 挡住，改由这里判定。
+                    val report = KernelFreezerDetector.detectEvidence()
                     reply?.writeNoException()
-                    reply?.writeString(KernelFreezerDetector.detect())
+                    reply?.writeString(report.mode)
+                    reply?.writeString(report.evidence)
+                    reply?.writeString(report.backend)
                     true
                 }
 
@@ -249,11 +212,48 @@ class SystemBinderService : Binder() {
                     true
                 }
 
+                MilletIpcContract.TX_QUERY_UID_PACKAGES -> {
+                    data.enforceInterface(MilletIpcContract.DESCRIPTOR_SYSTEM_SERVICE)
+                    if (reply == null || data.dataAvail() < 4) return false
+                    val count = data.readInt()
+                    if (count !in 0..MilletIpcContract.MAX_UID_PACKAGES_QUERY || data.dataAvail() < count * 4) {
+                        return false
+                    }
+                    val uids = LinkedHashSet<Int>(count)
+                    repeat(count) { uids.add(data.readInt()) }
+                    val packages = queryUidPackages(uids) ?: return false
+                    reply.writeNoException()
+                    reply.writeInt(packages.size)
+                    for ((uid, members) in packages) {
+                        reply.writeInt(uid)
+                        reply.writeStringList(members)
+                    }
+                    true
+                }
+
                 else -> super.onTransact(code, data, reply, flags)
             }
         } catch (t: Throwable) {
             Logger.error("SystemBinderService onTransact(code=$code) failed", t)
             false
+        }
+    }
+
+    private fun queryUidPackages(uids: Collection<Int>): Map<Int, List<String>>? {
+        val token = Binder.clearCallingIdentity()
+        return try {
+            val manager = SystemState.systemContext?.packageManager ?: return null
+            val packages = LinkedHashMap<Int, List<String>>(uids.size)
+            for (uid in uids) {
+                try {
+                    packages[uid] = manager.getPackagesForUid(uid)?.distinct().orEmpty()
+                } catch (_: Throwable) {
+                    // 缺少该 UID 的映射表示查询失败，不等同于成功的空成员列表。
+                }
+            }
+            packages
+        } finally {
+            Binder.restoreCallingIdentity(token)
         }
     }
 
@@ -312,7 +312,10 @@ class SystemBinderService : Binder() {
         val sysWire = HookInstallRegistry.decodeWireFormat(HookInstallRegistry.toWireFormat())
         val pkWire = HookInstallRegistry.decodeWireFormat(powerKeeperHooksReport)
         val caps = HookCoverage.mergeCapabilities(
-            RomCapabilities.capabilityMap(SystemState.systemContext?.classLoader),
+            RomCapabilities.capabilityMap(SystemState.systemContext?.classLoader) +
+                ("greeze_registered" to HookInstallRegistry.snapshot()
+                    .filter { it.state == HookInstallRegistry.State.INSTALLED }
+                    .map { it.id }.toSet().containsAll(setOf("S2_Gate", "S6"))),
             HookCoverage.parseCapabilities(powerKeeperCapsReport)
         )
         return HookCoverage(sys = sysWire, pk = pkWire, capabilities = caps)
@@ -328,13 +331,11 @@ class SystemBinderService : Binder() {
     }
 
     private fun handlePrefChanged(changedKey: String) {
-        // 1. 延迟 200ms 在 system_server 单线程 Handler 上重载对应配置组（等待文件落盘完成）
+        // 在既有 Handler 上依次通知两端；通知接收不代表两端应用确认。
         postReloadTask(200L) {
             PrefReader.reloadSystemByKey(changedKey)
+            sendToClient(MilletIpcContract.CLIENT_POWER_KEEPER, changedKey)
         }
-
-        // 2. 转发给 com.miui.powerkeeper 客户端同步重载
-        sendToClient(MilletIpcContract.CLIENT_POWER_KEEPER, changedKey)
     }
 
     private fun checkModuleUpdateTime() {

@@ -31,6 +31,12 @@ object FreezeStatsCodec {
 
     const val VERSION = "v1"
 
+    /**
+     * 磁盘持久化协议版本。1.2.1 及更早版本的冻结/唤醒口径与当前实现不同（存在重复计数），
+     * v2 起旧文件会被整体视为无效并重新开始，避免把旧口径的历史带进新版本。
+     */
+    const val STORAGE_VERSION = "v2"
+
     private const val MIN_META_FIELDS = 16
     private const val MIN_BUCKET_FIELDS = 4
     private const val MIN_APP_FIELDS = 11
@@ -208,7 +214,7 @@ object FreezeStatsCodec {
 
     fun encodeStorage(state: PersistedStatsState): String {
         val sb = StringBuilder(8192)
-        sb.append(VERSION).append('\n')
+        sb.append(STORAGE_VERSION).append('\n')
         sb.append("S|")
             .append(state.baselineSinceMillis).append('|')
             .append(state.bootSinceMillis).append('|')
@@ -302,7 +308,7 @@ object FreezeStatsCodec {
                 break
             }
         }
-        if (header != VERSION) return null
+        if (header != STORAGE_VERSION) return null
 
         var storageMeta: StorageMeta? = null
         var bootTotal: BootTotalParts? = null
@@ -535,6 +541,7 @@ object FreezeStatsCodec {
             category = category,
             rule = rule,
             rawReason = rawReason,
+            origin = parts.getOrNull(8)?.let { parseEnumOrNull<StatsEventOrigin>(it) } ?: StatsEventOrigin.UNKNOWN,
         )
     }
 
@@ -656,8 +663,20 @@ object FreezeStatsCodec {
             .append(event.category?.name.orEmpty()).append('|')
             .append(event.rule?.name.orEmpty()).append('|')
             .append(escape(event.rawReason))
+            .append('|').append(event.origin.name)
             .append('\n')
     }
+
+
+
+    private inline fun <reified E : Enum<E>> decodeEnumCounts(raw: String): Map<E, Int> =
+        raw.split(',').mapNotNull { segment ->
+            val fields = segment.split('=', limit = 2)
+            if (fields.size != 2) return@mapNotNull null
+            val key = parseEnumOrNull<E>(fields[0]) ?: return@mapNotNull null
+            val count = fields[1].toIntOrNull()?.takeIf { it >= 0 } ?: return@mapNotNull null
+            key to count
+        }.toMap()
 
     private fun encodeWakeMap(map: Map<WakeCategory, Int>): String {
         if (map.isEmpty()) return ""

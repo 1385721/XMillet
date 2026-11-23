@@ -11,6 +11,7 @@ import io.github.univers629.millet.ipc.MilletIpcContract
 import io.github.univers629.millet.ipc.SystemBinderService
 import io.github.univers629.millet.powerkeeper.PowerKeeperHooks
 import io.github.univers629.millet.powerkeeper.PowerKeeperState
+import io.github.univers629.millet.system.BroadcastAndDozeHooks
 import io.github.univers629.millet.system.FreezeStatsRecorder
 import io.github.univers629.millet.system.SystemHooks
 import io.github.univers629.millet.system.SystemState
@@ -76,12 +77,17 @@ class ModernHookEntry : XposedModule() {
             Logger.alwaysWarn("XMillet 热重载：缺少上一代装机上下文，放弃本次热重载，请重启设备")
             return false
         }
-        // powerkeeper / App 的注册信息也一起带过去：热重载换掉类加载器后，
-        // SystemBinderService 里的回调表会清空并销毁旧 Binder 链路，随后在新代重装后通知客户端重绑新 Binder。
-        val carriedSnapshot = if (savedRole == ROLE_SYSTEM_SERVER || savedRole == ROLE_PACKAGE_SYSTEM) {
-            runCatching { SystemBinderService.exportRegistrationSnapshot() }.getOrNull()
-        } else {
-            null
+        // powerkeeper / App 的注册信息与 PowerKeeper 宿主实例句柄一起带过去（均为宿主或框架对象，不携带模块类实例）：
+        // system_server 侧重装后通知客户端重绑新 Binder；powerkeeper 侧保留 MilletPolicy 等启动期构造器句柄，避免热重载后失联。
+        val carriedSnapshot = when (savedRole) {
+            ROLE_SYSTEM_SERVER, ROLE_PACKAGE_SYSTEM ->
+                runCatching { SystemBinderService.exportRegistrationSnapshot() }.getOrNull()
+            ROLE_POWERKEEPER -> arrayOf(
+                PowerKeeperState.milletPolicyInstance,
+                PowerKeeperState.powerKeeperManagerInstance,
+                PowerKeeperState.brightScenarioInstance
+            )
+            else -> null
         }
         param.setSavedInstanceState(arrayOf<Any?>(savedRole, savedLoader, carriedSnapshot))
         Logger.alwaysWarn("XMillet 热重载：接受重装请求（$savedRole）")
@@ -135,6 +141,7 @@ class ModernHookEntry : XposedModule() {
                 }
                 ROLE_POWERKEEPER -> {
                     PowerKeeperState.reacquireApplicationContext()
+                    PowerKeeperState.restoreHostHandles(carriedSnapshot)
                     bootstrapPowerKeeper(savedLoader)
                 }
                 else -> Logger.alwaysWarn("XMillet 热重载：未知装机角色 $savedRole，跳过重装")
@@ -167,6 +174,12 @@ class ModernHookEntry : XposedModule() {
 
             // 4. 安装 system_server 侧全部安装点
             SystemHooks.installAllModern(this, classLoader)
+
+            // 5. 热重载会摘掉广播接收器，重装后立刻补回来，避免亮灭屏与充电事件断链
+            SystemState.systemContext?.let { ctx ->
+                runCatching { BroadcastAndDozeHooks.registerScreenStatusReceiver(ctx) }
+                runCatching { FreezeStatsRecorder.registerScreenReceiver(ctx) }
+            }
         } catch (t: Throwable) {
             Logger.error("Modern Hook bootstrapSystemServer Failure [$scene]: ${t.message}", t)
         }
@@ -186,6 +199,9 @@ class ModernHookEntry : XposedModule() {
 
             // 3. 补回 system_server 链路（P1 只在应用启动时触发一次，热重载后必须重连）
             PowerKeeperHooks.ensureBinderLink()
+
+            // 3.1 插电状态纠正：热重载时若标志已置为「暂停新冻结」，则纠正回可冻结状态
+            runCatching { PowerKeeperHooks.healChargingFreezeGate() }
         } catch (t: Throwable) {
             Logger.error("Modern Hook bootstrapPowerKeeper Failure: ${t.message}", t)
         }
@@ -203,6 +219,8 @@ class ModernHookEntry : XposedModule() {
             Logger.alwaysWarn(
                 "配置自检[$scene]: isLog=${prefs.isLog}, simplifyLog=${prefs.simplifyLog}, " +
                     "disableKill=${prefs.disableKill}, disableCharge=${prefs.disableCharge}, " +
+                    "blockCloudDoze=${prefs.blockCloudDozeWhitelist}, " +
+                    "blockCloudFrozen=${prefs.blockCloudFrozenWhitelist}, " +
                     "freezeStats=${prefs.freezeStats}, " +
                     "enableDoze=${prefs.enableDoze}, messageAppSet=${prefs.messageAppSet.size}, " +
                     "whiteAppSet=${prefs.whiteAppSet.size}, ignoreNetworkWake=${prefs.ignoreNetworkWakeSet.size}"

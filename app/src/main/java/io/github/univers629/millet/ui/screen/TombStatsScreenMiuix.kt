@@ -38,7 +38,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -49,6 +48,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -81,15 +81,16 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.BuildConfig
-import io.github.univers629.millet.core.AppFreezeStatsData
 import io.github.univers629.millet.core.FreezeStatsSnapshotData
 import io.github.univers629.millet.core.InterceptRule
 import io.github.univers629.millet.core.StatsEventKind
+import io.github.univers629.millet.core.StatsEventOrigin
 import io.github.univers629.millet.core.StatsTimeBucket
 import io.github.univers629.millet.core.StatsWindow
 import io.github.univers629.millet.core.WakeCategory
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
-import io.github.univers629.millet.ui.component.AppIconImage
+import io.github.univers629.millet.ipc.MilletIpcContract
+import io.github.univers629.millet.ui.component.StatsAppIcon
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
@@ -99,8 +100,16 @@ import io.github.univers629.millet.ui.component.WarningLevel
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.isInDarkTheme
 import io.github.univers629.millet.ui.util.BlurredBar
+import io.github.univers629.millet.ui.util.StatsPackageMember
+import io.github.univers629.millet.ui.util.StatsDetailSelection
+import io.github.univers629.millet.ui.util.StatsQueryScope
+import io.github.univers629.millet.ui.util.StatsRefreshGate
+import io.github.univers629.millet.ui.util.resolveStatsDetail
+import io.github.univers629.millet.ui.util.sortedStatsMemberPackages
+import io.github.univers629.millet.ui.util.statsGroupLabel
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -145,7 +154,6 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.random.Random
 
 // ============================================================================================
@@ -171,6 +179,7 @@ data class AppFreezeStats(
     val applicationInfo: ApplicationInfo? = null,
     val isSystem: Boolean = false,
     val isDualApp: Boolean = false,
+    val members: List<StatsPackageMember> = emptyList(),
 ) {
     val backgroundWakeCount: Int get() = wakeByCategory.entries.sumOf { if (it.key.isBackground) it.value else 0 }
     val userOpenCount: Int get() = wakeByCategory[WakeCategory.USER_OPEN] ?: 0
@@ -191,6 +200,8 @@ data class StatsRecentEvent(
     val applicationInfo: ApplicationInfo? = null,
     val isSystem: Boolean = false,
     val isDualApp: Boolean = false,
+    val members: List<StatsPackageMember> = emptyList(),
+    val origin: StatsEventOrigin = StatsEventOrigin.UNKNOWN,
 )
 
 @Immutable
@@ -228,6 +239,14 @@ data class FreezeStatsSnapshot(
             killBlockedCount == 0
 }
 
+private fun originLabel(origin: StatsEventOrigin): String = when (origin) {
+    StatsEventOrigin.UNKNOWN -> "来源未确认"
+    StatsEventOrigin.NATIVE -> "系统记录"
+    StatsEventOrigin.MODULE -> "模块操作"
+    StatsEventOrigin.LAUNCH_MODE -> "系统另一入口"
+    StatsEventOrigin.SNAPSHOT -> "状态对照"
+}
+
 sealed interface StatsLoadState {
     data object Loading : StatsLoadState
     /** 模块未激活 */
@@ -251,6 +270,7 @@ object FreezeStatsRepository {
         val applicationInfo: ApplicationInfo?,
         val isSystem: Boolean = false,
         val isDualApp: Boolean = false,
+        val members: List<StatsPackageMember> = emptyList(),
     )
 
     suspend fun load(
@@ -282,20 +302,39 @@ object FreezeStatsRepository {
         pm: android.content.pm.PackageManager,
         uid: Int,
         rawPkg: String,
+        memberPackages: List<String>? = null,
     ): ResolvedAppMeta {
         val userId = if (uid >= 0) uid / 100_000 else 0
         val appId = if (uid >= 100_000) uid % 100_000 else uid
         val isDualApp = userId == 999
+        val packages = sortedStatsMemberPackages(memberPackages)
+        if (packages.size > 1) {
+            val members = packages.map { pkg ->
+                val cacheKey = "$uid:$pkg"
+                val cached = labelCache.get(cacheKey) ?: run {
+                    val info = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
+                    val label = info?.let { runCatching { pm.getApplicationLabel(it).toString() }.getOrNull() }
+                        ?.trim()?.ifEmpty { null } ?: pkg
+                    Triple(label, info, info != null && (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
+                        .also { labelCache.put(cacheKey, it) }
+                }
+                StatsPackageMember(pkg, cached.first, cached.second)
+            }
+            val label = statsGroupLabel(members)
+            return ResolvedAppMeta(
+                packageName = "uid:$uid",
+                label = if (userId > 0 && !isDualApp) "$label (用户$userId)" else label,
+                applicationInfo = null,
+                isSystem = members.all { it.applicationInfo?.let { info ->
+                    (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                } == true },
+                isDualApp = isDualApp,
+                members = members,
+            )
+        }
         val trimmedPkg = rawPkg.trim()
         val effectivePkg = if (trimmedPkg.isBlank() || trimmedPkg.startsWith("uid:")) {
-            if (uid >= 0) {
-                runCatching {
-                    pm.getPackagesForUid(uid)?.firstOrNull()
-                        ?: if (uid >= 100_000) pm.getPackagesForUid(appId)?.firstOrNull() else null
-                }.getOrNull().orEmpty()
-            } else {
-                ""
-            }
+            ""
         } else {
             trimmedPkg
         }
@@ -306,7 +345,7 @@ object FreezeStatsRepository {
                 else -> "未知应用"
             }
             return ResolvedAppMeta(
-                packageName = trimmedPkg,
+                packageName = "uid:$uid",
                 label = fallbackLabel,
                 applicationInfo = null,
                 isSystem = false,
@@ -326,9 +365,20 @@ object FreezeStatsRepository {
         return ResolvedAppMeta(effectivePkg, finalLabel, info, isSys, isDualApp)
     }
 
+    private fun queryMemberPackages(uids: List<Int>): Map<Int, List<String>> = buildMap {
+        for (batch in uids.filter { it >= 0 }.distinct().chunked(MilletIpcContract.MAX_UID_PACKAGES_QUERY)) {
+            putAll(PowerKeeperBinderClient.queryUidPackages(batch).orEmpty())
+        }
+    }
+
     /** 将系统服务返回的纯 Kotlin 快照映射为 UI 模型并解析包名/应用名/图标 */
     fun resolveFromData(context: Context, raw: FreezeStatsSnapshotData): FreezeStatsSnapshot {
         val pm = context.packageManager
+        val packagesByUid = queryMemberPackages(raw.apps.map { it.uid } + raw.recent.map { it.uid })
+        val metadata = HashMap<Int, ResolvedAppMeta>()
+        fun metaFor(uid: Int, pkg: String): ResolvedAppMeta = metadata.getOrPut(uid) {
+            resolvePackage(pm, uid, pkg, packagesByUid[uid])
+        }
         return FreezeStatsSnapshot(
             window = raw.window,
             sinceMillis = raw.sinceMillis,
@@ -343,7 +393,7 @@ object FreezeStatsRepository {
             frozenMillisTotal = raw.frozenMillisTotal,
             buckets = raw.buckets,
             apps = raw.apps.map { a ->
-                val meta = resolvePackage(pm, a.uid, a.packageName)
+                val meta = metaFor(a.uid, a.packageName)
                 AppFreezeStats(
                     uid = a.uid,
                     packageName = meta.packageName,
@@ -359,10 +409,11 @@ object FreezeStatsRepository {
                     applicationInfo = meta.applicationInfo,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
+                    members = meta.members,
                 )
             },
             recent = raw.recent.map { e ->
-                val meta = resolvePackage(pm, e.uid, e.packageName)
+                val meta = metaFor(e.uid, e.packageName)
                 StatsRecentEvent(
                     timeMillis = e.timeMillis,
                     uid = e.uid,
@@ -371,10 +422,12 @@ object FreezeStatsRepository {
                     category = e.category,
                     rule = e.rule,
                     rawReason = e.rawReason,
+                    origin = e.origin,
                     label = meta.label,
                     applicationInfo = meta.applicationInfo,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
+                    members = meta.members,
                 )
             },
             memoryBytes = raw.memoryBytes,
@@ -386,25 +439,34 @@ object FreezeStatsRepository {
     /** 包名 → 应用名 + ApplicationInfo（线程安全 LRU 缓存，仅在 IO 线程调用） */
     fun resolveApps(context: Context, snapshot: FreezeStatsSnapshot): FreezeStatsSnapshot {
         val pm = context.packageManager
+        val packagesByUid = if (snapshot.isSample) emptyMap() else {
+            queryMemberPackages(snapshot.apps.map { it.uid } + snapshot.recent.map { it.uid })
+        }
+        val metadata = HashMap<Int, ResolvedAppMeta>()
+        fun metaFor(uid: Int, pkg: String): ResolvedAppMeta = metadata.getOrPut(uid) {
+            resolvePackage(pm, uid, pkg, packagesByUid[uid])
+        }
         return snapshot.copy(
             apps = snapshot.apps.map { a ->
-                val meta = resolvePackage(pm, a.uid, a.packageName)
+                val meta = metaFor(a.uid, a.packageName)
                 a.copy(
                     packageName = meta.packageName,
                     label = meta.label,
                     applicationInfo = meta.applicationInfo,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
+                    members = meta.members,
                 )
             },
             recent = snapshot.recent.map { e ->
-                val meta = resolvePackage(pm, e.uid, e.packageName)
+                val meta = metaFor(e.uid, e.packageName)
                 e.copy(
                     packageName = meta.packageName,
                     label = meta.label,
                     applicationInfo = meta.applicationInfo,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
+                    members = meta.members,
                 )
             },
         )
@@ -437,6 +499,7 @@ private object FreezeStatsSampleData {
                     WakeCategory.USER_OPEN -> 12; WakeCategory.NETWORK -> 90; WakeCategory.BINDER -> 40
                     WakeCategory.BROADCAST -> 25; WakeCategory.SCREEN_ON -> 10; WakeCategory.CHARGING -> 3
                     WakeCategory.OTHER -> 8
+                    WakeCategory.MODULE_OPERATION -> 2; WakeCategory.LAUNCH_MODE -> 2
                 }
                 (base * heat * scale * rnd.nextFloat()).toInt()
             }
@@ -521,23 +584,16 @@ private fun WakeCategory.displayColor(): Color {
         WakeCategory.SCREEN_ON -> if (dark) Color(0xFFFFD60A) else Color(0xFFD99B00)
         WakeCategory.CHARGING -> if (dark) Color(0xFF30D158) else Color(0xFF2E9E49)
         WakeCategory.OTHER -> if (dark) Color(0xFF98989D) else Color(0xFF787880)
+        WakeCategory.MODULE_OPERATION -> if (dark) Color(0xFF64D2FF) else Color(0xFF007B9E)
+        WakeCategory.LAUNCH_MODE -> if (dark) Color(0xFFFFB86C) else Color(0xFFB36B00)
     }
 }
 
 @Composable
 private fun screenOffAccentColor(): Color {
-    val dark = isInDarkTheme()
-    val primary = colorScheme.primary
-    val indigo = if (dark) Color(0xFF7D7AFF) else Color(0xFF5856D6)
-    // 若莫奈主色偏紫蓝，息屏柱改用琥珀橙以保证「亮屏 vs 息屏」在所有调色盘下高对比
-    val closeToIndigo = abs(primary.blue - indigo.blue) < 0.25f &&
-        abs(primary.red - indigo.red) < 0.25f &&
-        abs(primary.green - indigo.green) < 0.25f
-    return if (closeToIndigo) {
-        if (dark) Color(0xFFFF9F0A) else Color(0xFFE67E00)
-    } else {
-        indigo
-    }
+    // 息屏记录统一使用紫色（与深色模式同色），不再在主色偏紫时切换为琥珀橙：
+    // 图标底色是 15% alpha 叠加在卡片上，浅色模式保持紫调、深色模式也不会出现浅色背景。
+    return Color(0xFF7D7AFF)
 }
 
 @Composable
@@ -554,9 +610,10 @@ private fun statsWarningTextColor(): Color = if (isInDarkTheme()) Color(0xFFFF9F
 // ============================================================================================
 
 private enum class RankMode(val label: String) {
-    WAKE("唤醒最多"),
-    FROZEN("墓碑最久"),
+    WAKE("后台唤醒"),
+    FROZEN("冻结时间"),
     INTERCEPT("拦截最多"),
+    SYSTEM_RECORDS("系统记录"),
 }
 
 /**
@@ -574,7 +631,7 @@ fun TombStatsScreenMiuix(
     statsEnabled: Boolean = true,
     bottomInnerPadding: Dp,
     onEnableStats: (() -> Unit)? = null,
-    onOpenAppProfile: (packageName: String, appName: String) -> Unit,
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -589,6 +646,9 @@ fun TombStatsScreenMiuix(
     var rankModeIndex by rememberSaveable { mutableIntStateOf(0) }
     var useSample by rememberSaveable { mutableStateOf(false) }
     var state by remember { mutableStateOf<StatsLoadState>(StatsLoadState.Loading) }
+    var lastGoodSnapshot by remember { mutableStateOf<FreezeStatsSnapshot?>(null) }
+    var refreshFailed by remember { mutableStateOf(false) }
+    val refreshGate = remember { StatsRefreshGate() }
     var refreshTick by remember { mutableIntStateOf(0) }
     var isRefreshing by remember { mutableStateOf(false) }
     val pullToRefreshState = rememberPullToRefreshState()
@@ -597,42 +657,81 @@ fun TombStatsScreenMiuix(
     var showTopPopup by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     var showMethodologyDialog by remember { mutableStateOf(false) }
-    var detailApp by remember { mutableStateOf<AppFreezeStats?>(null) }
+    var detailSelection by remember { mutableStateOf<StatsDetailSelection?>(null) }
+    val queryScope = StatsQueryScope(window, useSample)
 
     suspend fun loadOnce(): StatsLoadState {
-        return if (useSample) {
-            FreezeStatsRepository.loadSample(context, window)
-        } else {
-            FreezeStatsRepository.load(context, window, serviceAlive, statsEnabled)
+        return try {
+            if (useSample) {
+                FreezeStatsRepository.loadSample(context, window)
+            } else {
+                FreezeStatsRepository.load(context, window, serviceAlive, statsEnabled)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            StatsLoadState.BackendUnsupported
         }
     }
 
     fun triggerManualRefresh() {
         if (isRefreshing) return
-        scope.launch {
-            isRefreshing = true
-            try {
-                state = loadOnce()
-                delay(220)
-            } finally {
-                isRefreshing = false
-            }
-        }
+        isRefreshing = true
+        refreshTick++
+    }
+
+    DisposableEffect(isActive, window, useSample, serviceAlive, statsEnabled, refreshTick) {
+        onDispose { refreshGate.invalidate() }
     }
 
     // 仅在可见 + 前台时拉取；切换时间窗/开关或手动触发立即重拉；就绪后每 10 秒自动刷新
     LaunchedEffect(isActive, window, useSample, serviceAlive, statsEnabled, refreshTick) {
-        if (!isActive) return@LaunchedEffect
-        while (true) {
-            var next = loadOnce()
-            // 刚在设置或当前页开启统计时，system_server 有 200ms 重载防抖，首刷命中 Disabled 时补一次轻量重查
-            if (!useSample && statsEnabled && next is StatsLoadState.Disabled) {
-                delay(300)
-                next = loadOnce()
+        if (!isActive) {
+            isRefreshing = false
+            return@LaunchedEffect
+        }
+        val ticket = refreshGate.begin(queryScope)
+        val cached = lastGoodSnapshot?.takeIf { it.window == window && it.isSample == useSample }
+        if (cached == null) {
+            state = StatsLoadState.Loading
+            refreshFailed = false
+        } else {
+            state = StatsLoadState.Ready(cached)
+        }
+        try {
+            while (true) {
+                var next = try {
+                    loadOnce()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    StatsLoadState.BackendUnsupported
+                }
+                if (!useSample && statsEnabled && next is StatsLoadState.Disabled) {
+                    delay(300)
+                    next = loadOnce()
+                }
+                if (!refreshGate.accepts(ticket, queryScope)) return@LaunchedEffect
+                if (next is StatsLoadState.Ready) {
+                    lastGoodSnapshot = next.snapshot
+                    state = next
+                    refreshFailed = false
+                } else {
+                    val previous = lastGoodSnapshot?.takeIf { it.window == window && it.isSample == useSample }
+                    if (statsEnabled && next !is StatsLoadState.Disabled && previous != null) {
+                        state = StatsLoadState.Ready(previous)
+                        refreshFailed = true
+                    } else {
+                        state = next
+                        refreshFailed = false
+                    }
+                }
+                isRefreshing = false
+                if (useSample || next !is StatsLoadState.Ready) break
+                delay(10_000)
             }
-            state = next
-            if (useSample || next !is StatsLoadState.Ready) break
-            delay(10_000)
+        } finally {
+            if (refreshGate.accepts(ticket, queryScope)) isRefreshing = false
         }
     }
 
@@ -654,7 +753,14 @@ fun TombStatsScreenMiuix(
                             Toast.LENGTH_SHORT,
                         ).show()
                     }
-                    if (ok) refreshTick++
+                    if (ok) {
+                        lastGoodSnapshot = null
+                        state = StatsLoadState.Loading
+                        detailSelection = null
+                        refreshFailed = false
+                        refreshGate.invalidate()
+                        refreshTick++
+                    }
                 }
             },
             onDismiss = { showResetDialog = false },
@@ -775,15 +881,18 @@ fun TombStatsScreenMiuix(
                         )
                     }
 
-                    when (val s = state) {
+                    when (val s = state.takeUnless {
+                        it is StatsLoadState.Ready &&
+                            (it.snapshot.window != window || it.snapshot.isSample != useSample)
+                    } ?: StatsLoadState.Loading) {
                         StatsLoadState.Loading -> item(key = "state_loading") {
-                            LoadingStateCard()
+                            LoadingStateCard(active = isActive)
                         }
 
                         StatsLoadState.ServiceUnavailable -> item(key = "state_service_unavailable") {
                             StatsStateCard(
-                                title = "XMillet 系统服务未连接",
-                                summary = "墓碑统计在 system_server 内实时采集。请在 LSPosed 中勾选「系统框架」与「电量与性能」并重启系统。",
+                                title = "统计服务未连接",
+                                summary = "暂时读不到统计。请检查模块是否正常运行，再点重新检测。",
                                 primaryLabel = "重新检测",
                                 onPrimaryClick = { triggerManualRefresh() },
                                 secondaryLabel = if (BuildConfig.DEBUG) "预览示例数据" else null,
@@ -793,8 +902,8 @@ fun TombStatsScreenMiuix(
 
                         StatsLoadState.BackendUnsupported -> item(key = "state_backend_unsupported") {
                             StatsStateCard(
-                                title = "当前模块版本暂不支持统计",
-                                summary = "墓碑统计需要系统框架侧采集支持。请更新 XMillet 模块并软重启系统框架后使用。",
+                                title = "暂时读不到统计",
+                                summary = "系统没有返回统计数据，可以稍后重试。",
                                 primaryLabel = "重新检测",
                                 onPrimaryClick = { triggerManualRefresh() },
                                 secondaryLabel = if (BuildConfig.DEBUG) "预览示例数据" else null,
@@ -805,7 +914,7 @@ fun TombStatsScreenMiuix(
                         StatsLoadState.Disabled -> item(key = "state_disabled") {
                             StatsStateCard(
                                 title = "墓碑统计采集已关闭",
-                                summary = "开启后将在系统框架内统计冻结、唤醒与拦截事件，仅保留定长内存计数，零文件 IO 开销。",
+                                summary = "开启后记录应用冻结、唤醒和拦截情况。统计会定期保存，方便下次继续查看。",
                                 primaryLabel = if (onEnableStats != null) "立即启用统计" else null,
                                 onPrimaryClick = {
                                     scope.launch {
@@ -821,6 +930,16 @@ fun TombStatsScreenMiuix(
 
                         is StatsLoadState.Ready -> {
                             val snap = s.snapshot
+                            if (refreshFailed) {
+                                item(key = "refresh_failed") {
+                                    StatsStateCard(
+                                        title = "更新失败，保留上次数据",
+                                        summary = "上次更新于 ${formatClock(snap.generatedAtMillis)}，当前内容还没有更新。",
+                                        primaryLabel = "重试",
+                                        onPrimaryClick = { triggerManualRefresh() },
+                                    )
+                                }
+                            }
                             if (snap.isSample) {
                                 item(key = "sample_banner") {
                                     SampleBanner(onExit = { useSample = false })
@@ -830,7 +949,7 @@ fun TombStatsScreenMiuix(
                                 item(key = "state_empty") {
                                     StatsStateCard(
                                         title = "暂无统计数据",
-                                        summary = "统计自 ${formatDateTime(snap.sinceMillis)} 开始。应用进入后台被冻结后，这里会逐步出现数据。",
+                                        summary = "统计从 ${formatDateTime(snap.sinceMillis)} 开始，收到有效记录后会显示在这里。",
                                         primaryLabel = "刷新数据",
                                         onPrimaryClick = { triggerManualRefresh() },
                                     )
@@ -844,10 +963,11 @@ fun TombStatsScreenMiuix(
                                         rankModeIndex = idx
                                         val rankItemIndex = 5 +
                                             (if (snap.isSample) 1 else 0) +
+                                            (if (refreshFailed) 1 else 0) + 2 +
                                             (if (snap.buckets.isNotEmpty()) 1 else 0)
                                         scope.launch { listState.animateScrollToItem(rankItemIndex) }
                                     },
-                                    onOpenDetail = { detailApp = it },
+                                    onOpenDetail = { detailSelection = StatsDetailSelection(it.uid, queryScope) },
                                 )
                             }
                         }
@@ -857,11 +977,18 @@ fun TombStatsScreenMiuix(
 
             // 注意：OverlayBottomSheet 与 OverlayDialog 必须留在 Scaffold 内容作用域内才能挂载至 MiuixPopupHost
             AppStatsDetailSheet(
-                app = detailApp,
-                onDismiss = { detailApp = null },
+                app = (state as? StatsLoadState.Ready)?.snapshot?.let { snapshot ->
+                    resolveStatsDetail(
+                        detailSelection, queryScope, StatsQueryScope(snapshot.window, snapshot.isSample),
+                        snapshot.apps, AppFreezeStats::uid,
+                    )
+                },
+                updatedAtMillis = (state as? StatsLoadState.Ready)?.snapshot?.generatedAtMillis,
+                refreshFailed = refreshFailed,
+                onDismiss = { detailSelection = null },
                 onOpenAppProfile = { app ->
-                    detailApp = null
-                    onOpenAppProfile(app.packageName, app.label)
+                    detailSelection = null
+                    onOpenAppProfile(app.packageName, app.uid)
                 },
             )
 
@@ -881,7 +1008,7 @@ private fun LazyListScope.statsContent(
     onTileRankClick: (Int) -> Unit,
     onOpenDetail: (AppFreezeStats) -> Unit,
 ) {
-    // 1. 2×2 概览（点按后台唤醒 / 拦截唤醒 / 累计墓碑快捷切换下方排行口径并滚动定位）
+    // 1. 2×2 概览（点按唤醒或拦截指标切换下方排行口径并滚动定位）
     item(key = "summary_grid") {
         Column(
             modifier = Modifier.padding(horizontal = 12.dp),
@@ -911,13 +1038,32 @@ private fun LazyListScope.statsContent(
                     accent = true,
                     onClick = { onTileRankClick(RankMode.INTERCEPT.ordinal) },
                 )
-                val (num, unit) = formatDurationParts(snap.frozenMillisTotal)
+                val backgroundWakeAppCount = snap.apps.asSequence()
+                    .filter { it.backgroundWakeCount > 0 }
+                    .map { it.uid }
+                    .distinct()
+                    .count()
                 StatTile(
-                    title = "累计墓碑",
-                    value = num,
-                    unit = unit,
+                    title = "后台唤醒应用数",
+                    value = formatCount(backgroundWakeAppCount),
+                    unit = "个",
                     modifier = Modifier.weight(1f),
-                    onClick = { onTileRankClick(RankMode.FROZEN.ordinal) },
+                    onClick = { onTileRankClick(RankMode.WAKE.ordinal) },
+                )
+            }
+        }
+    }
+
+    item(key = "native_records") {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            insideMargin = PaddingValues(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("系统记录", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colorScheme.onSurface)
+                Text(
+                    "冻结 ${formatCount(snap.freezeCount)} 次 · 解冻 ${formatCount(snap.totalWakeCount)} 次",
+                    fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary,
                 )
             }
         }
@@ -930,7 +1076,7 @@ private fun LazyListScope.statsContent(
 
     // 3. 唤醒原因
     item(key = "wake_reasons") {
-        SmallTitle(text = "唤醒原因")
+        SmallTitle(text = "系统解冻记录 · 原因")
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -945,7 +1091,7 @@ private fun LazyListScope.statsContent(
     if (snap.buckets.isNotEmpty()) {
         item(key = "time_distribution") {
             SmallTitle(
-                text = if (snap.window == StatsWindow.TODAY) "时段分布 · 每小时" else "时段分布 · 每天",
+                text = if (snap.window == StatsWindow.TODAY) "系统解冻记录 · 每小时" else "系统解冻记录 · 每天",
             )
             Card(
                 modifier = Modifier
@@ -1031,6 +1177,8 @@ private fun StatTile(
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = colorScheme.onSurfaceVariantSummary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
@@ -1084,16 +1232,16 @@ private fun ScreenOffBanner(snap: FreezeStatsSnapshot) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = "息屏唤醒 ${formatCount(count)} 次",
+                    text = "息屏时系统解冻记录 ${formatCount(count)} 次",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colorScheme.onSurface,
                 )
                 Text(
                     text = when {
-                        count == 0 -> "息屏期间保持深度静默，尚未发生后台唤醒"
-                        interval > 0 -> "息屏期间平均每 ${formatInterval(interval)} 唤醒一次，越少越省电"
-                        else -> "息屏期间的后台唤醒是耗电的主要来源"
+                        count == 0 -> "暂时没有记录，不代表所有应用一直冻结"
+                        interval > 0 -> "所有应用合计平均每 ${formatInterval(interval)} 一条记录，不是单个应用的唤醒间隔"
+                        else -> "这是系统记录，不能直接换算成消息条数或耗电量"
                     },
                     fontSize = 12.sp,
                     color = colorScheme.onSurfaceVariantSummary,
@@ -1120,13 +1268,13 @@ private fun WakeReasonSection(wake: Map<WakeCategory, Int>) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "总唤醒 ${formatCount(total)} 次",
+                    text = "解冻记录 ${formatCount(total)} 次",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = colorScheme.onSurfaceVariantSummary,
                 )
                 Text(
-                    text = "后台 ${formatCount(bgCount)} · 用户打开 ${formatCount(userCount)}",
+                    text = "后台 ${formatCount(bgCount)} · 前台活动 ${formatCount(userCount)}",
                     fontSize = 12.sp,
                     color = colorScheme.onSurfaceVariantSummary,
                 )
@@ -1178,7 +1326,7 @@ private fun WakeReasonSection(wake: Map<WakeCategory, Int>) {
             }
         }
         if (ordered.isEmpty()) {
-            Text("暂无唤醒记录", fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary)
+            Text("暂无系统解冻记录", fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary)
         }
     }
 }
@@ -1219,7 +1367,7 @@ private fun TimeDistributionSection(
                     )
                 } else {
                     Text(
-                        text = "本时段暂无唤醒波峰",
+                        text = "本时段暂无系统解冻高峰",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
                         color = colorScheme.onSurfaceVariantSummary,
@@ -1336,7 +1484,7 @@ private fun InterventionSection(snap: FreezeStatsSnapshot) {
 @Composable
 private fun MiniMetric(
     label: String,
-    value: Int,
+    value: Int?,
     modifier: Modifier = Modifier,
     containerColor: Color = colorScheme.surfaceContainerHighest,
 ) {
@@ -1347,7 +1495,7 @@ private fun MiniMetric(
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(label, fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
-        Text(formatCount(value), fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colorScheme.onSurface)
+        Text(value?.let(::formatCount) ?: "—", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colorScheme.onSurface)
     }
 }
 
@@ -1367,9 +1515,12 @@ private fun AppRankSection(
 
     val baseSorted = remember(apps, mode) {
         when (mode) {
-            RankMode.WAKE -> apps.filter { it.backgroundWakeCount > 0 }.sortedByDescending { it.backgroundWakeCount }
+            RankMode.WAKE -> apps.filter { it.backgroundWakeCount > 0 }
+                .sortedByDescending { it.backgroundWakeCount }
             RankMode.FROZEN -> apps.filter { it.frozenMillis > 0 }.sortedByDescending { it.frozenMillis }
             RankMode.INTERCEPT -> apps.filter { it.interceptCount > 0 }.sortedByDescending { it.interceptCount }
+            RankMode.SYSTEM_RECORDS -> apps.filter { it.freezeCount > 0 || it.wakeByCategory.values.any { count -> count > 0 } }
+                .sortedByDescending { it.freezeCount.toLong() + it.wakeByCategory.values.sumOf { count -> count.toLong() } }
         }
     }
     val sorted = remember(baseSorted, hideSystemApps) {
@@ -1437,7 +1588,7 @@ private fun AppRankSection(
                             .padding(horizontal = 12.dp, vertical = 7.dp),
                     ) {
                         Text(
-                            text = "仅三方",
+                            text = "隐藏系统应用",
                             fontSize = 13.sp,
                             fontWeight = if (hideSystemApps) FontWeight.SemiBold else FontWeight.Medium,
                             color = if (hideSystemApps) {
@@ -1541,6 +1692,7 @@ private fun rankValue(app: AppFreezeStats, mode: RankMode): Float = when (mode) 
     RankMode.WAKE -> app.backgroundWakeCount.toFloat()
     RankMode.FROZEN -> app.frozenMillis.toFloat()
     RankMode.INTERCEPT -> app.interceptCount.toFloat()
+    RankMode.SYSTEM_RECORDS -> app.freezeCount.toFloat() + app.wakeByCategory.values.sumOf { it.toDouble() }.toFloat()
 }
 
 @Composable
@@ -1566,8 +1718,9 @@ private fun RankRow(
             color = if (rank <= 3) colorScheme.primary else colorScheme.onSurfaceVariantSummary,
             modifier = Modifier.width(22.dp),
         )
-        AppIconImage(
+        StatsAppIcon(
             applicationInfo = app.applicationInfo,
+            members = app.members,
             label = app.label,
             modifier = Modifier
                 .padding(end = 12.dp)
@@ -1589,6 +1742,7 @@ private fun RankRow(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
+                    if (app.members.size > 1) SharedUidTag()
                     if (app.isDualApp) {
                         StatusTagMiuix(
                             label = "双开",
@@ -1613,6 +1767,7 @@ private fun RankRow(
                         RankMode.WAKE -> "${formatCount(app.backgroundWakeCount)} 次"
                         RankMode.FROZEN -> formatDuration(app.frozenMillis)
                         RankMode.INTERCEPT -> "${formatCount(app.interceptCount)} 次"
+                        RankMode.SYSTEM_RECORDS -> "冻结 ${formatCount(app.freezeCount)} · 解冻 ${formatCount(app.wakeByCategory.values.sum())}"
                     },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
@@ -1638,7 +1793,7 @@ private fun RankRow(
             if (mode == RankMode.FROZEN && app.observedMillis > 0) {
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    text = "冻结率 ${"%.0f".format(Locale.ROOT, app.frozenRatio * 100)}%",
+                    text = "记账冻结占比 ${"%.0f".format(Locale.ROOT, app.frozenRatio * 100)}%",
                     fontSize = 11.sp,
                     color = colorScheme.onSurfaceVariantSummary,
                 )
@@ -1648,55 +1803,39 @@ private fun RankRow(
 }
 
 @Composable
+private fun SharedUidTag() {
+    StatusTagMiuix(
+        label = "共用统计",
+        contentColor = colorScheme.primary,
+        backgroundColor = colorScheme.primary.copy(alpha = 0.12f),
+        fontSize = 10.sp,
+        paddingValues = PaddingValues(horizontal = 5.dp, vertical = 1.dp),
+    )
+}
+
+@Composable
 private fun RecentEventsSection(
     events: List<StatsRecentEvent>,
     apps: List<AppFreezeStats>,
     onOpenDetail: (AppFreezeStats) -> Unit,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+    val visibleEvents = remember(events) { events.sortedByDescending { it.timeMillis }.take(15) }
     val appsByUid = remember(apps) { apps.associateBy { it.uid } }
     Column(Modifier.fillMaxWidth()) {
-        Row(
+        SmallTitle(text = "最近系统记录 (${visibleEvents.size})")
+        Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .padding(horizontal = 12.dp)
+                .padding(top = 6.dp),
+            insideMargin = PaddingValues(vertical = 6.dp),
         ) {
-            Text(
-                text = "最近动态 (${events.size})",
-                style = MiuixTheme.textStyles.subtitle,
-                color = colorScheme.onBackgroundVariant,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                imageVector = if (expanded) MiuixIcons.ExpandLess else MiuixIcons.ExpandMore,
-                contentDescription = if (expanded) "收起最近动态" else "展开最近动态",
-                tint = colorScheme.onBackgroundVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        AnimatedVisibility(
-            visible = expanded,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(top = 6.dp),
-                insideMargin = PaddingValues(vertical = 6.dp),
-            ) {
-                events.take(50).forEach { e ->
-                    val matchedApp = appsByUid[e.uid]
-                    RecentEventRow(
-                        e = e,
-                        onClick = matchedApp?.let { app -> { onOpenDetail(app) } },
-                    )
-                }
+            visibleEvents.forEach { e ->
+                val matchedApp = appsByUid[e.uid]
+                RecentEventRow(
+                    e = e,
+                    onClick = matchedApp?.let { app -> { onOpenDetail(app) } },
+                )
             }
         }
     }
@@ -1708,8 +1847,8 @@ private fun RecentEventRow(
     onClick: (() -> Unit)? = null,
 ) {
     val (tagText, tagColor) = when (e.kind) {
-        StatsEventKind.FREEZE -> "冻结" to colorScheme.primary
-        StatsEventKind.THAW -> (e.category?.label ?: "唤醒") to (e.category?.displayColor() ?: colorScheme.onSurfaceVariantSummary)
+        StatsEventKind.FREEZE -> "冻结记录" to colorScheme.primary
+        StatsEventKind.THAW -> (e.category?.label ?: "解冻记录") to (e.category?.displayColor() ?: colorScheme.onSurfaceVariantSummary)
         StatsEventKind.INTERCEPT -> "已拦截" to statsSuccessColor()
         StatsEventKind.PROTECT -> "保护免冻" to statsProtectColor()
         StatsEventKind.KILL_BLOCKED -> "阻止查杀" to colorScheme.error
@@ -1721,8 +1860,9 @@ private fun RecentEventRow(
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AppIconImage(
+        StatsAppIcon(
             applicationInfo = e.applicationInfo,
+            members = e.members,
             label = e.label,
             modifier = Modifier
                 .padding(end = 10.dp)
@@ -1742,6 +1882,7 @@ private fun RecentEventRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+                if (e.members.size > 1) SharedUidTag()
                 if (e.isDualApp) {
                     StatusTagMiuix(
                         label = "双开",
@@ -1766,6 +1907,7 @@ private fun RecentEventRow(
         }
         Spacer(Modifier.width(8.dp))
         val detail = buildString {
+            append(originLabel(e.origin)).append(" · ")
             append(tagText)
             if (e.kind == StatsEventKind.INTERCEPT && e.rule != null) append(" · ").append(e.rule.label)
         }
@@ -1792,8 +1934,10 @@ private fun StatsFooter(snap: FreezeStatsSnapshot) {
             color = colorScheme.onSurfaceVariantSummary,
         )
         Text(
-            text = "口径：次数取自系统冻结服务 (Greeze) 的冻结/解冻入口；累计墓碑为各应用冻结时长的累加总和，可能大于开机时长。" +
-                "应用当前是否处于冻结状态，以「进程列表」页的内核状态为准。",
+            text = "冻结与唤醒次数取自系统冻解入口，按应用汇总；全量原始记录见下方「系统记录」。" +
+                "冻结时长是多个应用加在一起的时间，可能超过开机时长。" +
+                "共用统计的应用按一个计算，不重复累加成员。" +
+                "想看应用现在是否冻结，请看「进程列表」。",
             fontSize = 12.sp,
             lineHeight = 17.sp,
             color = colorScheme.onSurfaceVariantSummary,
@@ -1805,7 +1949,7 @@ private fun StatsFooter(snap: FreezeStatsSnapshot) {
 }
 
 @Composable
-private fun LoadingStateCard() {
+private fun LoadingStateCard(active: Boolean) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1816,17 +1960,19 @@ private fun LoadingStateCard() {
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            InfiniteProgressIndicator(color = colorScheme.primary)
-            Spacer(Modifier.width(12.dp))
+            if (active) {
+                InfiniteProgressIndicator(color = colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+            }
             Column {
                 Text(
-                    text = "正在读取墓碑统计…",
+                    text = if (active) "正在读取墓碑统计…" else "统计将在进入本页时加载",
                     style = MiuixTheme.textStyles.headline1,
                     fontWeight = FontWeight.Medium,
                     color = colorScheme.onSurface,
                 )
                 Text(
-                    text = "数据来自 system_server 内的聚合计数",
+                    text = if (active) "正在向系统读取应用次数和系统记录" else "离开本页后停止刷新，避免后台空转",
                     style = MiuixTheme.textStyles.body2,
                     color = colorScheme.onSurfaceVariantSummary,
                 )
@@ -1922,7 +2068,7 @@ private fun MethodologyDialog(
 ) {
     OverlayDialog(
         show = show,
-        title = "统计口径说明",
+        title = "这些数字怎么看",
         onDismissRequest = onDismiss,
     ) {
         val dismissState = LocalDismissState.current
@@ -1931,25 +2077,25 @@ private fun MethodologyDialog(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "• 冻结与唤醒来源：统计挂钩系统冻结服务 (Greeze) 的冻结/解冻入口，事件计数全部保存在 system_server 内存定长结构中。",
+                text = "• 应用次数：按应用（UID）汇总系统冻结与解冻入口的次数；同一应用短时间内多次冻解会累加，不等于消息条数。",
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,
             )
             Text(
-                text = "• 后台唤醒口径：网络推送、Binder 通信、广播/通知、亮屏与充电归为「后台唤醒」；用户主动打开应用单独计入「用户打开」。",
+                text = "• 系统记录：系统侧冻结与解冻入口的全量次数，含重复与旧版本数据，仅供参考。",
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,
             )
             Text(
-                text = "• 息屏唤醒与累计墓碑：息屏唤醒记录灭屏期间的非用户唤醒；累计墓碑为各应用冻结时长的累加总和，因多个应用同时处于冻结状态，累计值可能大于单次开机时长。",
+                text = "• 原因与来源：网络活动不等于新消息，前台活动不等于点击。已知模块操作另列；系统记录标签只说明记录来路，不代表已查明谁触发。",
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,
             )
             Text(
-                text = "• 实时冻结状态：判断某应用此刻是否处于 cgroup 冻结，请以「进程列表」页的内核实时状态为准。",
+                text = "• 冻结时间：这是系统记账时间，多个应用加在一起，可能超过开机时长。想看应用现在是否冻结，请看「进程列表」，不要只看次数。",
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,
@@ -1971,6 +2117,8 @@ private fun MethodologyDialog(
 @Composable
 private fun AppStatsDetailSheet(
     app: AppFreezeStats?,
+    updatedAtMillis: Long?,
+    refreshFailed: Boolean,
     onDismiss: () -> Unit,
     onOpenAppProfile: (AppFreezeStats) -> Unit,
 ) {
@@ -1984,22 +2132,38 @@ private fun AppStatsDetailSheet(
 
     OverlayBottomSheet(
         show = app != null,
-        title = a.label,
         backgroundColor = colorScheme.surface,
         insideMargin = DpSize(16.dp, 0.dp),
         endAction = {
             val dismissState = LocalDismissState.current
-            IconButton(
-                onClick = {
-                    onDismiss()
-                    dismissState?.invoke()
-                },
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = MiuixIcons.Close,
-                    contentDescription = "关闭",
-                    tint = colorScheme.onBackground,
+                Spacer(Modifier.width(48.dp))
+                Text(
+                    text = a.label,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    fontSize = MiuixTheme.textStyles.title4.fontSize,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    color = colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                IconButton(
+                    onClick = {
+                        onDismiss()
+                        dismissState?.invoke()
+                    },
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        imageVector = MiuixIcons.Close,
+                        contentDescription = "关闭",
+                        tint = colorScheme.onBackground,
+                    )
+                }
             }
         },
         onDismissRequest = onDismiss,
@@ -2017,8 +2181,9 @@ private fun AppStatsDetailSheet(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    AppIconImage(
+                    StatsAppIcon(
                         applicationInfo = a.applicationInfo,
+                        members = a.members,
                         label = a.label,
                         modifier = Modifier
                             .padding(end = 12.dp)
@@ -2026,7 +2191,9 @@ private fun AppStatsDetailSheet(
                     )
                     Column(Modifier.weight(1f)) {
                         Text(
-                            text = a.packageName.ifBlank { "包名未解析" },
+                            text = if (a.members.size > 1) "共享 UID · ${a.members.size} 个成员" else {
+                                a.packageName.ifBlank { "包名未解析" }
+                            },
                             fontSize = 13.sp,
                             color = colorScheme.onSurfaceVariantSummary,
                             maxLines = 1,
@@ -2041,6 +2208,7 @@ private fun AppStatsDetailSheet(
                                 fontSize = 12.sp,
                                 color = colorScheme.onSurfaceVariantSummary,
                             )
+                            if (a.members.size > 1) SharedUidTag()
                             if (a.isDualApp) {
                                 StatusTagMiuix(
                                     label = "双开",
@@ -2062,9 +2230,31 @@ private fun AppStatsDetailSheet(
                     }
                 }
 
+                if (a.members.size > 1) {
+                    Card(modifier = Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("这些应用共用统计，不重复计算", fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary)
+                            a.members.forEach { member ->
+                                Column {
+                                    Text(member.label, fontSize = 14.sp, color = colorScheme.onSurface)
+                                    Text(member.packageName, fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                updatedAtMillis?.let {
+                    Text(
+                        text = if (refreshFailed) "更新失败，仍显示 ${formatClock(it)} 的数据" else "更新于 ${formatClock(it)}",
+                        fontSize = 12.sp,
+                        color = if (refreshFailed) statsWarningTextColor() else colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MiniMetric("冻结", a.freezeCount, Modifier.weight(1f), containerColor = colorScheme.surfaceContainer)
-                    MiniMetric("后台唤醒", a.backgroundWakeCount, Modifier.weight(1f), containerColor = colorScheme.surfaceContainer)
+                    MiniMetric("应用冻结", a.freezeCount, Modifier.weight(1f), containerColor = colorScheme.surfaceContainer)
+                    MiniMetric("应用唤醒", a.backgroundWakeCount, Modifier.weight(1f), containerColor = colorScheme.surfaceContainer)
                     MiniMetric("拦截", a.interceptCount, Modifier.weight(1f), containerColor = colorScheme.surfaceContainer)
                 }
 
@@ -2073,8 +2263,22 @@ private fun AppStatsDetailSheet(
                     insideMargin = PaddingValues(16.dp),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("系统记录", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colorScheme.onSurface)
+                        Text(
+                            "冻结 ${formatCount(a.freezeCount)} 次 · 解冻 ${formatCount(a.wakeByCategory.values.sum())} 次",
+                            fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary,
+                        )
+                        Text("解冻次数含前台活动；应用唤醒只统计后台唤醒。", fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
+                    }
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    insideMargin = PaddingValues(16.dp),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(Modifier.fillMaxWidth()) {
-                            Text("墓碑时长", fontSize = 14.sp, color = colorScheme.onSurface, modifier = Modifier.weight(1f))
+                            Text("系统记账冻结时长", fontSize = 14.sp, color = colorScheme.onSurface, modifier = Modifier.weight(1f))
                             Text(
                                 text = formatDuration(a.frozenMillis),
                                 fontSize = 14.sp,
@@ -2085,13 +2289,13 @@ private fun AppStatsDetailSheet(
                         if (a.observedMillis > 0) {
                             ProgressLine(fraction = a.frozenRatio, color = colorScheme.primary)
                             Text(
-                                text = "冻结率 ${"%.0f".format(Locale.ROOT, a.frozenRatio * 100)}% · 用户打开 ${formatCount(a.userOpenCount)} 次",
+                                text = "记账冻结占比 ${"%.0f".format(Locale.ROOT, a.frozenRatio * 100)}% · 前台活动记录 ${formatCount(a.userOpenCount)} 次",
                                 fontSize = 12.sp,
                                 color = colorScheme.onSurfaceVariantSummary,
                             )
                         } else if (a.userOpenCount > 0) {
                             Text(
-                                text = "用户打开 ${formatCount(a.userOpenCount)} 次",
+                                text = "前台活动记录 ${formatCount(a.userOpenCount)} 次，不代表点击次数",
                                 fontSize = 12.sp,
                                 color = colorScheme.onSurfaceVariantSummary,
                             )
@@ -2110,7 +2314,10 @@ private fun AppStatsDetailSheet(
                     modifier = Modifier.fillMaxWidth(),
                     insideMargin = PaddingValues(16.dp),
                 ) {
-                    WakeReasonSection(a.wakeByCategory)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("系统解冻记录 · 原因", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colorScheme.onSurface)
+                        WakeReasonSection(a.wakeByCategory)
+                    }
                 }
 
                 val rules = a.interceptByRule.entries.filter { it.value > 0 }.sortedByDescending { it.value }
@@ -2128,7 +2335,7 @@ private fun AppStatsDetailSheet(
                             }
                             if (a.topRawReasons.isNotEmpty()) {
                                 Text(
-                                    text = "原始解冻原因 Top",
+                                    text = "系统记录最多的原因",
                                     fontSize = 12.sp,
                                     color = colorScheme.onSurfaceVariantSummary,
                                     modifier = Modifier.padding(top = if (rules.isNotEmpty()) 6.dp else 0.dp),
@@ -2136,7 +2343,7 @@ private fun AppStatsDetailSheet(
                                 a.topRawReasons.forEach { (reason, n) ->
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = reason,
+                                            text = formatRawThawReason(reason),
                                             fontSize = 12.sp,
                                             fontFamily = FontFamily.Monospace,
                                             color = colorScheme.onSurface,
@@ -2169,7 +2376,11 @@ private fun AppStatsDetailSheet(
                 colors = ButtonDefaults.buttonColorsPrimary(),
             ) {
                 Text(
-                    text = if (canOpenProfile) "前往应用策略" else "暂无应用包名 (UID ${a.uid})",
+                    text = when {
+                        a.members.size > 1 -> "多个应用共用统计，请分别设置策略"
+                        canOpenProfile -> "前往应用策略"
+                        else -> "暂无应用包名 (UID ${a.uid})"
+                    },
                     style = MiuixTheme.textStyles.button,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -2312,6 +2523,43 @@ private fun StackedBarChart(
 // ============================================================================================
 // 8. 格式化
 // ============================================================================================
+
+private fun formatRawThawReason(reason: String): String {
+    if (reason.isBlank() || '（' in reason || '(' in reason) return reason
+    val name = reason.trim().lowercase(Locale.ROOT)
+    val label = when (name) {
+        "packet" -> "网络数据"
+        "check binder" -> "Binder检查"
+        "sync binder", "sync binder4" -> "同步Binder"
+        "net change" -> "网络变化"
+        "network connect" -> "网络连接"
+        "signal iso" -> "隔离信号"
+        "signal other" -> "其他信号"
+        "broadcast" -> "广播"
+        "notifi" -> "通知"
+        "pendingnotify" -> "待处理通知"
+        "activity front", "tofront", "tofrontactivity", "movetofront", "notifymovetofront" -> "活动前台"
+        "activity start", "activity start!" -> "活动启动"
+        "activity resume" -> "活动恢复"
+        "fg activity" -> "前台活动"
+        "ui bar" -> "界面栏"
+        "launch_mode" -> "启动模式"
+        "cmd: thuid" -> "UID解冻命令"
+        "mediabutton", "mediabuttoncmd" -> "媒体按键"
+        "receiver pkg" -> "广播接收器"
+        "alarm" -> "定时器"
+        "excute service" -> "服务执行"
+        "startservice" -> "服务启动"
+        "provider" -> "内容提供器"
+        "audiofocus" -> "音频焦点"
+        "bluetooth" -> "蓝牙"
+        "keycode" -> "按键代码"
+        "adj" -> "进程优先级"
+        "fromsystem", "from system" -> "系统来源"
+        else -> return reason
+    }
+    return "$reason（$label）"
+}
 
 private fun formatCount(n: Int): String = when {
     n >= 100_000 -> "%.1f万".format(Locale.ROOT, n / 10_000f)

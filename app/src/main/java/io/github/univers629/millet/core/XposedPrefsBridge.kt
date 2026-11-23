@@ -180,7 +180,7 @@ object XposedPrefsBridge {
             } else {
                 syncDiffInternal(ctx, targetKeys = setOf(key))
             }
-            if (changed) {
+            if (changed == SyncResult.CHANGED) {
                 notifySystemBinder(key ?: ALL_GROUPS_KEY)
             }
         }
@@ -195,25 +195,23 @@ object XposedPrefsBridge {
         val hookKeys = keys.filterTo(LinkedHashSet()) { it in PrefsKeys.ALL_KEYS }
         if (hookKeys.isEmpty()) return
         val ctx = appContext
-        if (ctx != null) {
-            syncDiffInternal(ctx, targetKeys = hookKeys)
+        if (ctx != null && syncDiffInternal(ctx, targetKeys = hookKeys) != SyncResult.FAILED) {
+            notifySystemBinder(notifyKey)
         }
-        notifySystemBinder(notifyKey)
     }
 
     /** 供 [PrefReader] 在批量导入 / 重置配置后调用：先增量对齐远程配置，再发一次整表通知。 */
     internal fun syncAndNotifyAll() {
         val ctx = appContext
-        if (ctx != null) {
-            syncDiffInternal(ctx, targetKeys = null)
+        if (ctx != null && syncDiffInternal(ctx, targetKeys = null) != SyncResult.FAILED) {
+            notifySystemBinder(ALL_GROUPS_KEY)
         }
-        notifySystemBinder(ALL_GROUPS_KEY)
     }
 
     /** 把本应用 `Settings` 里的 Hook 键按增量差异同步到框架。 */
     fun push(context: Context, forceNotify: Boolean = true) {
         val changed = syncDiffInternal(context, targetKeys = null)
-        if (changed || forceNotify) {
+        if (changed != SyncResult.FAILED && (changed == SyncResult.CHANGED || forceNotify)) {
             notifySystemBinder(ALL_GROUPS_KEY)
         }
     }
@@ -225,7 +223,9 @@ object XposedPrefsBridge {
             return
         }
         runCatching {
-            PowerKeeperBinderClient.notifyPrefChanged(notifyKey)
+            if (!PowerKeeperBinderClient.notifyPrefChanged(notifyKey)) {
+                Logger.warn("配置通知未被系统服务接收")
+            }
         }.onFailure { Logger.warn("通知 Hook 重读配置失败: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
@@ -372,16 +372,18 @@ object XposedPrefsBridge {
         }
     }
 
-    private fun syncDiffInternal(context: Context, targetKeys: Set<String>?): Boolean {
+    private enum class SyncResult { FAILED, UNCHANGED, CHANGED }
+
+    private fun syncDiffInternal(context: Context, targetKeys: Set<String>?): SyncResult {
         synchronized(syncLock) {
-            val service = boundService ?: return false
+            val service = boundService ?: return SyncResult.FAILED
             return runCatching {
                 if ((service.frameworkProperties and XposedService.PROP_CAP_REMOTE) == 0L) {
                     if (!remoteUnsupportedLogged) {
                         remoteUnsupportedLogged = true
                         Logger.alwaysWarn("当前 Xposed 框架未启用 PROP_CAP_REMOTE 远程配置能力，设置同步已跳过")
                     }
-                    return false
+                    return SyncResult.FAILED
                 }
                 val localAll = PrefReader.openUiPrefs(context).all
                 val remote = service.getRemotePreferences(GROUP)
@@ -393,7 +395,7 @@ object XposedPrefsBridge {
                 }
             }.getOrElse { t ->
                 Logger.warn("镜像设置到 LibXposed 失败: ${t.javaClass.simpleName}: ${t.message}")
-                false
+                SyncResult.FAILED
             }
         }
     }
@@ -402,11 +404,11 @@ object XposedPrefsBridge {
         service: XposedService,
         localAll: Map<String, Any?>,
         remote: SharedPreferences
-    ): Boolean {
+    ): SyncResult {
         val remoteAll = if (lastSyncedService === service) {
             lastSyncedValues
         } else {
-            runCatching { HashMap(remote.all) }.getOrElse { emptyMap() }
+            HashMap(remote.all)
         }
 
         val editor = remote.edit()
@@ -438,29 +440,30 @@ object XposedPrefsBridge {
         }
 
         if (mutations > 0) {
-            editor.apply()
+            if (!editor.commit()) return SyncResult.FAILED
             Logger.alwaysInfo("已增量同步 $mutations 项设置到 LibXposed 远程配置 (共 ${nextSynced.size} 项)")
         }
 
         lastSyncedValues.clear()
         lastSyncedValues.putAll(nextSynced)
         lastSyncedService = service
-        return mutations > 0
+        return if (mutations > 0) SyncResult.CHANGED else SyncResult.UNCHANGED
     }
 
     private fun syncIncrementalKeysLocked(
         localAll: Map<String, Any?>,
         remote: SharedPreferences,
         targetKeys: Set<String>
-    ): Boolean {
+    ): SyncResult {
         val editor = remote.edit()
+        val nextSynced = HashMap(lastSyncedValues)
         var mutations = 0
         for (key in targetKeys) {
             if (key !in PrefsKeys.ALL_KEYS) continue
             if (!localAll.containsKey(key)) {
                 if (lastSyncedValues.containsKey(key)) {
                     editor.remove(key)
-                    lastSyncedValues.remove(key)
+                    nextSynced.remove(key)
                     mutations++
                 }
                 continue
@@ -468,14 +471,16 @@ object XposedPrefsBridge {
             val desired = normalizeValue(localAll[key]) ?: continue
             if (!lastSyncedValues.containsKey(key) || lastSyncedValues[key] != desired) {
                 writeNormalizedValue(editor, key, desired)
-                lastSyncedValues[key] = desired
+                nextSynced[key] = desired
                 mutations++
             }
         }
         if (mutations > 0) {
-            editor.apply()
+            if (!editor.commit()) return SyncResult.FAILED
         }
-        return mutations > 0
+        lastSyncedValues.clear()
+        lastSyncedValues.putAll(nextSynced)
+        return if (mutations > 0) SyncResult.CHANGED else SyncResult.UNCHANGED
     }
 
     private fun normalizeValue(value: Any?): Any? = when (value) {

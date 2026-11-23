@@ -6,20 +6,26 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
 import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.ConditionalDozeLifecycle
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
 import io.github.univers629.millet.core.Logger
+import io.github.univers629.millet.core.ModernBridge
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.PrefsDefaults
+import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.VersionGate
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.util.ArrayList
 
 /**
  * 广播唤醒拦截（S9 / S10 按 SDK_INT 二选一）与 Doze 状态机接管（S11 / S12 / S13 / S14）及电量统计。
@@ -42,6 +48,14 @@ object BroadcastAndDozeHooks {
 
     private const val REASON_XMILLET_FORCE = "XMilletForce"
     private const val REASON_XMILLET_SKIP = "XMilletSkip"
+
+    /** DeviceIdleController 深度睡眠状态：5 = IDLE，6 = IDLE_MAINTENANCE */
+    private const val STATE_IDLE = 5
+    private const val STATE_IDLE_MAINTENANCE = 6
+
+    /** 熄屏后等待多久再接管 Doze（毫秒） */
+    private const val DOZE_SCHEDULE_DELAY_MS = 10_000L
+
     private const val SKIP_FROZEN_BROADCAST_REASON = "Skip frozen process by XMillet"
 
     /** DeviceIdleController$Shell 实例缓存（用于执行深度睡眠 shell 指令） */
@@ -49,9 +63,9 @@ object BroadcastAndDozeHooks {
     private var idleShellInstance: Any? = null
     private val idleShellLock = Any()
 
-    /** 当前是否已进入 Deep Doze（state == 5 IDLE 或 state == 6 IDLE_MAINTENANCE） */
-    @Volatile
-    private var isInDeepIdle: Boolean = false
+    private val dozeLifecycle = ConditionalDozeLifecycle()
+    private var deepDozeAlarmListener: AlarmManager.OnAlarmListener? = null
+    private var deepDozeAlarmToken: Long? = null
 
     private val receiverLifecycleLock = Any()
 
@@ -107,6 +121,11 @@ object BroadcastAndDozeHooks {
      */
     fun onHotReloading() {
         hotReloading = true
+        withDozeLock {
+            dozeLifecycle.stop()
+            cancelDeepDozeAlarmLocked()
+            releaseDeepDozeLocked("reload")
+        }
         val screenCtx: Context?
         val scrReceiver: BroadcastReceiver?
         val batCtx: Context?
@@ -134,7 +153,6 @@ object BroadcastAndDozeHooks {
             runCatching {
                 val am = ctx.getSystemService(AlarmManager::class.java)
                 am?.cancel(dualScreenOffFreezeListener)
-                am?.cancel(deepDozeAlarmListener)
             }
         }
         val thread: HandlerThread?
@@ -156,22 +174,6 @@ object BroadcastAndDozeHooks {
     private val dualScreenOffPostRunnable = Runnable {
         if (!SystemState.hasAurogonIsUidValid && PrefReader.systemPrefs.freezeDualApp) {
             ForceFreezeBridge.freezeDualAppsOnScreenOffAsync()
-        }
-    }
-
-    private val deepDozeAlarmListener = AlarmManager.OnAlarmListener {
-        synchronized(idleShellLock) {
-            val (enableCode, enableOut) = execIdleShellCommand("enable", "deep")
-            if (enableCode == 0) {
-                val (forceCode, forceOut) = execIdleShellCommand("force-idle", "deep")
-                if (forceCode == 0) {
-                    Logger.alwaysWarn("深度睡眠成功")
-                } else {
-                    Logger.debug("深度睡眠失败 $forceOut")
-                }
-            } else {
-                Logger.info("深度睡眠启用失败 $enableOut")
-            }
         }
     }
 
@@ -224,7 +226,7 @@ object BroadcastAndDozeHooks {
 
             val prefs = PrefReader.systemPrefs
             if (procState.isSystemApp ||
-                procState.packageName in prefs.whiteAppSet ||
+                AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, procState.packageName, procState.uid) ||
                 SystemState.greezeService == null ||
                 !SystemState.isUidFrozen(procState.uid)
             ) {
@@ -276,7 +278,9 @@ object BroadcastAndDozeHooks {
                 ?: return@HookSpec param.invokeOriginal()
 
             val prefs = PrefReader.systemPrefs
-            if (procState.isSystemApp || procState.packageName in prefs.whiteAppSet) {
+            if (procState.isSystemApp ||
+                AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, procState.packageName, procState.uid)
+            ) {
                 return@HookSpec param.invokeOriginal()
             }
 
@@ -383,7 +387,7 @@ object BroadcastAndDozeHooks {
      * S14（PA(12)）：DeviceIdleController#moveToStateLocked(int state, String reason)
      * 按 `enableDoze` 与 `skipStateCheck` 双向接管 Doze 状态机：
      * - before：当进入 `IDLE_PENDING(2)` 时直接改写目标状态为 `IDLE_MAINTENANCE(6)`，跳过前置传感检查。
-     * - after：进入 `IDLE(5)` 或 `IDLE_MAINTENANCE(6)` 时取消息屏延时 Alarm 并记录 `isInDeepIdle = true`。
+     * - after：进入 `IDLE(5)` 或 `IDLE_MAINTENANCE(6)` 时取消尚未执行的息屏延时 Alarm。
      */
     fun buildS14DeviceIdleMoveToStateHook(): HookSpec = HookSpec(
         id = "S14",
@@ -419,18 +423,10 @@ object BroadcastAndDozeHooks {
             val reason = (param.args.getOrNull(1) as? String) ?: ""
             val prefs = PrefReader.systemPrefs
 
-            if (prefs.enableDoze) {
-                if (state == 5 || state == 6) {
-                    val ctx = SystemState.systemContext
-                    if (ctx != null) {
-                        try {
-                            ctx.getSystemService(AlarmManager::class.java)?.cancel(deepDozeAlarmListener)
-                        } catch (_: Throwable) {
-                        }
-                    }
-                    isInDeepIdle = true
-                } else {
-                    isInDeepIdle = false
+            if (state == 5 || state == 6) {
+                withDozeLock {
+                    dozeLifecycle.cancelPendingForIdle()
+                    cancelDeepDozeAlarmLocked()
                 }
             }
 
@@ -453,24 +449,349 @@ object BroadcastAndDozeHooks {
 
     // ==================== 亮灭屏广播、DeepDoze Shell 与省电白名单同步 ====================
 
+    private fun <T> withDozeLock(block: () -> T): T {
+        val controller = SystemState.deviceIdleController
+        // Shell commands and S14 callbacks use the same controller -> shell lock order.
+        return if (controller != null) {
+            synchronized(controller) { synchronized(idleShellLock) { block() } }
+        } else {
+            synchronized(idleShellLock) { block() }
+        }
+    }
+
+    private fun controllerBoolean(field: String): Boolean? = runCatching {
+        XReflect.getObjectField(SystemState.deviceIdleController, field) as? Boolean
+    }.getOrNull()
+
+    private fun queryDozeEnabled(): Boolean {
+        if (!PrefReader.systemPrefs.enableDoze) return false
+        return runCatching {
+            val module = ModernBridge.xposedModule ?: return@runCatching false
+            val raw = module.getRemotePreferences(PrefsKeys.PREFS_FILE_NAME).all
+                ?: return@runCatching false
+            if (!raw.containsKey(PrefsKeys.ENABLE_DOZE)) PrefsDefaults.ENABLE_DOZE
+            else raw[PrefsKeys.ENABLE_DOZE] as? Boolean ?: false
+        }.getOrDefault(false)
+    }
+
+    private fun readDozeConditions(screenOnOverride: Boolean? = null, chargingOverride: Boolean? = null): ConditionalDozeLifecycle.Conditions {
+        val controller = SystemState.deviceIdleController
+        val ctx = SystemState.systemContext
+        val interactive = runCatching {
+            ctx?.getSystemService(PowerManager::class.java)?.isInteractive
+        }.getOrNull()
+        val plugged = runCatching {
+            val battery = ctx?.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                ?: return@runCatching null
+            if (!battery.hasExtra(BatteryManager.EXTRA_PLUGGED)) return@runCatching null
+            battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1).takeIf { it >= 0 }?.let { it != 0 }
+        }.getOrNull()
+        fun combine(first: Boolean?, second: Boolean?): Boolean? = when {
+            first == true || second == true -> true
+            first == false && second == false -> false
+            else -> null
+        }
+        val deepIdle = runCatching {
+            if (controller == null) return@runCatching null
+            XReflect.getIntField(controller, "mState").takeIf { it in 0..7 }?.let { it == 5 || it == 6 }
+        }.getOrNull()
+        return ConditionalDozeLifecycle.Conditions(
+            screenOn = screenOnOverride ?: combine(interactive, controllerBoolean("mScreenOn")),
+            charging = chargingOverride ?: combine(plugged, controllerBoolean("mCharging")),
+            enabled = queryDozeEnabled(),
+            ready = SystemState.isGreezeReady && controller != null && Thread.holdsLock(controller),
+            stopped = hotReloading,
+            forced = controllerBoolean("mForceIdle"),
+            deepIdle = deepIdle,
+        )
+    }
+
+    private fun cancelDeepDozeAlarmLocked() {
+        val listener = deepDozeAlarmListener
+        deepDozeAlarmListener = null
+        deepDozeAlarmToken = null
+        if (listener != null) {
+            runCatching {
+                val ctx = screenReceiverContext ?: SystemState.systemContext
+                ctx?.getSystemService(AlarmManager::class.java)?.cancel(listener)
+            }
+        }
+    }
+
+    private fun idleStateLocked(): Int? = runCatching {
+        val controller = SystemState.deviceIdleController ?: return@runCatching null
+        XReflect.getIntField(controller, "mState").takeIf { it in 0..7 }
+    }.getOrNull()
+
+    /**
+     * 强制进入深度睡眠。
+     *
+     * ROM 的 stepIdleStateLocked 在 `mNumBlockingConstraints != 0 && mForceIdle` 时会直接返回，
+     * 使 force-idle 的推进循环原地失败（Unable to go deep idle; stopped at ...）。此时先以无强制
+     * 身份 step 推进到 IDLE，再补一次 force-idle 只登记强制标记（该路径不推进状态机，不会被拦截）。
+     */
+    private fun enterDeepDozeLocked(): Boolean {
+        val (code, out) = execIdleShellCommand("force-idle", "deep")
+        if (code == 0) return true
+        Logger.alwaysWarn("深度睡眠失败 $out")
+        logIdleConstraintsLocked()
+        var state = idleStateLocked()
+        for (attempt in 1..4) {
+            if (state == null || state == STATE_IDLE) break
+            val (stepCode, stepOut) = execIdleShellCommand("step", "deep")
+            if (stepCode != 0) {
+                Logger.alwaysWarn("Doze 推进失败 $stepOut")
+                break
+            }
+            state = idleStateLocked()
+            Logger.alwaysWarn("Doze 推进 $attempt 次: state=$state")
+        }
+        if (state == STATE_IDLE) {
+            val (retryCode, retryOut) = execIdleShellCommand("force-idle", "deep")
+            if (retryCode == 0) {
+                Logger.alwaysWarn("深度睡眠成功")
+                return true
+            }
+            Logger.alwaysWarn("深度睡眠强制标记补登失败 $retryOut")
+        }
+        if (state == STATE_IDLE || state == STATE_IDLE_MAINTENANCE) return true
+        // 深睡被 ROM 状态机拒绝（典型是 10 分钟内有时钟闹钟）：退化为浅睡兜底，稍后由重试闹钟再升级。
+        val (lightCode, lightOut) = execIdleShellCommand("force-idle", "light")
+        if (lightCode == 0) {
+            Logger.alwaysWarn("浅度睡眠成功（深睡被系统拒绝）")
+            return true
+        }
+        Logger.alwaysWarn("浅度睡眠失败 $lightOut")
+        return false
+    }
+
+    /** 打印当前阻塞约束，便于定位 ROM 侧是谁拦住了 force-idle。 */
+    private fun logIdleConstraintsLocked() {
+        val controller = SystemState.deviceIdleController ?: return
+        runCatching {
+            val blocking = XReflect.getIntField(controller, "mNumBlockingConstraints")
+            val map = XReflect.getObjectField(controller, "mConstraints") as? Map<*, *>
+            val detail = map?.values?.mapNotNull { tracker ->
+                if (tracker == null) return@mapNotNull null
+                val name = runCatching { XReflect.getObjectField(tracker, "name") as? String }.getOrNull()
+                val active = runCatching { XReflect.getObjectField(tracker, "active") as? Boolean }.getOrNull()
+                val monitoring = runCatching { XReflect.getObjectField(tracker, "monitoring") as? Boolean }.getOrNull()
+                val minState = runCatching { XReflect.getIntField(tracker, "minState") }.getOrNull()
+                "$name(active=$active,monitoring=$monitoring,minState=$minState)"
+            }?.joinToString(" | ") ?: ""
+            Logger.alwaysWarn("Doze约束: blocking=$blocking total=${map?.size ?: -1} [$detail]")
+        }.onFailure { Logger.debug("Doze约束读取失败 ${it.javaClass.simpleName}") }
+    }
+
+    /** 清除强制标记；残留的 mForceIdle 会让控制器立刻重新进入 INACTIVE。 */
+    private fun clearForceIdleLocked(): Boolean {
+        if (controllerBoolean("mForceIdle") != true) return true
+        val (code, out) = execIdleShellCommand("unforce")
+        if (code != 0) Logger.debug("退出深度睡眠未确认 $out")
+        return code == 0
+    }
+
+    private fun exitDozeStateLocked(reason: String) {
+        val state = idleStateLocked() ?: return
+        if (state != STATE_IDLE && state != STATE_IDLE_MAINTENANCE) return
+        clearForceIdleLocked()
+        val controller = SystemState.deviceIdleController ?: return
+        runCatching {
+            XReflect.callMethod(controller, "becomeActiveLocked", reason, Process.myUid())
+            Logger.alwaysWarn("退出深度睡眠:$reason state=$state")
+        }.onFailure { Logger.alwaysWarn("退出深度睡眠失败:$reason ${it.javaClass.simpleName}") }
+    }
+
+    private fun releaseDeepDozeLocked(reason: String) {
+        dozeLifecycle.release({ controllerBoolean("mForceIdle") }) {
+            val cleared = clearForceIdleLocked()
+            if (cleared && controllerBoolean("mForceIdle") == false) {
+                Logger.alwaysWarn("退出深度睡眠")
+            }
+            cleared
+        }
+        // ROM 在 mScreenLocked && WAIT_FOR_UNLOCK 时不会因亮屏自行退出，这里显式结束 Doze。
+        exitDozeStateLocked(reason)
+    }
+
+    private fun cancelAndReleaseDoze(reason: String) = withDozeLock {
+        dozeLifecycle.cancel()
+        cancelDeepDozeAlarmLocked()
+        releaseDeepDozeLocked(reason)
+    }
+
+    /** Called after the current system preference snapshot has been published. */
+    fun onDozeConfigChanged() = withDozeLock {
+        dozeLifecycle.cancel()
+        cancelDeepDozeAlarmLocked()
+        if (!PrefReader.systemPrefs.enableDoze || hotReloading) releaseDeepDozeLocked("config")
+    }
+
+    private fun scheduleDeepDoze(handler: Handler, screenOnOverride: Boolean? = null, chargingOverride: Boolean? = null) = withDozeLock {
+        cancelDeepDozeAlarmLocked()
+        val conditions = readDozeConditions(screenOnOverride, chargingOverride)
+        Logger.alwaysWarn(
+            "Doze条件: idle=${conditions.permitsIdle} forcePermit=${conditions.permitsForce} " +
+                "screenOn=${conditions.screenOn} charging=${conditions.charging} enabled=${conditions.enabled} " +
+                "ready=${conditions.ready} forced=${conditions.forced} deepIdle=${conditions.deepIdle}"
+        )
+        if (!conditions.permitsIdle) releaseDeepDozeLocked("condition")
+        val token = dozeLifecycle.schedule(conditions) ?: return@withDozeLock
+        val listener = AlarmManager.OnAlarmListener { runDeepDozeAlarm(token) }
+        try {
+            val am = SystemState.systemContext?.getSystemService(AlarmManager::class.java)
+                ?: return@withDozeLock dozeLifecycle.cancel()
+            deepDozeAlarmListener = listener
+            deepDozeAlarmToken = token
+            val triggerAt = SystemClock.elapsedRealtime() + DOZE_SCHEDULE_DELAY_MS
+            val exact = runCatching {
+                am.setExact(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    "XMillet.Screen",
+                    listener,
+                    handler,
+                )
+                true
+            }.getOrDefault(false)
+            if (!exact) {
+                am.set(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    "XMillet.Screen",
+                    listener,
+                    handler,
+                )
+            }
+            Logger.alwaysWarn("已调度 DeepDoze 闹钟 token=$token exact=$exact")
+        } catch (_: Throwable) {
+            dozeLifecycle.cancel()
+            cancelDeepDozeAlarmLocked()
+        }
+    }
+
+    private fun runDeepDozeAlarm(token: Long) = withDozeLock {
+        Logger.alwaysWarn("DeepDoze 闹钟触发 token=$token")
+        if (deepDozeAlarmToken == token) {
+            deepDozeAlarmListener = null
+            deepDozeAlarmToken = null
+        }
+        val retained = dozeLifecycle.run(
+            token = token,
+            read = ::readDozeConditions,
+            enable = {
+                val (code, out) = execIdleShellCommand("enable", "deep")
+                if (code != 0) Logger.alwaysWarn("深度睡眠启用失败 $out")
+                code == 0
+            },
+            force = {
+                if (hotReloading || !PrefReader.systemPrefs.enableDoze) {
+                    false
+                } else {
+                    enterDeepDozeLocked()
+                }
+            },
+            unforce = {
+                val (code, out) = execIdleShellCommand("unforce")
+                if (code != 0) Logger.alwaysWarn("退出深度睡眠失败 $out")
+                code == 0
+            },
+        )
+        if (retained) {
+            val state = idleStateLocked()
+            val deepEntered = state == STATE_IDLE || state == STATE_IDLE_MAINTENANCE
+            if (deepEntered) {
+                Logger.alwaysWarn("深度睡眠成功")
+            } else {
+                Logger.alwaysWarn("浅睡兜底生效，下次熄屏时再尝试进入深睡")
+            }
+        }
+    }
+
     private fun initIdleShell(controller: Any) {
         try {
             val shellClass = XReflect.findClassIfExists(
                 CLASS_DEVICE_IDLE_SHELL,
                 controller.javaClass.classLoader
-            ) ?: return
-            idleShellInstance = XReflect.newInstance(shellClass, controller)
+            ) ?: XReflect.findClassIfExists(CLASS_DEVICE_IDLE_SHELL, null) ?: return
+            val constructors = shellClass.declaredConstructors
+            var created: Any? = null
+            for (constructor in constructors) {
+                val args = buildShellConstructorArgs(constructor.parameterTypes, controller) ?: continue
+                created = runCatching {
+                    constructor.isAccessible = true
+                    constructor.newInstance(*args)
+                }.getOrNull()
+                if (created != null) break
+            }
+            if (created == null) {
+                val detail = constructors.joinToString(" | ") { constructor ->
+                    "(" + constructor.parameterTypes.joinToString(",") { it.name } + ")"
+                }
+                throw NoSuchMethodException(
+                    "No matching constructor for ${shellClass.name} ctors=[$detail] " +
+                        "controller=${controller.javaClass.name}"
+                )
+            }
+            idleShellInstance = created
+            Logger.alwaysWarn("IDLE Shell 初始化成功: $CLASS_DEVICE_IDLE_SHELL")
         } catch (t: Throwable) {
             Logger.error("初始化Idle出错", t)
         }
     }
 
+    /**
+     * 按构造器参数类型装配 IDLE Shell：优先传入控制器实例，基本类型给默认值。
+     * Android 16 的部分 ROM 把 Shell 改成无参/静态构造，不能假设只有一个控制器参数。
+     */
+    private fun buildShellConstructorArgs(
+        parameterTypes: Array<Class<*>>,
+        controller: Any,
+    ): Array<Any?>? {
+        val args = arrayOfNulls<Any?>(parameterTypes.size)
+        for (index in parameterTypes.indices) {
+            val type = parameterTypes[index]
+            when {
+                type.isInstance(controller) -> args[index] = controller
+                !type.isPrimitive -> args[index] = outerInstance(controller, type) ?: return null
+                type == Int::class.javaPrimitiveType -> args[index] = 0
+                type == Boolean::class.javaPrimitiveType -> args[index] = false
+                type == Long::class.javaPrimitiveType -> args[index] = 0L
+                type == Float::class.javaPrimitiveType -> args[index] = 0f
+                type == Double::class.javaPrimitiveType -> args[index] = 0.0
+                type == Short::class.javaPrimitiveType -> args[index] = 0.toShort()
+                type == Byte::class.javaPrimitiveType -> args[index] = 0.toByte()
+                type == Char::class.javaPrimitiveType -> args[index] = '\u0000'
+                else -> return null
+            }
+        }
+        return args
+    }
+
+    /** 从内层实例（如 `DeviceIdleController$BinderService`）上找出参数类型对应的外层实例。 */
+    private fun outerInstance(owner: Any, type: Class<*>): Any? {
+        for (field in owner.javaClass.declaredFields) {
+            if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+            if (!type.isAssignableFrom(field.type)) continue
+            val value = runCatching {
+                field.isAccessible = true
+                field.get(owner)
+            }.getOrNull()
+            if (value != null) return value
+        }
+        return null
+    }
+
     private fun execIdleShellCommand(vararg args: String): Pair<Int, String> {
         val controller = SystemState.deviceIdleController ?: return -1 to "controller is null"
-        val shell = idleShellInstance ?: return -1 to "shell is null"
         val sw = StringWriter()
         val pw = PrintWriter(sw)
         synchronized(idleShellLock) {
+            // 热重载后旧 Shell 实例随旧类加载器失效，这里按需重建，避免 enable/force 静默失败
+            val shell = idleShellInstance ?: run {
+                initIdleShell(controller)
+                idleShellInstance
+            } ?: return -1 to "shell is null"
             return try {
                 XReflect.setObjectField(shell, "mOutPrintWriter", pw)
                 XReflect.setObjectField(shell, "mArgs", arrayOf(*args))
@@ -493,6 +814,8 @@ object BroadcastAndDozeHooks {
                 val filter = IntentFilter().apply {
                     addAction(Intent.ACTION_SCREEN_ON)
                     addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_POWER_CONNECTED)
+                    addAction(Intent.ACTION_POWER_DISCONNECTED)
                 }
                 val receiver = object : BroadcastReceiver() {
                     override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -511,7 +834,17 @@ object BroadcastAndDozeHooks {
     }
 
     private fun handleScreenBroadcast(action: String?) {
-        if (hotReloading || action == null || !SystemState.isGreezeReady) return
+        if (action == null) return
+        Logger.alwaysWarn("屏幕广播:$action hot=$hotReloading ready=${SystemState.isGreezeReady}")
+        when (action) {
+            Intent.ACTION_SCREEN_ON -> ForegroundState.setScreenState(true)
+            Intent.ACTION_SCREEN_OFF -> ForegroundState.setScreenState(false)
+        }
+        if (action == Intent.ACTION_SCREEN_ON || action == Intent.ACTION_POWER_CONNECTED) {
+            cancelAndReleaseDoze(if (action == Intent.ACTION_SCREEN_ON) "screen" else "charging")
+        }
+        if (hotReloading || !SystemState.isGreezeReady) return
+        if (action == Intent.ACTION_POWER_CONNECTED) return
         val prefs = PrefReader.systemPrefs
         val handler = ensureScreenHandler() ?: return
         when (action) {
@@ -551,19 +884,8 @@ object BroadcastAndDozeHooks {
                 } else if (prefs.batteryChangeObserve && prefs.logToLocal) {
                     Logger.battery(Logger.Level.WARN, "========[屏幕关闭]========")
                 }
-                if (!isInDeepIdle && prefs.enableDoze) {
-                    val ctx = SystemState.systemContext ?: return
-                    try {
-                        ctx.getSystemService(AlarmManager::class.java)?.set(
-                            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                            SystemClock.elapsedRealtime() + 10_000L,
-                            "XMillet.Screen",
-                            deepDozeAlarmListener,
-                            handler
-                        )
-                    } catch (_: Throwable) {
-                    }
-                }
+                // SCREEN_OFF 广播比 PowerManager 状态更新更早到达，这里显式按熄屏计算条件
+                scheduleDeepDoze(handler, screenOnOverride = false)
             }
 
             Intent.ACTION_SCREEN_ON -> {
@@ -574,35 +896,19 @@ object BroadcastAndDozeHooks {
                     } catch (_: Throwable) {
                     }
                 }
-                if (isInDeepIdle) {
-                    val ctx = SystemState.systemContext
-                    if (ctx != null) {
-                        try {
-                            ctx.getSystemService(AlarmManager::class.java)?.cancel(deepDozeAlarmListener)
-                        } catch (_: Throwable) {
-                        }
-                    }
-                    synchronized(idleShellLock) {
-                        val (code, _) = execIdleShellCommand("unforce")
-                        if (code == 0) {
-                            Logger.alwaysWarn("退出深度睡眠")
-                        }
-                    }
-                }
                 if (prefs.disableScreenOnThaw) {
                     val protectedPkgs = buildList {
                         ActiveImeTracker.resolveDefaultImePackage(SystemState.systemContext)?.let(::add)
                         addAll(ActiveImeTracker.resolveAccessibilityPackages(SystemState.systemContext))
                     }
                     for (svcPkg in protectedPkgs.distinct()) {
-                        if (svcPkg in prefs.blockThawSet ||
-                            svcPkg in prefs.ignoreNetworkWakeSet ||
-                            !ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, svcPkg, prefs)
+                        val svcUid = SystemState.getPackageUid(svcPkg)
+                        if (svcUid <= 0 ||
+                            !ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, svcPkg, prefs, svcUid)
                         ) {
                             continue
                         }
-                        val svcUid = SystemState.getPackageUid(svcPkg)
-                        if (svcUid > 0 && SystemState.isUidFrozen(svcUid)) {
+                        if (SystemState.isUidFrozen(svcUid)) {
                             handler.post {
                                 SystemState.greezeService?.let { greeze ->
                                     runCatching { XReflect.callMethod(greeze, "thawUid", svcUid, 1000, "screen on") }
@@ -617,6 +923,11 @@ object BroadcastAndDozeHooks {
                 } else if (prefs.batteryChangeObserve && prefs.logToLocal) {
                     Logger.battery(Logger.Level.WARN, "========[屏幕开启]========")
                 }
+            }
+
+            Intent.ACTION_POWER_DISCONNECTED -> {
+                // 熄屏状态下拔掉电源后条件重新成立；断电广播先于充电状态刷新，显式按未充电计算
+                scheduleDeepDoze(handler, chargingOverride = false)
             }
         }
     }
@@ -649,7 +960,12 @@ object BroadcastAndDozeHooks {
      * `DeviceIdleController` / `AppOps` / PowerKeeper 配置库 / 系统无限制名单，不再维护自建集合。
      */
     fun applyStartupSync() {
-        if (!SystemState.isGreezeReady) return
+        if (hotReloading || !SystemState.isGreezeReady) return
+        withDozeLock {
+            if (!hotReloading && idleShellInstance == null) {
+                SystemState.deviceIdleController?.let(::initIdleShell)
+            }
+        }
         SystemState.systemContext?.let { registerScreenStatusReceiver(it) }
         SystemState.syncMessageAppsToAurogon()
         if (PrefReader.systemPrefs.isLog || PrefReader.systemPrefs.batteryChangeObserve) {
@@ -665,7 +981,7 @@ object BroadcastAndDozeHooks {
             val pct = if (level >= 0 && scale > 0) ((level * 100f) / scale).toInt() else -1
             if (pct < 0 || pct == lastBatteryPercent) return
 
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (lastBatteryPercent != -1 && lastBatteryTimestamp > 0) {
                 val elapsedMs = now - lastBatteryTimestamp
                 val durationStr = formatDuration(elapsedMs)
@@ -692,7 +1008,7 @@ object BroadcastAndDozeHooks {
                     batteryReceiverRegistered = true
                     Logger.battery(Logger.Level.INFO, "开启电量记录成功")
                 } catch (t: Throwable) {
-                    Logger.error("updateBatteryObservation($enabled) failed", t)
+                    Logger.error("updateBatteryObservation(true) failed", t)
                 }
             } else if (!enabled && batteryReceiverRegistered) {
                 val ctx = batteryReceiverContext ?: SystemState.systemContext ?: return
@@ -702,7 +1018,7 @@ object BroadcastAndDozeHooks {
                     batteryReceiverRegistered = false
                     Logger.battery(Logger.Level.INFO, "关闭电量记录成功")
                 } catch (t: Throwable) {
-                    Logger.error("updateBatteryObservation($enabled) failed", t)
+                    Logger.error("updateBatteryObservation(false) failed", t)
                 }
             }
         }

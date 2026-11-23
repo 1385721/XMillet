@@ -7,10 +7,10 @@ import android.util.Log
 import java.util.Locale
 
 /**
- * SM-LOG 统一日志组件。
+ * XMillet 统一日志组件。
  *
  * 规范要求：
- * 1. 统一 Tag：`SM-LOG`
+ * 1. 统一 Tag：`XMillet`
  * 2. 标准事件格式：`[级别] 事件 | 包名 | uid | 原因`
  * 3. 安装期日志（`开始XMillet Hook`、`xxx成功`、`共屏蔽N处应用无响应`、安装失败错误）不受 `isLog` 限制直接输出。
  * 4. 运行期干预日志受 `isLog`（或 Doze 专属 `dozeLog`）门控。
@@ -19,7 +19,7 @@ import java.util.Locale
  */
 object Logger {
 
-    const val TAG = "SM-LOG"
+    const val TAG = "XMillet"
     const val LOCAL_LOG_DIR = "/data/system/XMillet"
     const val LOCAL_LOG_PATH = "/data/system/XMillet/log"
     const val LOCAL_LAST_LOG_PATH = "/data/system/XMillet/last.log"

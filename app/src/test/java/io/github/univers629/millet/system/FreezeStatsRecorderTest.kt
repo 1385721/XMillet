@@ -47,7 +47,8 @@ class FreezeStatsRecorderTest {
         assertTrue(FreezeReasonClassifier.isNetworkWakeReason("PACKET"))
         assertTrue(FreezeReasonClassifier.isNetworkWakeReason("Net Change"))
         assertTrue(FreezeReasonClassifier.isNetworkWakeReason("Signal other3"))
-        assertTrue(FreezeReasonClassifier.isNetworkWakeReason("broadcast"))
+        assertFalse(FreezeReasonClassifier.isNetworkWakeReason("broadcast"))
+        assertFalse(FreezeReasonClassifier.isNetworkWakeReason("Broadcast"))
 
         assertTrue(FreezeReasonClassifier.isSyncBinderThawReason("Sync Binder4"))
         assertTrue(FreezeReasonClassifier.isSyncBinderThawReason("Check Binder"))
@@ -60,12 +61,13 @@ class FreezeStatsRecorderTest {
 
         assertEquals(WakeCategory.USER_OPEN, FreezeReasonClassifier.classifyWakeCategory(" Activity Start!"))
         assertEquals(WakeCategory.USER_OPEN, FreezeReasonClassifier.classifyWakeCategory("notifyMovetoFront"))
-        assertEquals(WakeCategory.OTHER, FreezeReasonClassifier.classifyWakeCategory("LAUNCH_MODE"))
+        assertEquals(WakeCategory.LAUNCH_MODE, FreezeReasonClassifier.classifyWakeCategory("LAUNCH_MODE"))
         assertEquals(WakeCategory.NETWORK, FreezeReasonClassifier.classifyWakeCategory("PACKET"))
         assertEquals(WakeCategory.NETWORK, FreezeReasonClassifier.classifyWakeCategory("Signal other3"))
         assertEquals(WakeCategory.BINDER, FreezeReasonClassifier.classifyWakeCategory("Sync Binder4"))
         assertEquals(WakeCategory.BROADCAST, FreezeReasonClassifier.classifyWakeCategory("PendingNotify"))
         assertEquals(WakeCategory.BROADCAST, FreezeReasonClassifier.classifyWakeCategory("broadcast"))
+        assertEquals(WakeCategory.BROADCAST, FreezeReasonClassifier.classifyWakeCategory("Broadcast"))
         assertEquals(WakeCategory.SCREEN_ON, FreezeReasonClassifier.classifyWakeCategory("screen on-thawAll"))
         assertEquals(WakeCategory.CHARGING, FreezeReasonClassifier.classifyWakeCategory("battery charging"))
         assertEquals(WakeCategory.OTHER, FreezeReasonClassifier.classifyWakeCategory("IMMOBULUS"))
@@ -196,14 +198,20 @@ class FreezeStatsRecorderTest {
         // 单应用写入 25 种不同理由（其中 2 种高频，23 种低频），最终仅返回 Top 5
         for (k in 1..20) {
             nowMs += 1_000L
+            engine.recordFreeze(10100, "warm")
+            nowMs += 11_000L
             engine.recordThaw(10100, "PACKET")
         }
         for (k in 1..10) {
             nowMs += 1_000L
+            engine.recordFreeze(10100, "warm")
+            nowMs += 11_000L
             engine.recordThaw(10100, "Sync Binder4")
         }
         for (k in 1..23) {
             nowMs += 1_000L
+            engine.recordFreeze(10100, "warm")
+            nowMs += 11_000L
             engine.recordThaw(10100, "rare_reason_$k")
         }
         val afterReasons = engine.buildSnapshot(StatsWindow.TODAY)
@@ -484,7 +492,7 @@ class FreezeStatsRecorderTest {
         // 模拟磁盘上残留旧版记录的 90xxx / 99xxx 隔离 UID：恢复时应自动剔除并保留真实应用与系统拦截事件
         storageFile.writeText(
             """
-            v1
+            v2
             S|${nowMs - 60_000L}|${nowMs - 60_000L}|${nowMs - elapsedMs}|$elapsedMs|$nowMs|boot-isolated
             BT|2|0|0|0|0|5000||
             BA|99013||1|900000|0|0|||
@@ -520,19 +528,327 @@ class FreezeStatsRecorderTest {
     }
 
     @Test
-    fun `dual app uid falls back to base appId package lookup`() {
-        val nowMs = millisAt(2026, 11, 17, 15, 0)
+    fun `dual app uid does not fall back to another user package`() {
+        var nowMs = millisAt(2026, 11, 17, 15, 0)
+        val resolvedUids = ArrayList<Int>()
         val engine = FreezeStatsEngine(
             zoneId = testZone,
             clock = { nowMs },
             enabledProvider = { true },
-            packageResolver = { uid -> if (uid == 10296) "com.tencent.mm" else null },
+            packageResolver = { uid ->
+                resolvedUids.add(uid)
+                if (uid == 10296) "com.tencent.mm" else null
+            },
         )
 
         engine.recordFreeze(99910296, "IMMOBULUS")
         val snap = engine.buildSnapshot(StatsWindow.TODAY)
         val app = snap.apps.single()
         assertEquals(99910296, app.uid)
-        assertEquals("com.tencent.mm", app.packageName)
+        assertEquals("uid:99910296", app.packageName)
+        assertEquals(listOf(99910296), resolvedUids)
     }
-}
+
+    @Test
+    fun `unknown frozen uid query preserves tracking while a valid empty result clears it`() {
+        var nowMs = millisAt(2026, 11, 17, 15, 0)
+        var elapsedMs = 1000L
+        var frozenUids: Set<Int>? = setOf(10296)
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            elapsedClock = { elapsedMs },
+            enabledProvider = { true },
+            frozenUidsProvider = { frozenUids },
+        )
+
+        engine.recordFreezeBatch(listOf(10296), "IMMOBULUS")
+        frozenUids = null
+        nowMs += 1000L
+        elapsedMs += 1000L
+        val unknown = engine.buildSnapshot(StatsWindow.TODAY)
+        assertTrue(engine.isUidTrackedFrozen(10296))
+        assertEquals(1000L, unknown.frozenMillisTotal)
+        engine.recordFreezeBatch(listOf(10296), "IMMOBULUS")
+        assertEquals(1, engine.buildSnapshot(StatsWindow.TODAY).freezeCount)
+
+        frozenUids = emptySet()
+        nowMs += 1000L
+        elapsedMs += 1000L
+        engine.buildSnapshot(StatsWindow.TODAY)
+        assertFalse(engine.isUidTrackedFrozen(10296))
+        engine.recordFreezeBatch(listOf(10296), "IMMOBULUS")
+        assertEquals(2, engine.buildSnapshot(StatsWindow.TODAY).freezeCount)
+    }
+
+    @Test
+    fun `application statistics keep users separate without duplicating process uids`() {
+        val nowMs = millisAt(2026, 11, 17, 15, 0)
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            enabledProvider = { true },
+            packageResolver = { uid ->
+                if (uid == 10296 || uid == 99910296) "com.tencent.mm" else null
+            },
+        )
+
+        engine.recordFreezeBatch(listOf(10296, 10296, 99910296), "IMMOBULUS")
+        val snapshot = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(2, snapshot.freezeCount)
+        assertEquals(setOf(10296, 99910296), snapshot.apps.map { it.uid }.toSet())
+        assertTrue(snapshot.apps.all { it.packageName == "com.tencent.mm" && it.freezeCount == 1 })
+    }
+
+    @Test
+    fun `unknown application ownership does not trust cached hints and is resolved once per snapshot`() {
+        var nowMs = millisAt(2026, 11, 17, 15, 0)
+        val resolvedUids = ArrayList<Int>()
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            enabledProvider = { true },
+            packageResolver = { uid -> resolvedUids.add(uid); null },
+        )
+
+        engine.recordFreeze(10296, "IMMOBULUS", packageNameHint = "com.guessed.app")
+        nowMs += 15_000L
+        engine.recordThaw(10296, "PACKET", packageNameHint = "com.guessed.app")
+        val snapshot = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals("uid:10296", snapshot.apps.single().packageName)
+        assertTrue(snapshot.recent.all { it.packageName == "uid:10296" })
+        assertEquals(1, snapshot.freezeCount)
+        assertEquals(1, snapshot.wakeByCategory.values.sum())
+        assertEquals(listOf(10296), resolvedUids)
+    }
+
+    @Test
+    fun `pid freeze attribution rejects recycled or unreadable identities and deduplicates application uid`() {
+        val first = FreezeGateHooks.PidIdentity(10296, 100L)
+        val sameApplication = FreezeGateHooks.PidIdentity(10296, 200L)
+        val initial = mapOf(71 to first, 72 to sameApplication, 73 to first, 74 to first, 75 to first)
+        val current = mapOf(
+            71 to first,
+            72 to sameApplication,
+            73 to first.copy(startTicks = 101L),
+            74 to first.copy(uid = 10373),
+            76 to first,
+        )
+        val uids = FreezeGateHooks.acceptedFreezeUids(initial, listOf(71, 72, 73, 74, 75, 76)) { current[it] }
+        assertEquals(listOf(10296), uids)
+        assertTrue(FreezeGateHooks.acceptedFreezeUids(initial, emptyList()) { current[it] }.isEmpty())
+    }
+
+    @Test
+    fun `pid start identity parsing validates pid and handles parentheses in process name`() {
+        val fields = listOf("S") + List(18) { "0" } + "12345"
+        val raw = "71 (process with ) bracket) ${fields.joinToString(" ")}"
+        assertEquals(12345L, FreezeGateHooks.parsePidStartTicks(71, raw))
+        assertNull(FreezeGateHooks.parsePidStartTicks(72, raw))
+        assertNull(FreezeGateHooks.parsePidStartTicks(71, "71 (process) S"))
+        assertNull(FreezeGateHooks.parsePidStartTicks(71, raw.substringBeforeLast(' ') + " 0"))
+    }
+
+    @Test
+    fun `cold startup preserves shared history and merges new events once after clock calibration`() {
+        val storage = File(tempFolder.root, "clock-stats.v1")
+        val savedTime = millisAt(2026, 11, 20, 20)
+        val sharedUid = 99910131
+        val original = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { savedTime }, elapsedClock = { 100_000L }, bootIdProvider = { "old" })
+        repeat(3) { original.recordFreeze(sharedUid, "old shared") }
+        original.recordFreeze(10296, "old ordinary")
+        assertTrue(original.saveSync())
+        val originalBytes = storage.readText()
+
+        var now = 20_000L
+        var elapsed = 20_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { elapsed }, bootIdProvider = { "new" })
+        assertTrue(engine.restoreFromDisk())
+        engine.initScreenState(false)
+        engine.recordFreeze(sharedUid, "new shared")
+        elapsed += 15_000L
+        now = millisAt(2026, 7, 30, 10)
+        engine.recordThaw(sharedUid, "PACKET")
+        engine.recordIntercept(sharedUid, InterceptRule.IGNORE_NETWORK, "PACKET")
+        engine.recordProtect(10296, "protected")
+        engine.recordKillBlocked(10296, "kill blocked")
+        assertFalse(engine.saveSync())
+        assertEquals(originalBytes, storage.readText())
+
+        now = savedTime + 60_000L
+        engine.recordFreeze(10373, "after calibration")
+        val today = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(6, today.freezeCount)
+        assertEquals(4, today.apps.first { it.uid == sharedUid }.freezeCount)
+        assertEquals(1, today.screenOffWakeCount)
+        assertEquals(1, today.wakeByCategory[WakeCategory.NETWORK])
+        assertEquals(1, today.interceptByRule[InterceptRule.IGNORE_NETWORK])
+        assertEquals(1, today.protectedCount)
+        assertEquals(1, today.killBlockedCount)
+        assertEquals(15_000L, today.frozenMillisTotal)
+        assertEquals(15_000L, today.screenOffMillis)
+        assertTrue(today.recent.all { it.timeMillis in savedTime..now })
+        assertEquals(2, engine.buildSnapshot(StatsWindow.BOOT).freezeCount)
+        assertEquals(6, engine.buildSnapshot(StatsWindow.TODAY).freezeCount)
+        assertTrue(engine.restoreFromDisk())
+        assertEquals(6, engine.buildSnapshot(StatsWindow.TODAY).freezeCount)
+        assertTrue(engine.saveSync())
+
+        val nextBoot = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { 1_000L }, bootIdProvider = { "third" })
+        assertTrue(nextBoot.restoreFromDisk())
+        assertEquals(4, nextBoot.buildSnapshot(StatsWindow.TODAY).apps.first { it.uid == sharedUid }.freezeCount)
+        assertEquals(0, nextBoot.buildSnapshot(StatsWindow.BOOT).freezeCount)
+    }
+
+    @Test
+    fun `untrusted clock blocks periodic forced and screen triggered saves without touching storage`() {
+        val storage = File(tempFolder.root, "protected-stats.v1")
+        val savedTime = millisAt(2026, 11, 20, 20)
+        val original = FreezeStatsEngine(storageFile = storage, zoneId = testZone, clock = { savedTime })
+        original.recordFreeze(99910131, "old")
+        assertTrue(original.saveSync())
+        val originalBytes = storage.readText()
+        var elapsed = 20_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { millisAt(2026, 7, 30, 10) }, elapsedClock = { elapsed },
+            bootIdProvider = { "new" }, asyncIoExecutor = { it() })
+        assertTrue(engine.restoreFromDisk())
+        engine.recordFreeze(10373, "new")
+        engine.onScreenStateChanged(false)
+        elapsed += 31L * 60_000L
+        assertFalse(engine.saveIfDirty())
+        assertFalse(engine.saveSync())
+        assertFalse(engine.reset())
+        assertEquals(originalBytes, storage.readText())
+        assertFalse(tempFolder.root.listFiles().orEmpty().any { it.name.endsWith(".tmp") })
+    }
+
+    @Test
+    fun `same boot deferred restore retains active deduplication and elapsed duration`() {
+        val storage = File(tempFolder.root, "same-boot-clock.v1")
+        val savedTime = millisAt(2026, 11, 20, 20)
+        val original = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { savedTime }, elapsedClock = { 100_000L }, bootIdProvider = { "same" })
+        original.recordFreeze(10296, "old", onlyIfNotFrozen = true)
+        assertTrue(original.saveSync())
+        var now = 20_000L
+        var elapsed = 105_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { elapsed }, bootIdProvider = { "same" })
+        assertTrue(engine.restoreFromDisk())
+        engine.recordFreeze(10296, "duplicate", onlyIfNotFrozen = true)
+        elapsed += 15_000L
+        now = savedTime + 10_000L
+        assertEquals(1, engine.buildSnapshot(StatsWindow.BOOT).freezeCount)
+        assertEquals(10_000L, engine.buildSnapshot(StatsWindow.BOOT).frozenMillisTotal)
+        assertTrue(engine.isUidTrackedFrozen(10296))
+        elapsed += 2_000L
+        now += 2_000L
+        engine.recordThaw(10296, "PACKET")
+        assertFalse(engine.isUidTrackedFrozen(10296))
+        assertEquals(12_000L, engine.buildSnapshot(StatsWindow.BOOT).frozenMillisTotal)
+    }
+
+    @Test
+    fun `first install waits for a valid clock without losing startup events`() {
+        val storage = File(tempFolder.root, "first-clock.v1")
+        var now = 20_000L
+        var elapsed = 20_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { elapsed }, bootIdProvider = { "first" })
+        assertFalse(engine.restoreFromDisk())
+        engine.initScreenState(false)
+        engine.recordFreeze(10296, "before calibration")
+        assertFalse(engine.saveSync())
+        assertFalse(storage.exists())
+        elapsed += 3_000L
+        now = millisAt(2026, 11, 20, 21)
+        engine.recordThaw(10296, "PACKET")
+        val snapshot = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(1, snapshot.freezeCount)
+        assertEquals(1, snapshot.screenOffWakeCount)
+        assertEquals(3_000L, snapshot.frozenMillisTotal)
+        assertEquals(3_000L, snapshot.screenOffMillis)
+        assertEquals(now - 3_000L, snapshot.recent.first { it.kind == StatsEventKind.FREEZE }.timeMillis)
+        assertTrue(engine.saveSync())
+        assertTrue(storage.readText().startsWith("v2"))
+    }
+
+    @Test
+    fun `existing flush merges deferred history when clock becomes valid without a new event`() {
+        val storage = File(tempFolder.root, "flush-clock.v1")
+        val savedTime = millisAt(2026, 11, 20, 20)
+        val original = FreezeStatsEngine(storageFile = storage, zoneId = testZone, clock = { savedTime })
+        original.recordFreeze(99910131, "old")
+        assertTrue(original.saveSync())
+        var now = 20_000L
+        var elapsed = 20_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { elapsed }, bootIdProvider = { "new" })
+        assertTrue(engine.restoreFromDisk())
+        engine.recordFreeze(10373, "new")
+        elapsed += 1_000L
+        now = savedTime + 60_000L
+        assertTrue(engine.saveSync())
+        assertEquals(2, engine.buildSnapshot(StatsWindow.TODAY).freezeCount)
+        assertEquals(1, engine.buildSnapshot(StatsWindow.BOOT).freezeCount)
+    }
+
+    @Test
+    fun `calibrated deferred restore still prunes history outside seven day window`() {
+        val storage = File(tempFolder.root, "aged-clock.v1")
+        val savedTime = millisAt(2026, 11, 10, 20)
+        val original = FreezeStatsEngine(storageFile = storage, zoneId = testZone, clock = { savedTime })
+        original.recordFreeze(99910131, "expired")
+        assertTrue(original.saveSync())
+        var now = 20_000L
+        var elapsed = 20_000L
+        val engine = FreezeStatsEngine(storageFile = storage, zoneId = testZone,
+            clock = { now }, elapsedClock = { elapsed }, bootIdProvider = { "new" })
+        assertTrue(engine.restoreFromDisk())
+        engine.recordFreeze(10373, "new")
+        elapsed += 1_000L
+        now = millisAt(2026, 11, 20, 21)
+        val snapshot = engine.buildSnapshot(StatsWindow.WEEK)
+        assertEquals(1, snapshot.freezeCount)
+        assertEquals(listOf(10373), snapshot.apps.map { it.uid })
+    }
+
+    @Test
+    fun `jitter freeze is rolled back and churn wakes are coalesced`() {
+        var nowMs = millisAt(2026, 11, 17, 15, 0)
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            enabledProvider = { true },
+            packageResolver = { "com.churn.app" },
+        )
+        engine.initScreenState(screenOn = false)
+        repeat(5) {
+            engine.recordFreeze(10296, "PACKET", onlyIfNotFrozen = true)
+            nowMs += 10L
+            engine.recordThaw(10296, "PACKET")
+            nowMs += 15_000L
+        }
+        val snap = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(0, snap.freezeCount)
+        assertEquals(1, snap.wakeByCategory[WakeCategory.NETWORK])
+        assertEquals(1, snap.recent.size)
+
+        // 超过合并窗口后，新的一轮抖动唤醒应重新计数。
+        nowMs += 3 * 60_000L
+        engine.recordFreeze(10296, "PACKET", onlyIfNotFrozen = true)
+        nowMs += 10L
+        engine.recordThaw(10296, "PACKET")
+        assertEquals(2, engine.buildSnapshot(StatsWindow.TODAY).wakeByCategory[WakeCategory.NETWORK])
+
+        engine.recordFreeze(10296, "IMMOBULUS", onlyIfNotFrozen = true)
+        nowMs += 60_000L
+        engine.recordThaw(10296, "screen on")
+        val after = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(1, after.freezeCount)
+        assertEquals(60_000L, after.apps.single { it.uid == 10296 }.frozenMillis)
+    }}

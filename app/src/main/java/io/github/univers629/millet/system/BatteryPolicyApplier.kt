@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Binder
 import android.provider.Settings
 import io.github.univers629.millet.core.SETTING_MILLET_NO_RESTRICT_APP
+import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.XReflect
 
@@ -43,7 +44,7 @@ object BatteryPolicyApplier {
      * @return true 表示至少有一条策略写成功
      */
     fun apply(packageName: String, noRestrict: Boolean): Boolean {
-        if (packageName.isBlank()) return false
+        if (!AppUidUtils.validPolicyTarget(packageName) || '#' in packageName) return false
         val token = Binder.clearCallingIdentity()
         return try {
             val idle = applyDeviceIdle(packageName, noRestrict)

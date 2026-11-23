@@ -31,3 +31,7 @@ ref/
 
 # Stray tool artifacts
 gradle/wrapper/.write_test
+
+# Local debug scratch (decompiled ROM dumps, stats samples, screenshots)
+.debug/
+AGENTS.md

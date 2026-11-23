@@ -68,11 +68,20 @@ object SystemHooks {
                             ForceFreezeBridge.applyAsync(force = true)
                         }
                     }
+                    if (changedKey == PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST) {
+                        SystemState.syncCloudFrozenWhiteListToListAppsManager(snapshot.blockCloudFrozenWhitelist)
+                    }
                 }
 
+                PrefGroup.DOZE_FLAGS -> BroadcastAndDozeHooks.onDozeConfigChanged()
+
                 PrefGroup.APP_SETS -> {
-                    if (changedKey == PrefsKeys.MESSAGE_APP_SET) {
-                        SystemState.syncMessageAppsToAurogon()
+                    when (changedKey) {
+                        PrefsKeys.MESSAGE_APP_SET,
+                        PrefsKeys.FORCE_FREEZE_SET,
+                        PrefsKeys.WHITE_APP_SET,
+                        PrefsKeys.BLOCK_THAW_SET,
+                        PrefsKeys.IGNORE_NETWORK_WAKE_SET -> SystemState.syncMessageAppsToAurogon()
                     }
                     if (changedKey == PrefsKeys.WHITE_APP_SET) {
                         // 白名单变化后把条目同步进系统免冻结名单，避免 millet 内核侧再次冻结它们
@@ -118,6 +127,8 @@ object SystemHooks {
         FreezeGateHooks.buildS29ScrOffStateHook(),
         FreezeGateHooks.buildS30NotifyExecuteServicesHook(classLoader),
         FreezeGateHooks.buildS31AurogonUpdateTargetListHook(classLoader),
+        FreezeGateHooks.buildS32CloudFrozenWhiteListHook(),
+        FreezeGateHooks.buildS33PolicyMakerAllowFreezeHook(),
         BroadcastAndDozeHooks.buildS9BroadcastSkipPolicyHook(),
         BroadcastAndDozeHooks.buildS10BroadcastQueueDeliverHook(),
         FreezeGateHooks.buildS24AllowBroadcastHook(),
@@ -165,6 +176,10 @@ object SystemHooks {
             .any { it.id == "S22" && it.state == HookInstallRegistry.State.INSTALLED }
         FreezeStatsRecorder.setDispatchThawEventActive(s22Installed)
 
+        if (PrefReader.systemPrefs.blockCloudFrozenWhitelist) {
+            SystemState.syncCloudFrozenWhiteListToListAppsManager(block = true, classLoader = classLoader)
+        }
+
         Logger.alwaysWarn("Hook 安装结果[系统侧]: ${HookInstallRegistry.summary()}")
     }
 
@@ -176,6 +191,8 @@ object SystemHooks {
         runCatching { ActiveImeTracker.onHotReloading() }
         runCatching { BroadcastAndDozeHooks.onHotReloading() }
         runCatching { SystemBinderService.onHotReloading() }
+        runCatching { ForegroundState.stop() }
+        runCatching { io.github.univers629.millet.core.UidPackageCache.shutdown() }
         PrefReader.onSystemGroupReloaded = null
     }
 

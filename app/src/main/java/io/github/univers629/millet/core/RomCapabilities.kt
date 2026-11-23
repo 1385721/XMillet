@@ -68,6 +68,12 @@ object RomCapabilities {
             found
         }
 
+    /** 以已解析的 Class 判断方法是否存在（运行期热点路径用）。 */
+    fun hasMethod(clazz: Class<*>?, methodName: String): Boolean {
+        if (clazz == null) return false
+        return hasMethod(clazz.name, methodName, clazz.classLoader)
+    }
+
     /**
      * 判断一条 [HookSpec] 在当前宿主版本上是否可安装。
      *
@@ -128,15 +134,50 @@ object RomCapabilities {
      * 由 App 侧按「任一进程为真即可用」合并。
      */
     fun buildCapabilityWireFormat(loader: ClassLoader?): String {
-        return capabilityMap(loader).entries.joinToString(",") { (key, value) ->
+        val installed = HookInstallRegistry.snapshot()
+            .filter { it.state == HookInstallRegistry.State.INSTALLED }
+            .map { it.id }.toSet()
+        val hasFrozenCtrl = hasClass(CLASS_FROZEN_APP_CONTROLLER, loader)
+        val hasKillCtrl = hasClass(CLASS_KILL_PROCESS_CONTROLLER, loader)
+        val hasActiveCtrl = hasClass(CLASS_ACTIVE_STATE_CONTROLLER, loader)
+        val capabilities = capabilityMap(loader) + mapOf(
+            "millet_registered" to installed.containsAll(setOf("P2", "P9", "P10", "P17")),
+            "controller_registered" to resolveControllerRegistered(
+                installed = installed,
+                hasFrozenController = hasFrozenCtrl,
+                hasKillController = hasKillCtrl,
+                hasActiveStateController = hasActiveCtrl,
+            )
+        )
+        return capabilities.entries.joinToString(",") { (key, value) ->
             "$key=${if (value) 1 else 0}"
         }
+    }
+
+    /**
+     * 按宿主实际存在的控制器类判定 PowerKeeper 新架构（OS3/OS4）是否完成注册：
+     * - OS3 仍保留 `FrozenAppController`：要求 `P23_FROZEN_DECISION` 已安装；
+     * - OS4 移除了 `FrozenAppController` 与 `PowerCheckerController`，冻结决策全部收归系统侧
+     *   `GreezeManagerService`/`ListAppsManager`，PowerKeeper 侧由 `KillProcessController` 与
+     *   `ActiveStateController` 承担：要求 `P22_KILL_POLICY`（及存在时的 `P28_NO_RESTRICT`）已安装。
+     */
+    internal fun resolveControllerRegistered(
+        installed: Set<String>,
+        hasFrozenController: Boolean,
+        hasKillController: Boolean,
+        hasActiveStateController: Boolean,
+    ): Boolean = when {
+        hasFrozenController -> "P23_FROZEN_DECISION" in installed
+        hasKillController -> "P22_KILL_POLICY" in installed &&
+            (!hasActiveStateController || "P28_NO_RESTRICT" in installed)
+        else -> false
     }
 
     /** 本进程可见的能力位；键名见 [io.github.univers629.millet.ipc.HookCoverage.CAP_MILLET] 等。 */
     fun capabilityMap(loader: ClassLoader?): Map<String, Boolean> = linkedMapOf(
         "millet" to hasClass(CLASS_MILLET_POLICY, loader),
         "controller" to hasClass(CLASS_KILL_PROCESS_CONTROLLER, loader),
+        "frozen_ctrl" to hasClass(CLASS_FROZEN_APP_CONTROLLER, loader),
         "migard" to hasClass(CLASS_MIGARD_SERVICE, loader),
         "bwa" to hasField(CLASS_MILLET_POLICY, "BRIGHT_WHITE_APPS", loader)
     )
@@ -159,9 +200,10 @@ object RomCapabilities {
         sb.append(", BRIGHT_WHITE_APPS=").append(
             hasField(CLASS_MILLET_POLICY, "BRIGHT_WHITE_APPS", loader)
         )
-        // 澎湃 3.0（Android 16）删掉了 millet.* 查杀链路，改由控制器与 migard 服务承担，
-        // 把这两项能力写进启动日志，便于判断当前 ROM 走的是哪一套决策入口。
+        // 澎湃 3.0 起删掉了 millet.* 查杀链路，OS4 进一步移除 FrozenAppController / PowerCheckerController，
+        // 把关键控制器能力写进启动日志，便于判断当前 ROM 走的是哪一套决策入口。
         sb.append(", KillProcessController=").append(hasClass(CLASS_KILL_PROCESS_CONTROLLER, loader))
+        sb.append(", FrozenAppController=").append(hasClass(CLASS_FROZEN_APP_CONTROLLER, loader))
         sb.append(", MiGard=").append(hasClass(CLASS_MIGARD_SERVICE, loader))
         return sb.toString()
     }
@@ -169,5 +211,9 @@ object RomCapabilities {
     private const val CLASS_MILLET_POLICY = "com.miui.powerkeeper.millet.MilletPolicy"
     private const val CLASS_KILL_PROCESS_CONTROLLER =
         "com.miui.powerkeeper.controller.KillProcessController"
+    private const val CLASS_FROZEN_APP_CONTROLLER =
+        "com.miui.powerkeeper.controller.FrozenAppController"
+    private const val CLASS_ACTIVE_STATE_CONTROLLER =
+        "com.miui.powerkeeper.controller.ActiveStateController"
     private const val CLASS_MIGARD_SERVICE = "com.miui.server.migard.MiGardService"
 }

@@ -26,6 +26,12 @@ object PrefsKeys {
      */
     const val DISABLE_SCREEN_ON_THAW = "disableScreenOnThaw"
     const val BLOCK_ADD_POWER_SAVE_WHITELIST_APPS = "blockAddPowerSaveWhitelistApps"
+
+    /** 屏蔽 PowerKeeper 云端 Doze 白名单（`dozeWhiteListApps`）的读取与新下发。 */
+    const val BLOCK_CLOUD_DOZE_WHITELIST = "blockCloudDozeWhitelist"
+
+    /** 屏蔽官方云端墓碑白名单（`FrozenNewWhiteList`）；跨 OS1–OS4 统一生效。 */
+    const val BLOCK_CLOUD_FROZEN_WHITELIST = "blockCloudFrozenWhitelist"
     const val BATTERY_CHANGE_OBSERVE = "batteryChangeObserve"
     const val LOG_TO_LOCAL = "logToLocal"
     const val DOZE_LOG = "dozeLog"
@@ -35,7 +41,7 @@ object PrefsKeys {
     const val FREEZE_STATS = "freezeStats"
     const val FREEZE_DUAL_APP = "freezeDualApp"
 
-    // 2. 八个 Set<String> 应用包名集合
+    // 2. 七个 Set<String> 策略目标集合：主用户包名或双开包名#999
     const val WHITE_APP_SET = "whiteAppSet"
     const val MESSAGE_APP_SET = "messageAppSet"
     const val FORCE_FREEZE_SET = "forceFreezeSet"
@@ -64,6 +70,8 @@ object PrefsKeys {
         DISABLE_CHARGE,
         DISABLE_SCREEN_ON_THAW,
         BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
+        BLOCK_CLOUD_DOZE_WHITELIST,
+        BLOCK_CLOUD_FROZEN_WHITELIST,
         BATTERY_CHANGE_OBSERVE,
         LOG_TO_LOCAL,
         DOZE_LOG,
@@ -95,6 +103,8 @@ object PrefsDefaults {
     const val DISABLE_CHARGE = true
     const val DISABLE_SCREEN_ON_THAW = true
     const val BLOCK_ADD_POWER_SAVE_WHITELIST_APPS = true
+    const val BLOCK_CLOUD_DOZE_WHITELIST = false
+    const val BLOCK_CLOUD_FROZEN_WHITELIST = true
     const val BATTERY_CHANGE_OBSERVE = false
     const val LOG_TO_LOCAL = false
     const val DOZE_LOG = false
@@ -127,6 +137,8 @@ object PrefsDefaults {
         PrefsKeys.DISABLE_CHARGE -> DISABLE_CHARGE
         PrefsKeys.DISABLE_SCREEN_ON_THAW -> DISABLE_SCREEN_ON_THAW
         PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS -> BLOCK_ADD_POWER_SAVE_WHITELIST_APPS
+        PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST -> BLOCK_CLOUD_DOZE_WHITELIST
+        PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST -> BLOCK_CLOUD_FROZEN_WHITELIST
         PrefsKeys.BATTERY_CHANGE_OBSERVE -> BATTERY_CHANGE_OBSERVE
         PrefsKeys.LOG_TO_LOCAL -> LOG_TO_LOCAL
         PrefsKeys.DOZE_LOG -> DOZE_LOG
@@ -160,6 +172,8 @@ enum class PrefGroup(val keys: Set<String>) {
             PrefsKeys.DISABLE_CHARGE,
             PrefsKeys.DISABLE_SCREEN_ON_THAW,
             PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
+            PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST,
+            PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST,
             PrefsKeys.BATTERY_CHANGE_OBSERVE,
             PrefsKeys.LOG_TO_LOCAL,
             PrefsKeys.FREEZE_STATS,
@@ -210,6 +224,8 @@ data class PrefsSnapshot(
     val disableCharge: Boolean = PrefsDefaults.DISABLE_CHARGE,
     val disableScreenOnThaw: Boolean = PrefsDefaults.DISABLE_SCREEN_ON_THAW,
     val blockAddPowerSaveWhitelistApps: Boolean = PrefsDefaults.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
+    val blockCloudDozeWhitelist: Boolean = PrefsDefaults.BLOCK_CLOUD_DOZE_WHITELIST,
+    val blockCloudFrozenWhitelist: Boolean = PrefsDefaults.BLOCK_CLOUD_FROZEN_WHITELIST,
     val batteryChangeObserve: Boolean = PrefsDefaults.BATTERY_CHANGE_OBSERVE,
     val logToLocal: Boolean = PrefsDefaults.LOG_TO_LOCAL,
     val freezeStats: Boolean = PrefsDefaults.FREEZE_STATS,
@@ -221,7 +237,7 @@ data class PrefsSnapshot(
     val skipStateCheck: Boolean = PrefsDefaults.SKIP_STATE_CHECK,
     val disableMotionListener: Boolean = PrefsDefaults.DISABLE_MOTION_LISTENER,
 
-    // 7 个应用策略集合
+    // 7 个应用策略集合；无后缀条目仅属于主用户
     val whiteAppSet: Set<String> = PrefsDefaults.WHITE_APP_SET,
     val messageAppSet: Set<String> = PrefsDefaults.MESSAGE_APP_SET,
     val forceFreezeSet: Set<String> = PrefsDefaults.FORCE_FREEZE_SET,

@@ -64,6 +64,7 @@ import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.ui.BackupRestoreHelper
+import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.TombStatsIcon
 import io.github.univers629.millet.ui.component.XMilletIcons
@@ -728,6 +729,7 @@ private fun LoadingDialogMiuix(show: Boolean) {
     WindowDialog(
         show = show,
         content = {
+            DialogBackHandler { }
             val navEventState = rememberNavigationEventState(NavigationEventInfo.None)
             NavigationBackHandler(
                 state = navEventState,

@@ -816,7 +816,9 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         val swipeDismiss =
-                            if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
+                            if (!themeState.enableSwipeBack) {
+                                NavSwipeDirection.None
+                            } else if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
                                 NavSwipeDirection.RightToLeft
                             } else {
                                 NavSwipeDirection.LeftToRight

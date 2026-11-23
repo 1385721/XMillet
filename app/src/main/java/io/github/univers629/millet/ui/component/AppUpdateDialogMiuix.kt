@@ -90,6 +90,7 @@ fun AppUpdateDialogMiuix(
         title = "发现新版本",
         onDismissRequest = onDismiss,
         content = {
+            DialogBackHandler { onDismiss() }
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = "v$currentVersionName → v${release.versionName}",

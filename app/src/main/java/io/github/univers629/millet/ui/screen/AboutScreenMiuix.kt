@@ -76,6 +76,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.R
+import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.effect.BgEffectBackground
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
@@ -824,6 +825,7 @@ fun AboutRepoScreenMiuix(
         title = "感谢支持",
         onDismissRequest = { previewDonateResId = null },
         content = {
+            DialogBackHandler { previewDonateResId = null }
             val dismissState = LocalDismissState.current
             if (activeResId != null) {
                 Box(

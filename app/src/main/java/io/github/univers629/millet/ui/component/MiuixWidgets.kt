@@ -220,6 +220,7 @@ fun MiuixConfirmDialog(
         title = title,
         onDismissRequest = onDismiss,
         content = {
+            DialogBackHandler { onDismiss() }
             val dismissState = LocalDismissState.current
             Text(
                 text = message,

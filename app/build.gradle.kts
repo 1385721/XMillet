@@ -83,6 +83,9 @@ dependencies {
     // 返回栈持久化（rememberNavBackStack 的 JSON 编解码）使用
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
 
+    // 预测性返回开关需要反射 ApplicationInfo 的隐藏 API
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
+
     testImplementation("junit:junit:4.13.2")
 }
 

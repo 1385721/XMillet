@@ -1,5 +1,7 @@
 package io.github.univers629.millet.ui.screen
 
+import android.app.Activity
+import android.app.Application
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -38,11 +40,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BackHand
 import androidx.compose.material.icons.rounded.BlurOn
 import androidx.compose.material.icons.rounded.ColorLens
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.SpaceDashboard
 import androidx.compose.material.icons.rounded.Style
+import androidx.compose.material.icons.rounded.Swipe
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -64,9 +68,11 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import io.github.univers629.millet.core.PredictiveBackController
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.theme.keyColorOptions
+import io.github.univers629.millet.ui.theme.supportsPredictiveBack
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.Card
@@ -227,6 +233,60 @@ fun ThemeSettingsScreenMiuix(
                                 onCheckedChange = { themeState.updateEnableFloatingBottomBarBlur(it) }
                             )
                         }
+                    }
+
+                    SmallTitle(
+                        text = "返回手势"
+                    )
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp)
+                    ) {
+                        // 与 KernelSU 一致：只有 Android 14 及以上才有预测动画，13 上不显示这一项。
+                        if (supportsPredictiveBack) {
+                            SwitchPreference(
+                                startAction = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.BackHand,
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .padding(end = 8.dp)
+                                            .size(24.dp),
+                                        tint = colorScheme.onBackground
+                                    )
+                                },
+                                title = "启用预测性返回手势的支持",
+                                summary = "返回事件交给系统 OnBackInvoked 通道，带预测动画",
+                                checked = themeState.enablePredictiveBack,
+                                onCheckedChange = { enabled ->
+                                    themeState.updateEnablePredictiveBack(enabled)
+                                    // 返回通道的位值只在窗口创建时读取，需要重建 Activity 才生效。
+                                    (context.applicationContext as? Application)?.let { app ->
+                                        PredictiveBackController.applyPredictiveBackEnabled(app, enabled)
+                                        (context as? Activity)?.recreate()
+                                    }
+                                }
+                            )
+                        }
+
+                        SwitchPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Swipe,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "横移返回手势",
+                            summary = "在子页从屏幕边缘横滑返回上一级",
+                            checked = themeState.enableSwipeBack,
+                            onCheckedChange = { themeState.updateEnableSwipeBack(it) }
+                        )
                     }
 
                     SmallTitle(

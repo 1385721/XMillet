@@ -148,9 +148,17 @@ class MainActivity : ComponentActivity() {
         val backStack: NavBackStack,
     ) {
         fun push(key: NavKey) {
-            if (key !in backStack) {
+            val identity = routeIdentity(key)
+            if (backStack.none { routeIdentity(it) == identity }) {
                 backStack.add(key)
             }
+        }
+
+        // AppProfile 携带完整的应用模型，策略布尔变化会让同一应用的实例不再相等，
+        // 因此压栈去重按 uid 判定身份，避免重复压栈触发 contentKey 冲突。
+        private fun routeIdentity(key: NavKey): Any = when (key) {
+            is Route.AppProfile -> key.app.uid
+            else -> key
         }
 
         fun pop() {
@@ -267,12 +275,20 @@ class MainActivity : ComponentActivity() {
             mainPagerState.syncPage()
         }
 
-        // 主界面 Tab 返回首页拦截（经共享 NavigationEventDispatcher 仲裁，让位于已打开的 Miuix 浮层）
+        // 主界面 Tab 返回首页拦截（经共享 NavigationEventDispatcher 仲裁，让位于已打开的 Miuix 浮层）。
+        // 返回栈有子页时也保持启用：NavDisplay 的处理器在 SideEffect 里才切到启用，压栈那一帧
+        // 会出现「两边都未启用」的空窗，此时系统按无处理器处理，直接结束 Activity。
         val mainBackEventState = rememberNavigationEventState(NavigationEventInfo.None)
         NavigationBackHandler(
             state = mainBackEventState,
-            isBackEnabled = navigator.backStack.size == 1 && mainPagerState.selectedPage != 0,
-            onBackCompleted = { mainPagerState.animateToPage(0) },
+            isBackEnabled = navigator.backStack.size > 1 || mainPagerState.selectedPage != 0,
+            onBackCompleted = {
+                if (navigator.backStack.size > 1) {
+                    navigator.pop()
+                } else {
+                    mainPagerState.animateToPage(0)
+                }
+            },
         )
 
         var runtimeStatus by remember {
@@ -1034,7 +1050,10 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            entry<Route.AppProfile>(swipeDismiss = swipeDismiss) { key ->
+                            entry<Route.AppProfile>(
+                                contentKey = { route -> route.app.uid },
+                                swipeDismiss = swipeDismiss,
+                            ) { key ->
                                 AppProfileScreenMiuix(
                                     app = key.app,
                                     onBack = { navigator.pop() },

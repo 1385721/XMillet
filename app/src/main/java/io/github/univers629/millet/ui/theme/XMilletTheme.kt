@@ -286,16 +286,24 @@ fun XMilletMiuixTheme(
 
         val view = LocalView.current
         val activity = context as? ComponentActivity
-        val hostOwner = LocalNavigationEventDispatcherOwner.current
-            ?: remember(view) { view.findViewTreeNavigationEventDispatcherOwner() }
-        val navOwner = hostOwner ?: remember(activity) {
-            val dispatcher = NavigationEventDispatcher()
-            object : NavigationEventDispatcherOwner {
-                override val navigationEventDispatcher: NavigationEventDispatcher = dispatcher
+        // 归属只在首次组合时按 activity 决定一次：旧实现在每次重组都重读 Local 与 ViewTree，
+        // 视图重建后会把主题自己挂到 decorView 的 owner 误判为宿主提供，从而移除返回输入、
+        // 清空 ViewTree 归属，返回手势直接退到桌面。决策绑定 activity 后，视图重建不再改变归属。
+        val (navOwner, ownsDispatcher) = remember(activity) {
+            val existing = (activity as? NavigationEventDispatcherOwner)
+                ?: activity?.window?.decorView?.findViewTreeNavigationEventDispatcherOwner()
+            if (existing != null) {
+                existing to false
+            } else {
+                val dispatcher = NavigationEventDispatcher()
+                val owner: NavigationEventDispatcherOwner = object : NavigationEventDispatcherOwner {
+                    override val navigationEventDispatcher: NavigationEventDispatcher = dispatcher
+                }
+                owner to true
             }
         }
-        if (hostOwner == null) {
-            DisposableEffect(navOwner, activity, view) {
+        if (ownsDispatcher) {
+            DisposableEffect(navOwner, activity) {
                 val targetView = activity?.window?.decorView ?: view
                 if (targetView.findViewTreeNavigationEventDispatcherOwner() == null) {
                     targetView.setViewTreeNavigationEventDispatcherOwner(navOwner)

@@ -90,6 +90,9 @@ object PowerKeeperHooks {
     private const val MSG_WHAT_QUERY_FROZEN_UID = 13
     private const val MSG_WHAT_CHARGING_CHANGED = 16
 
+    /** FrozenAppController#setChangeFrozenStrategy 的 flag：1 表示「充电中暂停新冻结」。 */
+    private const val FLAG_NO_NEW_FREEZE = 1
+
     /**
      * 注册 `com.miui.powerkeeper` 进程的配置热更新回调。
      */
@@ -113,6 +116,47 @@ object PowerKeeperHooks {
         }
     }
 
+    /**
+     * 插电状态纠正：OS1/OS2 的 `FrozenAppController` 在插电时会把 `CHARGING(0x01)` 写进
+     * `mCurFreezeCondition`（40 → 41），热重载或首次注入时若标志已为 41，仅拦截消息不会
+     * 自动恢复，需要主动把标志纠正回 40。这里只在装配/热重载后读一次字段，不新建线程、
+     * 不排定时任务；读不到实例或字段时静默跳过。
+     */
+    internal fun healChargingFreezeGate() {
+        val prefs = PrefReader.powerKeeperPrefs
+        if (!prefs.disableCharge) return
+        val controller = findFrozenAppController() ?: return
+        val condition = runCatching {
+            XReflect.getIntFieldOr(controller, "mCurFreezeCondition", "mCurFreezeConditionFlag", default = -1)
+        }.getOrNull() ?: return
+        if (condition <= 0 || (condition and 0x01) == 0) return
+        val healed = runCatching {
+            XReflect.callMethod(controller, "setChangeFrozenStrategy", false, FLAG_NO_NEW_FREEZE, false)
+        }.isSuccess
+        if (healed && prefs.isLog) {
+            Logger.warn("已纠正插电冻结条件标志(0x${condition.toString(16)} → 0x${(condition and 0x01.inv()).toString(16)})")
+        }
+    }
+
+    /** 从 P18 捕获的 `PowerKeeperManager` 实例里按字段类型找到 `FrozenAppController`。 */
+    private fun findFrozenAppController(): Any? {
+        val manager = PowerKeeperState.powerKeeperManagerInstance ?: return null
+        var type: Class<*>? = manager.javaClass
+        var depth = 0
+        while (type != null && depth < 6) {
+            for (field in type.declaredFields) {
+                if (field.type.name != CLASS_FROZEN_APP_CONTROLLER) continue
+                val value = runCatching {
+                    field.isAccessible = true
+                    field.get(manager)
+                }.getOrNull()
+                if (value != null) return value
+            }
+            type = type.superclass
+            depth++
+        }
+        return null
+    }
     private fun buildAllSpecs(classLoader: ClassLoader): List<HookSpec> {
         val candidates = listOf(
             buildP1ApplicationOnCreateHook(),
@@ -138,6 +182,7 @@ object PowerKeeperHooks {
             buildP22KillPolicyHook(),
             buildP23FrozenDecisionHook(),
             buildP24NoChargeThawHook(),
+            buildP33ChargeStrategyHook(),
             buildP25AutoKillGuardHook(),
             buildP26AudioKillGuardHook(),
             buildP20BrightScenarioBaseInitHook(),
@@ -159,6 +204,7 @@ object PowerKeeperHooks {
     fun installAllModern(xposed: XposedInterface, classLoader: ClassLoader) {
         registerPrefReloadCallback()
         ModernHookInstaller.installAll(xposed, classLoader, buildAllSpecs(classLoader))
+        runCatching { healChargingFreezeGate() }
         if (PrefReader.powerKeeperPrefs.blockCloudFrozenWhitelist) {
             PowerKeeperState.syncCloudFrozenWhiteList(block = true)
         }
@@ -506,6 +552,13 @@ object PowerKeeperHooks {
         before = { param ->
             val msg = param.args.getOrNull(0) as? Message ?: return@HookSpec
             val what = msg.what
+            if (what == MSG_WHAT_CHARGING_CHANGED && msg.arg1 == 1 && PrefReader.powerKeeperPrefs.disableCharge) {
+                param.result = null
+                if (PrefReader.powerKeeperPrefs.isLog) {
+                    Logger.warn("阻止插电全量解冻(MilletHandler what=16)")
+                }
+                return@HookSpec
+            }
             if (what != MSG_WHAT_QUERY_FROZEN_UID) {
                 return@HookSpec
             }
@@ -750,9 +803,38 @@ object PowerKeeperHooks {
             if (PrefReader.powerKeeperPrefs.isLog) {
                 Logger.warn("阻止插电触发的解冻事件")
             }
+            runCatching { healChargingFreezeGate() }
         }
     )
 
+    /**
+     * P33（PA(23)+）：FrozenAppController#setChangeFrozenStrategy(boolean, int, boolean)
+     * 插电时 PowerKeeper 会把冻结条件里的 `CHARGING(0x01)` 置位（`mCurFreezeCondition` 40 → 41），
+     * 此后不再产生新的冻结。`disableCharge` 打开时这里直接拦掉置位，插电后不再停止新冻结。
+     */
+    private fun buildP33ChargeStrategyHook(): HookSpec = HookSpec(
+        id = "P33_CHARGE_STRATEGY",
+        name = "FrozenAppController#setChangeFrozenStrategy",
+        targetClass = CLASS_FROZEN_APP_CONTROLLER,
+        methodName = "setChangeFrozenStrategy",
+        paramTypes = listOf(
+            Boolean::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!,
+            Boolean::class.javaPrimitiveType!!
+        ),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val prefs = PrefReader.powerKeeperPrefs
+            if (!prefs.disableCharge) return@HookSpec
+            val enable = param.args.getOrNull(0) as? Boolean ?: return@HookSpec
+            val flag = param.args.getOrNull(1) as? Int ?: return@HookSpec
+            if (!enable || flag != FLAG_NO_NEW_FREEZE) return@HookSpec
+            param.args[0] = false
+            if (prefs.isLog) {
+                Logger.warn("阻止插电暂停新冻结(flag=$flag)")
+            }
+        }
+    )
     /**
      * P25（澎湃 3.0 / Android 16 起）：PowerCheckerController#autoKillApp(int uid, String reason)
      * 真正的「自动查杀」执行入口（`shouldKillByCheckerPolicy` 只是策略判断，这里是落地）。

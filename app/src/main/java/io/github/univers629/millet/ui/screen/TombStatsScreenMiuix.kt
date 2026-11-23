@@ -886,7 +886,7 @@ fun TombStatsScreenMiuix(
                             (it.snapshot.window != window || it.snapshot.isSample != useSample)
                     } ?: StatsLoadState.Loading) {
                         StatsLoadState.Loading -> item(key = "state_loading") {
-                            LoadingStateCard()
+                            LoadingStateCard(active = isActive)
                         }
 
                         StatsLoadState.ServiceUnavailable -> item(key = "state_service_unavailable") {
@@ -1949,7 +1949,7 @@ private fun StatsFooter(snap: FreezeStatsSnapshot) {
 }
 
 @Composable
-private fun LoadingStateCard() {
+private fun LoadingStateCard(active: Boolean) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1960,17 +1960,19 @@ private fun LoadingStateCard() {
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            InfiniteProgressIndicator(color = colorScheme.primary)
-            Spacer(Modifier.width(12.dp))
+            if (active) {
+                InfiniteProgressIndicator(color = colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+            }
             Column {
                 Text(
-                    text = "正在读取墓碑统计…",
+                    text = if (active) "正在读取墓碑统计…" else "统计将在进入本页时加载",
                     style = MiuixTheme.textStyles.headline1,
                     fontWeight = FontWeight.Medium,
                     color = colorScheme.onSurface,
                 )
                 Text(
-                    text = "正在向系统读取应用次数和系统记录",
+                    text = if (active) "正在向系统读取应用次数和系统记录" else "离开本页后停止刷新，避免后台空转",
                     style = MiuixTheme.textStyles.body2,
                     color = colorScheme.onSurfaceVariantSummary,
                 )

@@ -317,11 +317,13 @@ class MainActivity : ComponentActivity() {
         // 首次采集完成前不误报「快照不可用」，仅在真实查询失败或返回空快照对象时才展示提示横幅。
         var processSnapshotUnavailable by remember { mutableStateOf(false) }
         // 同一页面只允许一个采集任务；失败保留旧结果，不将连接故障解释成空快照。
-        val refreshStatusAndRunningProcs: () -> Unit = {
-            if (!isProcessesRefreshing) {
-                isProcessesRefreshing = true
-                coroutineScope.launch {
-                    try {
+        val processRefreshGuard = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+        // 周期刷新与隐式刷新不设置下拉刷新状态：仅用户主动下拉或点刷新时显示刷新指示器。
+        fun refreshStatusAndRunningProcs(visible: Boolean = false) {
+            if (!processRefreshGuard.compareAndSet(false, true)) return
+            if (visible) isProcessesRefreshing = true
+            coroutineScope.launch {
+                try {
                         val status = withContext(Dispatchers.IO) {
                             if (!PowerKeeperBinderClient.pingAlive()) {
                                 PowerKeeperBinderClient.bindFromApp(this@MainActivity)
@@ -403,19 +405,19 @@ class MainActivity : ComponentActivity() {
                         if (error is kotlinx.coroutines.CancellationException) throw error
                         processSnapshotUnavailable = true
                         Logger.error("刷新进程快照失败", error)
-                    } finally {
-                        isProcessesRefreshing = false
-                    }
+                } finally {
+                    if (visible) isProcessesRefreshing = false
+                    processRefreshGuard.set(false)
                 }
             }
         }
 
         // 加载已安装应用策略
         var appLoadGeneration by remember { mutableStateOf(0L) }
-        val loadInstalledApps = {
+        fun loadInstalledApps(visible: Boolean = false) {
             appLoadGeneration += 1L
             val generation = appLoadGeneration
-            isAppsRefreshing = true
+            if (visible) isAppsRefreshing = true
             coroutineScope.launch {
                 try {
                     val (apps, loadedCloudLists, dualLoaded) = withContext(Dispatchers.IO) {
@@ -595,7 +597,7 @@ class MainActivity : ComponentActivity() {
                     if (error is kotlinx.coroutines.CancellationException) throw error
                     Logger.error("加载应用策略失败", error)
                 } finally {
-                    if (generation == appLoadGeneration) isAppsRefreshing = false
+                    if (visible && generation == appLoadGeneration) isAppsRefreshing = false
                 }
             }
         }
@@ -889,8 +891,8 @@ class MainActivity : ComponentActivity() {
                                                 runningProcesses = runningProcesses,
                                                 bottomInnerPadding = bottomNavPadding,
                                                 onRefresh = {
-                                                    refreshStatusAndRunningProcs()
-                                                    loadInstalledApps()
+                                                    refreshStatusAndRunningProcs(visible = true)
+                                                    loadInstalledApps(visible = true)
                                                 },
                                                 onThawAll = {
                                                     coroutineScope.launch {
@@ -918,13 +920,13 @@ class MainActivity : ComponentActivity() {
 
                                             BottomBarDestination.Processes -> ProcessListScreenMiuix(
                                                 runningProcesses = runningProcesses,
-                                                isRefreshing = isProcessesRefreshing,
+                                                isRefreshing = isProcessesRefreshing && isCurrentPage,
                                                 snapshotUnavailable = processSnapshotUnavailable,
                                                 bottomInnerPadding = bottomNavPadding,
                                                 filterIndex = processFilterIndex,
                                                 onFilterIndexChange = { processFilterIndex = it },
                                                 onRefresh = {
-                                                    refreshStatusAndRunningProcs()
+                                                    refreshStatusAndRunningProcs(visible = true)
                                                 },
                                                 onThawAll = {
                                                     coroutineScope.launch {
@@ -962,12 +964,12 @@ class MainActivity : ComponentActivity() {
 
                                             BottomBarDestination.Apps -> AppsScreenMiuix(
                                                 apps = installedApps,
-                                                isRefreshing = isAppsRefreshing,
+                                                isRefreshing = isAppsRefreshing && isCurrentPage,
                                                 showSystemApps = showSystemApps,
                                                 onToggleShowSystemApps = {
                                                     showSystemApps = !showSystemApps
                                                 },
-                                                onRefresh = { loadInstalledApps() },
+                                                onRefresh = { loadInstalledApps(visible = true) },
                                                 onOpenAppProfile = { app ->
                                                     navigator.push(Route.AppProfile(app))
                                                 },
@@ -1085,8 +1087,8 @@ class MainActivity : ComponentActivity() {
                                     apps = installedApps,
                                     isRefreshing = isAppsRefreshing || isProcessesRefreshing,
                                     onRefresh = {
-                                        refreshStatusAndRunningProcs()
-                                        loadInstalledApps()
+                                        refreshStatusAndRunningProcs(visible = true)
+                                        loadInstalledApps(visible = true)
                                     },
                                     onBack = { navigator.pop() },
                                     onOpenAppProfile = { app ->

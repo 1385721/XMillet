@@ -200,6 +200,9 @@ class ModernHookEntry : XposedModule() {
 
             // 3. 补回 system_server 链路（P1 只在应用启动时触发一次，热重载后必须重连）
             PowerKeeperHooks.ensureBinderLink()
+
+            // 3.1 插电状态纠正：热重载时若标志已置为「暂停新冻结」，则纠正回可冻结状态
+            runCatching { PowerKeeperHooks.healChargingFreezeGate() }
         } catch (t: Throwable) {
             Logger.error("Modern Hook bootstrapPowerKeeper Failure: ${t.message}", t)
         }

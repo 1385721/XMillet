@@ -65,6 +65,7 @@ object PowerKeeperHooks {
     private const val CLASS_ACTIVE_STATE_CONTROLLER = "com.miui.powerkeeper.controller.ActiveStateController"
     private const val CLASS_AUDIO_DISGUISE_CONTROLLER = "com.miui.powerkeeper.controller.AudioDisguiseController"
     private const val CLASS_GLOBAL_FEATURE_HELPER = "com.miui.powerkeeper.provider.GlobalFeatureConfigureHelper"
+    private const val CLASS_POWER_SAVE_CONFIGURE_MANAGER = "com.miui.powerkeeper.provider.PowerSaveConfigureManager"
     private const val CLASS_MILLET_UTILS = "com.miui.powerkeeper.millet.MilletUtils"
     private const val CLASS_MILLET_CONFIG = "com.miui.powerkeeper.millet.MilletConfig"
 
@@ -120,6 +121,8 @@ object PowerKeeperHooks {
             buildP30CloudDozeWhiteListReadHook(),
             buildP7AddPowerSaveWhitelistHook(),
             buildP8RemovePowerSaveWhitelistHook(),
+            buildP31SetPowerSaveAppConfigureHook(),
+            buildP32GetPowerSaveAppConfigureHook(),
             buildP2MilletPolicyInitHook(),
             buildP3DealCloudWhiteListHook(),
             buildP4OnCloudWhiteListChangedHook(),
@@ -378,8 +381,10 @@ object PowerKeeperHooks {
 
     /**
      * P7（PA(25)）：CommonAdapter#addPowerSaveWhitelistApps(IDeviceIdleController, String[])
-     * 【Doze 省电白名单只拦不改 #2】：`blockAddPowerSaveWhitelistApps` 为真时直接置 null。
+     * 【Doze 省电白名单只拦不改 #2】：拦截 PowerKeeper 自动添加白名单，但放行用户在系统设置
+     * 「省电策略」里刚刚手动设为「无限制」的目标包，避免 PowerSaveConfigureManager 判定未入库而回弹。
      */
+    @Suppress("UNCHECKED_CAST")
     private fun buildP7AddPowerSaveWhitelistHook(): HookSpec = HookSpec(
         id = "P7",
         name = "CommonAdapter#addPowerSaveWhitelistApps",
@@ -388,17 +393,32 @@ object PowerKeeperHooks {
         paramTypes = listOf(CLASS_IDEVICE_IDLE_CONTROLLER, Array<String>::class.java),
         mode = HookMode.BEFORE,
         before = { param ->
-            if (PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) {
+            if (!PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) return@HookSpec
+            val pkgs = param.args.getOrNull(1) as? Array<String>
+            if (pkgs == null || pkgs.isEmpty()) {
                 Logger.warn("禁止电量与性能添加电池未优化名单")
                 param.result = null
+                return@HookSpec
+            }
+            val (allowed, blocked) = PowerKeeperState.filterPowerSaveWhitelistMutation(pkgs, isAdd = true)
+            if (allowed.isEmpty()) {
+                Logger.warn("禁止电量与性能添加电池未优化名单: ${blocked.joinToString(",")}")
+                param.result = null
+            } else if (blocked.isNotEmpty()) {
+                param.args[1] = allowed.toTypedArray()
+                Logger.warn("放行系统设置手动添加白名单(${allowed.joinToString(",")})，拦截自动改动(${blocked.joinToString(",")})")
+            } else if (PrefReader.powerKeeperPrefs.isLog) {
+                Logger.info("放行系统设置手动添加电池未优化名单: ${allowed.joinToString(",")}")
             }
         }
     )
 
     /**
      * P8（PA(27)）：CommonAdapter#removePowerSaveWhitelistApps(IDeviceIdleController, String[])
-     * 【Doze 省电白名单只拦不改 #3】：与 P7 共用 `blockAddPowerSaveWhitelistApps` 开关，为真时直接置 null。
+     * 【Doze 省电白名单只拦不改 #3】：拦截 PowerKeeper 自动移除白名单，但放行用户在系统设置
+     * 手动切出「无限制」的目标包。
      */
+    @Suppress("UNCHECKED_CAST")
     private fun buildP8RemovePowerSaveWhitelistHook(): HookSpec = HookSpec(
         id = "P8",
         name = "CommonAdapter#removePowerSaveWhitelistApps",
@@ -407,11 +427,68 @@ object PowerKeeperHooks {
         paramTypes = listOf(CLASS_IDEVICE_IDLE_CONTROLLER, Array<String>::class.java),
         mode = HookMode.BEFORE,
         before = { param ->
-            if (PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) {
+            if (!PrefReader.powerKeeperPrefs.blockAddPowerSaveWhitelistApps) return@HookSpec
+            val pkgs = param.args.getOrNull(1) as? Array<String>
+            if (pkgs == null || pkgs.isEmpty()) {
                 Logger.warn("禁止电量与性能移除电池未优化名单")
                 param.result = null
+                return@HookSpec
+            }
+            val (allowed, blocked) = PowerKeeperState.filterPowerSaveWhitelistMutation(pkgs, isAdd = false)
+            if (allowed.isEmpty()) {
+                Logger.warn("禁止电量与性能移除电池未优化名单: ${blocked.joinToString(",")}")
+                param.result = null
+            } else if (blocked.isNotEmpty()) {
+                param.args[1] = allowed.toTypedArray()
+                Logger.warn("放行系统设置手动移除白名单(${allowed.joinToString(",")})，拦截自动改动(${blocked.joinToString(",")})")
+            } else if (PrefReader.powerKeeperPrefs.isLog) {
+                Logger.info("放行系统设置手动移除电池未优化名单: ${allowed.joinToString(",")}")
             }
         }
+    )
+
+    /**
+     * P31（全版本 MIUI 14 ~ OS4）：PowerSaveConfigureManager#setPowerSaveAppConfigure(Bundle)
+     * 记录用户在系统设置「省电策略」中的主动修改意图（短时租约），让随后约 1 秒内触发的
+     * `DeviceIdleController -> CommonAdapter` Doze 白名单同步不被 P7/P8 误拦。
+     */
+    private fun buildP31SetPowerSaveAppConfigureHook(): HookSpec = HookSpec(
+        id = "P31_USER_POWER_SAVE_CONFIG",
+        name = "PowerSaveConfigureManager#setPowerSaveAppConfigure",
+        targetClass = CLASS_POWER_SAVE_CONFIGURE_MANAGER,
+        methodName = "setPowerSaveAppConfigure",
+        paramTypes = listOf(Bundle::class.java),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val bundle = param.args.getOrNull(0) as? Bundle ?: return@HookSpec
+            val pkg = bundle.getString("App")?.takeIf { it.isNotBlank() } ?: return@HookSpec
+            val cfg = bundle.getString("AppConfigure") ?: return@HookSpec
+            val expectAdd = when (cfg) {
+                "no_restrict" -> true
+                "miui_auto", "restrict_bg", "no_bg" -> false
+                else -> return@HookSpec
+            }
+            PowerKeeperState.recordUserPowerSaveIntent(pkg, expectAdd)
+            if (PrefReader.powerKeeperPrefs.isLog && !PowerKeeperState.isInsideGetPowerSaveConfigure()) {
+                Logger.info("记录系统设置手动省电策略: $pkg -> $cfg")
+            }
+        }
+    )
+
+    /**
+     * P32（全版本 MIUI 14 ~ OS4）：PowerSaveConfigureManager#getPowerSaveAppConfigure(Bundle, Bundle)
+     * 仅标记读取重入深度，防止 `getPowerSaveAppConfigure` 内部自发回退调用 `setPowerSaveAppConfigure`
+     * 被误判为用户手动操作。
+     */
+    private fun buildP32GetPowerSaveAppConfigureHook(): HookSpec = HookSpec(
+        id = "P32_GET_POWER_SAVE_CONFIG",
+        name = "PowerSaveConfigureManager#getPowerSaveAppConfigure",
+        targetClass = CLASS_POWER_SAVE_CONFIGURE_MANAGER,
+        methodName = "getPowerSaveAppConfigure",
+        paramTypes = listOf(Bundle::class.java, Bundle::class.java),
+        mode = HookMode.BEFORE_AND_AFTER,
+        before = { PowerKeeperState.enterGetPowerSaveConfigure() },
+        after = { PowerKeeperState.exitGetPowerSaveConfigure() }
     )
 
     /**

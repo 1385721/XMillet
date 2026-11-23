@@ -314,7 +314,8 @@ class MainActivity : ComponentActivity() {
         }
 
         var isProcessesRefreshing by remember { mutableStateOf(false) }
-        var processSnapshotUnavailable by remember { mutableStateOf(true) }
+        // 首次采集完成前不误报「快照不可用」，仅在真实查询失败或返回空快照对象时才展示提示横幅。
+        var processSnapshotUnavailable by remember { mutableStateOf(false) }
         // 同一页面只允许一个采集任务；失败保留旧结果，不将连接故障解释成空快照。
         val refreshStatusAndRunningProcs: () -> Unit = {
             if (!isProcessesRefreshing) {

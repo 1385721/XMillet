@@ -410,7 +410,7 @@ fun SettingsScreenMiuix(
                                 )
                             },
                             title = "禁止篡改省电白名单",
-                            summary = "拦截 CommonAdapter#add/removePowerSaveWhitelistApps自动改动",
+                            summary = "拦截电量与性能后台自动增删省电白名单（保留你在系统设置里的手动修改）",
                             checked = blockPowerSaveWhitelist,
                             onCheckedChange = {
                                 blockPowerSaveWhitelist = it

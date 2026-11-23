@@ -39,12 +39,13 @@ object VersionGate {
     val isMiui14: Boolean
         get() = miOsVersionName.isBlank() && miuiVersionName.startsWith("V14", ignoreCase = true)
 
-    /** 宿主 ROM 的版本档位：MIUI 14 与澎湃 OS1 / OS2 / OS3。 */
+    /** 宿主 ROM 的版本档位：MIUI 14 与澎湃 OS1 / OS2 / OS3 / OS4。 */
     enum class RomTier(val major: Int) {
         MIUI14(14),
         OS1(1),
         OS2(2),
-        OS3(3)
+        OS3(3),
+        OS4(4)
     }
 
     /**
@@ -60,7 +61,8 @@ object VersionGate {
             return when {
                 major <= 1 -> RomTier.OS1
                 major == 2 -> RomTier.OS2
-                major >= 3 -> RomTier.OS3
+                major == 3 -> RomTier.OS3
+                major >= 4 -> RomTier.OS4
                 else -> null
             }
         }

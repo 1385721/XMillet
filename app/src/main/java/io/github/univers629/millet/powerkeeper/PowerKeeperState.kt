@@ -482,6 +482,87 @@ object PowerKeeperState {
         }
     }
 
+    // ==================== 系统设置手动省电策略短时租约（P31/P32 ↔ P7/P8） ====================
+
+    /**
+     * 用户在系统设置「省电策略」手动修改应用策略后的短时放行租约（15 秒）。
+     *
+     * HyperOS 写入 `PowerSaveConfigureManager#setPowerSaveAppConfigure` 后，
+     * PowerKeeper 会在约 1 秒后经 `CommonAdapter#add/removePowerSaveWhitelistApps`
+     * 同步 Doze 白名单；若被 P7/P8 拦截，下次进页面时 `getPowerSaveAppConfigure` 会因为
+     * `isIgnoringBatteryOptimizations == false` 将「无限制」强行回退为「智能推荐」。
+     */
+    internal const val USER_POWER_SAVE_LEASE_MS = 15_000L
+
+    private data class PowerSaveLease(val expectAdd: Boolean, val expireAtMs: Long)
+
+    private val userPowerSaveLeases = java.util.concurrent.ConcurrentHashMap<String, PowerSaveLease>()
+    private val inGetPowerSaveConfigureDepth = object : ThreadLocal<Int>() {
+        override fun initialValue(): Int = 0
+    }
+
+    fun enterGetPowerSaveConfigure() {
+        val current = inGetPowerSaveConfigureDepth.get() ?: 0
+        inGetPowerSaveConfigureDepth.set(current + 1)
+    }
+
+    fun exitGetPowerSaveConfigure() {
+        val current = inGetPowerSaveConfigureDepth.get() ?: 0
+        if (current <= 1) inGetPowerSaveConfigureDepth.remove()
+        else inGetPowerSaveConfigureDepth.set(current - 1)
+    }
+
+    fun isInsideGetPowerSaveConfigure(): Boolean = (inGetPowerSaveConfigureDepth.get() ?: 0) > 0
+
+    fun recordUserPowerSaveIntent(
+        packageName: String?,
+        expectAdd: Boolean,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime(),
+    ) {
+        if (packageName.isNullOrBlank()) return
+        if (isInsideGetPowerSaveConfigure()) return
+        pruneExpiredPowerSaveLeases(nowMs)
+        userPowerSaveLeases[packageName] = PowerSaveLease(
+            expectAdd = expectAdd,
+            expireAtMs = nowMs + USER_POWER_SAVE_LEASE_MS,
+        )
+    }
+
+    /** 按短时租约过滤 `CommonAdapter#add/removePowerSaveWhitelistApps` 的包名数组。 */
+    internal fun filterPowerSaveWhitelistMutation(
+        packages: Array<String>,
+        isAdd: Boolean,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime(),
+    ): Pair<List<String>, List<String>> {
+        val allowed = ArrayList<String>()
+        val blocked = ArrayList<String>()
+        for (pkg in packages) {
+            val lease = userPowerSaveLeases[pkg]
+            if (lease != null && lease.expireAtMs >= nowMs && lease.expectAdd == isAdd) {
+                allowed.add(pkg)
+            } else {
+                if (lease != null && lease.expireAtMs < nowMs) {
+                    userPowerSaveLeases.remove(pkg, lease)
+                }
+                blocked.add(pkg)
+            }
+        }
+        return allowed to blocked
+    }
+
+    private fun pruneExpiredPowerSaveLeases(nowMs: Long) {
+        if (userPowerSaveLeases.size < 16) return
+        val it = userPowerSaveLeases.entries.iterator()
+        while (it.hasNext()) {
+            if (it.next().value.expireAtMs < nowMs) it.remove()
+        }
+    }
+
+    internal fun clearUserPowerSaveLeasesForTest() {
+        userPowerSaveLeases.clear()
+        inGetPowerSaveConfigureDepth.remove()
+    }
+
     // ==================== UID / 包名查询辅助方法 ====================
 
     fun getPackageNameForUid(uid: Int): String? {

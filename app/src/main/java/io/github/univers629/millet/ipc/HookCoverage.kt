@@ -75,6 +75,7 @@ data class HookCoverage(
 
         const val CAP_MILLET = "millet"
         const val CAP_CONTROLLER = "controller"
+        const val CAP_FROZEN_CTRL = "frozen_ctrl"
         const val CAP_MIGARD = "migard"
         const val CAP_BWA = "bwa"
 

@@ -17,6 +17,7 @@ import io.github.univers629.millet.ui.data.RuntimeAndAppsRepository
 import io.github.univers629.millet.ui.data.RuntimeEnvironmentSource
 import io.github.univers629.millet.ui.screen.RunningProcessUiModel
 import io.github.univers629.millet.ui.theme.UiThemeState
+import io.github.univers629.millet.ui.util.shouldApplyUniformBarBlur
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
@@ -98,5 +99,28 @@ class MainShellViewModelTest {
         assertFalse(vm.themeState.showTombStatsTab)
 
         repoScope.cancel()
+    }
+
+    @Test
+    fun bottomBarDestinationResolutionAndUniformBarBlurFollowMiuixSpec() {
+        val fiveTabs = BottomBarDestination.visible(showTombStats = true)
+        val fourTabs = BottomBarDestination.visible(showTombStats = false)
+
+        // 关闭「墓碑统计」后，设置页下标从 4 重映射为 3；重新开启后从 3 映射回 4
+        assertEquals(3, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Settings))
+        assertEquals(4, BottomBarDestination.resolvePageIndex(fiveTabs, BottomBarDestination.Settings))
+        assertEquals(2, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Apps))
+        assertEquals(0, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.TombStats))
+
+        // 顶栏支持渐进式模糊：渐进模式下由 GlassTopAppBar 自行绘制，BlurredBar 不叠整块模糊
+        assertFalse(shouldApplyUniformBarBlur(blurActive = false, progressiveSupported = true, enableProgressiveBlur = false, hasBackdrop = true))
+        assertTrue(shouldApplyUniformBarBlur(blurActive = true, progressiveSupported = true, enableProgressiveBlur = false, hasBackdrop = true))
+        assertFalse(shouldApplyUniformBarBlur(blurActive = true, progressiveSupported = true, enableProgressiveBlur = true, hasBackdrop = true))
+
+        // 经典非悬浮底栏不支持渐进式模糊：渐进模式下仍保持整块均匀毛玻璃（关闭模糊才停用）
+        assertFalse(shouldApplyUniformBarBlur(blurActive = false, progressiveSupported = false, enableProgressiveBlur = true, hasBackdrop = true))
+        assertTrue(shouldApplyUniformBarBlur(blurActive = true, progressiveSupported = false, enableProgressiveBlur = false, hasBackdrop = true))
+        assertTrue(shouldApplyUniformBarBlur(blurActive = true, progressiveSupported = false, enableProgressiveBlur = true, hasBackdrop = true))
+        assertFalse(shouldApplyUniformBarBlur(blurActive = true, progressiveSupported = false, enableProgressiveBlur = true, hasBackdrop = false))
     }
 }

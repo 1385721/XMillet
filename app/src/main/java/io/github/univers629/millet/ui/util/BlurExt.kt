@@ -53,21 +53,44 @@ fun Modifier.milletMiuixBlurEffect(
 }
 
 /**
+ * 判定顶栏/底栏外壳是否应绘制整块均匀毛玻璃（textureBlur）：
+ * - 顶栏（progressiveSupported = true）在开启渐进式模糊时交由 GlassTopAppBar 自行绘制边缘渐隐；
+ * - 经典非悬浮底栏（progressiveSupported = false）参照 Miuix 组件库规范不使用渐进式模糊，开启模糊时保持均匀毛玻璃。
+ */
+internal fun shouldApplyUniformBarBlur(
+    blurActive: Boolean,
+    progressiveSupported: Boolean,
+    enableProgressiveBlur: Boolean,
+    hasBackdrop: Boolean,
+): Boolean {
+    if (!blurActive || !hasBackdrop) return false
+    val progressive = progressiveSupported && enableProgressiveBlur
+    return !progressive
+}
+
+/**
  * 顶栏/底栏外壳：向内下发背景采样源（[LocalBarBackdrop]）。
- * 渐进式模糊开启时由 GlassTopAppBar / 底部渐变带自行绘制，这里不再叠整块 textureBlur。
+ * 支持渐进式模糊的顶栏在开启渐进式模糊时由 GlassTopAppBar 自行绘制，这里不再叠整块 textureBlur；
+ * 经典底栏传入 `progressiveSupported = false`，开启背景模糊时始终保持均匀毛玻璃。
  */
 @Composable
 fun BlurredBar(
     backdrop: LayerBackdrop?,
     blurActive: Boolean = true,
+    progressiveSupported: Boolean = true,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
-    val progressive = LocalEnableProgressiveBlur.current && backdrop != null
+    val uniformBlur = shouldApplyUniformBarBlur(
+        blurActive = blurActive,
+        progressiveSupported = progressiveSupported,
+        enableProgressiveBlur = LocalEnableProgressiveBlur.current,
+        hasBackdrop = backdrop != null,
+    )
     CompositionLocalProvider(LocalBarBackdrop provides backdrop) {
         Box(
             modifier = modifier.then(
-                if (blurActive && !progressive && backdrop != null) {
+                if (uniformBlur && backdrop != null) {
                     Modifier.textureBlur(
                         backdrop = backdrop,
                         shape = RectangleShape,

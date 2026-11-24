@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -269,18 +270,22 @@ class MainActivity : ComponentActivity() {
             if (idx >= 0) mainPagerState.animateToPage(idx)
         }
 
-        val activeDestination by shellVm.activeDestination.collectAsStateWithLifecycle()
         val settledPage = mainPagerState.pagerState.settledPage
         val currentPage = mainPagerState.pagerState.currentPage
-        LaunchedEffect(settledPage, destinations) {
-            destinations.getOrNull(settledPage)?.let(shellVm::onDestinationSettled)
-        }
+        val currentDestinations by rememberUpdatedState(destinations)
         LaunchedEffect(destinations) {
-            val target = destinations.indexOf(activeDestination).let { if (it >= 0) it else 0 }
+            val target = BottomBarDestination.resolvePageIndex(
+                destinations = destinations,
+                activeDestination = shellVm.activeDestination.value,
+            )
             if (pagerState.currentPage != target) {
                 pagerState.scrollToPage(target)
             }
-            mainPagerState.syncPage()
+            mainPagerState.cancelAndSyncPage()
+            destinations.getOrNull(target)?.let(shellVm::onDestinationSettled)
+        }
+        LaunchedEffect(settledPage) {
+            currentDestinations.getOrNull(settledPage)?.let(shellVm::onDestinationSettled)
         }
         LaunchedEffect(currentPage) {
             mainPagerState.syncPage()

@@ -1,13 +1,4 @@
 package io.github.univers629.millet.ui.component
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.height
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.unit.Dp
-import top.yukonga.miuix.kmp.blur.BlurColors
-import top.yukonga.miuix.kmp.blur.BlendColorEntry
-import top.yukonga.miuix.kmp.blur.ProgressiveBlur
-import top.yukonga.miuix.kmp.blur.progressiveTextureBlur
-import io.github.univers629.millet.ui.theme.LocalEnableProgressiveBlur
 
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.BoxScope
@@ -101,6 +92,16 @@ class MainPagerState(
             selectedPage = pagerState.currentPage
         }
     }
+
+    /** 当可见 Tab 列表动态增删导致页序重排时，取消进行中的翻页任务并立即对齐当前页下标。 */
+    fun cancelAndSyncPage() {
+        navJob?.cancel()
+        navJob = null
+        isNavigating = false
+        if (selectedPage != pagerState.currentPage) {
+            selectedPage = pagerState.currentPage
+        }
+    }
 }
 
 @Composable
@@ -128,15 +129,19 @@ enum class BottomBarDestination(
         /** 当前可见的底栏目的地（顺序即 Pager 页序）。页面下标一律经由此列表换算，禁止硬编码。 */
         fun visible(showTombStats: Boolean): List<BottomBarDestination> =
             if (showTombStats) entries.toList() else entries.filter { it != TombStats }
+
+        /** 按目的地枚举解析在新可见列表中的目标页码；目标已被隐藏时回退至首页（0）。 */
+        fun resolvePageIndex(
+            destinations: List<BottomBarDestination>,
+            activeDestination: BottomBarDestination,
+        ): Int = destinations.indexOf(activeDestination).let { if (it >= 0) it else 0 }
     }
 }
 
 /**
  * XMillet 底部导航栏（复刻 KernelSU BottomBarMiuix）：
  * - 悬浮模式：iOS 液态玻璃悬浮底栏 (FloatingBottomBar)，宽度随 Tab 数自适应；
- * - 经典模式：全宽 NavigationBar；
- * - 背景模糊为「渐进式」时，只在经典底栏自身范围内自下而上渐隐模糊，不向上溢出到内容区；
- *   悬浮底栏由液态玻璃自行采样，不再额外叠加底部模糊带。
+ * - 经典模式：全宽 NavigationBar；参照 Miuix 组件库规范不使用渐进式模糊，开启背景模糊时保持整块均匀毛玻璃。
  */
 @Composable
 fun BoxScope.BottomBarMiuix(
@@ -149,8 +154,7 @@ fun BoxScope.BottomBarMiuix(
     val enableBlur = LocalEnableBlur.current
     val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
     val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
-    // 渐进式模糊依赖非空 backdrop，把前提收进类型，后续不必重复判空
-    val progressiveBackdrop = blurBackdrop?.takeIf { LocalEnableProgressiveBlur.current && enableBlur }
+    val bottomBlurActive = enableBlur && blurBackdrop != null
 
     val items = destinations.map { destination ->
         NavigationItem(
@@ -165,32 +169,17 @@ fun BoxScope.BottomBarMiuix(
     val safeSelectedIndex = mainState.selectedPage.coerceIn(0, (items.size - 1).coerceAtLeast(0))
 
     if (!enableFloatingBottomBar) {
-        val surface = colorScheme.surface
         BlurredBar(
             backdrop = blurBackdrop,
-            blurActive = enableBlur && progressiveBackdrop == null,
+            blurActive = bottomBlurActive,
+            progressiveSupported = false,
             modifier = modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .then(
-                    if (progressiveBackdrop != null) {
-                        Modifier.progressiveTextureBlur(
-                            backdrop = progressiveBackdrop,
-                            shape = RectangleShape,
-                            blurRadius = 60f,
-                            gradient = ProgressiveBlur.Bottom,
-                            colors = BlurColors(
-                                blendColors = listOf(BlendColorEntry(color = surface.copy(alpha = 0.3f))),
-                            ),
-                        )
-                    } else {
-                        Modifier
-                    }
-                )
         ) {
             NavigationBar(
                 modifier = Modifier.fillMaxWidth(),
-                color = if (enableBlur && blurBackdrop != null) Color.Transparent else colorScheme.surface,
+                color = if (bottomBlurActive) Color.Transparent else colorScheme.surface,
             ) {
                 items.forEachIndexed { index, item ->
                     NavigationBarItem(

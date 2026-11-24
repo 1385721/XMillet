@@ -87,8 +87,9 @@ class InteractiveHighlight(
             drawContent()
         }
 
+    // 以当前实例为 key：防止重建后手势协程继续绑定到旧实例的高光动画状态。
     val gestureModifier: Modifier =
-        Modifier.pointerInput(animationScope) {
+        Modifier.pointerInput(this) {
             inspectDragGestures(
                 onDragStart = { down ->
                     startPosition = down.position

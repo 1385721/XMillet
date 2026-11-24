@@ -1,8 +1,6 @@
 package io.github.univers629.millet.ui.screen
-import androidx.compose.material.icons.rounded.Gradient
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.app.Activity
@@ -82,16 +80,13 @@ import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.ThemeColorSpec
@@ -211,7 +206,7 @@ fun ThemeSettingsScreenMiuix(
                                 )
                             },
                             title = "顶栏与底栏背景模糊",
-                            summary = "高斯模糊为整块毛玻璃；渐进式模糊为 HyperOS 4 风格边缘渐隐，两者互斥",
+                            summary = "高斯模糊为整块毛玻璃；渐进式模糊为顶栏 HyperOS 4 风格边缘渐隐（经典底栏保持毛玻璃）",
                             items = listOf("关闭", "高斯模糊", "渐进式模糊"),
                             selectedIndex = when {
                                 !themeState.enableBlur -> 0

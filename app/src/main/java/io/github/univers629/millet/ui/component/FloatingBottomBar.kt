@@ -182,6 +182,34 @@ fun RowScope.FloatingBottomBarItem(
     )
 }
 
+/** 按容器总宽、两侧内边距与 Tab 数即时换算单项像素宽度，避免 Tab 数变化但外框宽度不变时漏算。 */
+internal fun computeFloatingTabWidthPx(
+    totalWidthPx: Float,
+    horizontalPaddingPx: Float,
+    tabsCount: Int,
+): Float {
+    if (totalWidthPx <= 0f || tabsCount <= 0) return 0f
+    return ((totalWidthPx - horizontalPaddingPx) / tabsCount).coerceAtLeast(0f)
+}
+
+/** 按触摸横坐标、容器实时总宽与 Tab 数换算命中下标；宽度尚未测量完成时回退至当前选中项。 */
+internal fun computeFloatingTabIndexAt(
+    positionX: Float,
+    totalWidthPx: Float,
+    singleSidePaddingPx: Float,
+    tabsCount: Int,
+    isLtr: Boolean,
+    fallbackIndex: Int,
+): Int {
+    val maxIndex = (tabsCount - 1).coerceAtLeast(0)
+    val tabWidthPx = computeFloatingTabWidthPx(totalWidthPx, singleSidePaddingPx * 2f, tabsCount)
+    if (tabWidthPx <= 0f) return fallbackIndex.coerceIn(0, maxIndex)
+    val logicalX = if (isLtr) positionX else totalWidthPx - positionX
+    return ((logicalX - singleSidePaddingPx) / tabWidthPx)
+        .toInt()
+        .coerceIn(0, maxIndex)
+}
+
 @Composable
 fun FloatingBottomBar(
     modifier: Modifier = Modifier,
@@ -204,8 +232,16 @@ fun FloatingBottomBar(
     val isLtr = LocalLayoutDirection.current == LayoutDirection.Ltr
     val animationScope = rememberCoroutineScope()
 
-    var tabWidthPx by remember { mutableFloatStateOf(0f) }
     var totalWidthPx by remember { mutableFloatStateOf(0f) }
+    val singleSidePaddingPx = with(density) { 4.dp.toPx() }
+    val totalHorizontalPaddingPx = singleSidePaddingPx * 2f
+    // 必须用 State 委托（derivedStateOf）而非普通局部变量：dampedDragAnimation 在首帧（totalWidthPx == 0f）
+    // 创建并捕获闭包，只有通过 State 委托读取才能在 onGloballyPositioned 测量完成后拿到实时宽度。
+    val tabWidthPx by remember(tabsCount, totalHorizontalPaddingPx) {
+        derivedStateOf {
+            computeFloatingTabWidthPx(totalWidthPx, totalHorizontalPaddingPx, tabsCount)
+        }
+    }
 
     val offsetAnimation = remember { Animatable(0f) }
     val rubberBandPx = with(density) { 4.dp.toPx() }
@@ -226,14 +262,14 @@ fun FloatingBottomBar(
     var currentIndex by remember { mutableIntStateOf(clampedSelectedIndex) }
     val onSelectedUpdated by rememberUpdatedState(onSelected)
 
-    fun indexAt(positionX: Float): Int {
-        if (tabWidthPx == 0f) return currentIndex.coerceIn(0, maxIndex)
-        val horizontalPaddingPx = with(density) { 4.dp.toPx() }
-        val logicalX = if (isLtr) positionX else totalWidthPx - positionX
-        return ((logicalX - horizontalPaddingPx) / tabWidthPx)
-            .toInt()
-            .coerceIn(0, maxIndex)
-    }
+    fun indexAt(positionX: Float): Int = computeFloatingTabIndexAt(
+        positionX = positionX,
+        totalWidthPx = totalWidthPx,
+        singleSidePaddingPx = singleSidePaddingPx,
+        tabsCount = tabsCount,
+        isLtr = isLtr,
+        fallbackIndex = currentIndex,
+    )
 
     val dampedDragAnimation = remember(animationScope, tabsCount, density, isLtr) {
         DampedDragAnimation(
@@ -301,7 +337,7 @@ fun FloatingBottomBar(
         dampedDragAnimation.animateToValue(index.toFloat())
     }
 
-    val interactiveHighlight = remember(animationScope, tabWidthPx, dampedDragAnimation) {
+    val interactiveHighlight = remember(animationScope, isLtr, dampedDragAnimation) {
         InteractiveHighlight(
             animationScope = animationScope,
             position = { size, _ ->
@@ -327,8 +363,6 @@ fun FloatingBottomBar(
             Modifier
                 .onGloballyPositioned { coords ->
                     totalWidthPx = coords.size.width.toFloat()
-                    val contentWidthPx = totalWidthPx - with(density) { 8.dp.toPx() }
-                    tabWidthPx = (contentWidthPx / tabsCount).coerceAtLeast(0f)
                 }
                 .selectableGroup()
                 .graphicsLayer { translationX = panelOffset }

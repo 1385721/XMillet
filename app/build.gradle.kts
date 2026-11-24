@@ -7,6 +7,8 @@ plugins {
 android {
     namespace = "io.github.univers629.millet"
     compileSdk = 37
+    // miuix 0.9.5-beta03 的 AAR 元数据要求 minCompileSdk=37 + minCompileMinorSdk=2，AGP 9.4 起会校验次版本
+    compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "io.github.univers629.millet"

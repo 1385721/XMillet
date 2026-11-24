@@ -10,7 +10,7 @@
 ![Android](https://img.shields.io/badge/Android-13%2B%20(API%2033)-3DDC84?style=flat-square&logo=android&logoColor=white)
 ![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-UI-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)
 ![JDK](https://img.shields.io/badge/JDK-21-437291?style=flat-square&logo=openjdk&logoColor=white)
-![Gradle](https://img.shields.io/badge/Gradle-9.3.1-02303A?style=flat-square&logo=gradle&logoColor=white)
+![Gradle](https://img.shields.io/badge/Gradle-9.8.0-02303A?style=flat-square&logo=gradle&logoColor=white)
 ![HyperOS](https://img.shields.io/badge/HyperOS-OS1.0%20~%20OS4.0-FF6900?style=flat-square&logo=xiaomi&logoColor=white)
 
 [<img src="https://github.com/LSPosed.png" height="20" alt="LSPosed">](https://github.com/LSPosed)

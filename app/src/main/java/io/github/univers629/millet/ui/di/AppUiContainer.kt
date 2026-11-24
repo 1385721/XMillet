@@ -4,8 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import io.github.univers629.millet.MilletApplication
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.ui.data.AndroidFreezeStatsDataSource
 import io.github.univers629.millet.ui.data.AndroidInstalledPackageSource
 import io.github.univers629.millet.ui.data.AndroidRuntimeEnvironmentSource
+import io.github.univers629.millet.ui.data.FreezeStatsDataSource
 import io.github.univers629.millet.ui.data.PolicyRepository
 import io.github.univers629.millet.ui.data.RuntimeAndAppsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +34,8 @@ class AppUiContainer(context: Context) {
         environmentSource = AndroidRuntimeEnvironmentSource(appContext),
         scope = appScope,
     )
+
+    val freezeStatsDataSource: FreezeStatsDataSource = AndroidFreezeStatsDataSource(appContext)
 }
 
 val Context.appUiContainer: AppUiContainer

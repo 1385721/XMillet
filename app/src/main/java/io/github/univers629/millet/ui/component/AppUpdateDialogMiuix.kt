@@ -1,4 +1,7 @@
 package io.github.univers629.millet.ui.component
+import top.yukonga.miuix.kmp.glass.GlassDialog
+import top.yukonga.miuix.kmp.glass.GlassBottomSheet
+import io.github.univers629.millet.ui.util.PopupBackdropHolder
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -84,12 +87,13 @@ fun AppUpdateDialogMiuix(
         else -> "下载并安装"
     }
 
-    WindowDialog(
+    GlassDialog(backdrop = PopupBackdropHolder.current, 
         show = show,
         modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
         title = "发现新版本",
         onDismissRequest = onDismiss,
         content = {
+            DialogBackHandler { onDismiss() }
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = "v$currentVersionName → v${release.versionName}",

@@ -1,4 +1,11 @@
 package io.github.univers629.millet.ui.screen
+import io.github.univers629.millet.ui.util.GlassOverlayListPopup
+import top.yukonga.miuix.kmp.glass.GlassDialog
+import top.yukonga.miuix.kmp.glass.GlassBottomSheet
+import io.github.univers629.millet.ui.util.PopupBackdropHolder
+import io.github.univers629.millet.ui.util.MilletTopAppBar
+import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
+import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -35,6 +42,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.InputTransformation
+import androidx.compose.foundation.text.input.TextFieldDecorator
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.maxLengthTrim
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
@@ -47,6 +60,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -88,7 +102,7 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import io.github.univers629.millet.ui.util.ListPopupColumn
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -103,7 +117,6 @@ import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
-import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.LocalDismissState
@@ -137,11 +150,11 @@ internal fun PolicySubPageScaffold(
     Scaffold(
         topBar = {
             BlurredBar(backdrop, blurActive) {
-                TopAppBar(
+                MilletTopAppBar(
                     color = barColor,
                     title = title,
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        BarIconButton(onClick = onBack) {
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
                                 modifier = Modifier.graphicsLayer {
@@ -305,7 +318,6 @@ fun PolicyTemplatesScreenMiuix(
         onBack = onBack,
         actions = {
             IconButton(
-                modifier = Modifier.padding(end = 12.dp),
                 onClick = { showEditor = true }
             ) {
                 Icon(
@@ -506,8 +518,7 @@ fun PolicyTemplateDetailScreenMiuix(
         actions = {
             if (!template.builtIn) {
                 val showTopPopup = remember { mutableStateOf(false) }
-                IconButton(
-                    modifier = Modifier.padding(end = 12.dp),
+                BarIconButton(
                     onClick = { showTopPopup.value = true },
                     holdDownState = showTopPopup.value
                 ) {
@@ -517,7 +528,7 @@ fun PolicyTemplateDetailScreenMiuix(
                         contentDescription = "模板操作"
                     )
                 }
-                OverlayListPopup(
+                GlassOverlayListPopup(
                     show = showTopPopup.value,
                     popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
                     alignment = PopupPositionProvider.Align.TopEnd,
@@ -860,10 +871,9 @@ internal fun PolicyTemplateEditorSheet(
     val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
         WindowInsets.captionBar.asPaddingValues().calculateBottomPadding()
 
-    OverlayBottomSheet(
+    GlassBottomSheet(backdrop = PopupBackdropHolder.current, 
         show = show,
         title = if (initial == null) "新建自定义模板" else "编辑模板",
-        backgroundColor = colorScheme.surface,
         insideMargin = DpSize(16.dp, 0.dp),
         onDismissRequest = onDismiss,
     ) {
@@ -881,7 +891,7 @@ internal fun PolicyTemplateEditorSheet(
             ) {
                 TemplateNameField(
                     value = name,
-                    onValueChange = { name = it.take(PolicyTemplateCodec.MAX_NAME_LENGTH) }
+                    onValueChange = { name = it }
                 )
                 SmallTitle(text = "冻结豁免与保活")
                 Card(modifier = Modifier.fillMaxWidth()) {
@@ -960,10 +970,19 @@ private fun TemplateNameField(
     value: String,
     onValueChange: (String) -> Unit,
 ) {
+    // 输入框自己持有文本，外层 value 只在外部重置（切换模板/重新打开）时同步进来
+    val state = rememberTextFieldState(value)
+    LaunchedEffect(value) {
+        if (state.text.toString() != value) state.setTextAndPlaceCursorAtEnd(value)
+    }
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() }.collect { onValueChange(it) }
+    }
     BasicTextField(
-        value = value,
-        onValueChange = onValueChange,
-        singleLine = true,
+        state = state,
+        lineLimits = TextFieldLineLimits.SingleLine,
+        // 长度上限交给输入变换，超出部分直接截断而不是让调用方再 take 一次
+        inputTransformation = InputTransformation.maxLengthTrim(PolicyTemplateCodec.MAX_NAME_LENGTH),
         textStyle = TextStyle(
             fontWeight = FontWeight.Medium,
             fontSize = 16.sp,
@@ -976,14 +995,14 @@ private fun TemplateNameField(
             .padding(top = 8.dp)
             .heightIn(min = 48.dp)
             .background(colorScheme.surfaceContainerHigh, RoundedCornerShape(14.dp)),
-        decorationBox = { innerTextField ->
+        decorator = TextFieldDecorator { innerTextField ->
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                if (value.isEmpty()) {
+                if (state.text.isEmpty()) {
                     Text(
                         text = "模板名称（最多 ${PolicyTemplateCodec.MAX_NAME_LENGTH} 字）",
                         fontSize = 15.sp,
@@ -1051,10 +1070,9 @@ private fun PolicyAppPickerSheet(
     val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
         WindowInsets.captionBar.asPaddingValues().calculateBottomPadding()
 
-    OverlayBottomSheet(
+    GlassBottomSheet(backdrop = PopupBackdropHolder.current, 
         show = show,
         title = "套用「${template.name}」",
-        backgroundColor = colorScheme.surface,
         insideMargin = DpSize(16.dp, 0.dp),
         onDismissRequest = onDismiss,
     ) {

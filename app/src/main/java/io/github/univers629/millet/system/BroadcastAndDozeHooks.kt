@@ -16,6 +16,7 @@ import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.ConditionalDozeLifecycle
 import io.github.univers629.millet.core.XReflect
+import io.github.univers629.millet.core.HookDecisions
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
 import io.github.univers629.millet.core.Logger
@@ -37,6 +38,7 @@ import java.io.StringWriter
  *   S14（moveToStateLocked 跳过 IDLE_PENDING 直进 IDLE_MAINTENANCE）。
  */
 object BroadcastAndDozeHooks {
+    private val skipBroadcastLogAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private const val CLASS_AMS = "com.android.server.am.ActivityManagerService"
     private const val CLASS_BROADCAST_SKIP_POLICY = "com.android.server.am.BroadcastSkipPolicy"
@@ -233,7 +235,14 @@ object BroadcastAndDozeHooks {
                 return@HookSpec param.invokeOriginal()
             }
 
-            Logger.info("修改 ${procState.processName} ,跳过广播")
+            if (prefs.isLog) {
+                val now = android.os.SystemClock.uptimeMillis()
+                val last = skipBroadcastLogAt[procState.processName]
+                if (last == null || now - last !in 0..60_000L) {
+                    skipBroadcastLogAt[procState.processName] = now
+                    Logger.info("修改 ${procState.processName} ,跳过广播（60 秒内同进程不再重复记录）")
+                }
+            }
             SKIP_FROZEN_BROADCAST_REASON
         }
     )
@@ -443,6 +452,44 @@ object BroadcastAndDozeHooks {
                     else -> "UNKNOWN($state)"
                 }
                 Logger.doze(Logger.Level.WARN, "[Doze状态监测]:由于$reason,切换到:$stateName")
+            }
+        }
+    )
+
+    /**
+     * S34：DeviceIdleController#isUpcomingAlarmClock()
+     *
+     * OS4 在 QUICK_DOZE_DELAY(7) 下自锁：`stepIdleStateLocked` 开头只要判定「30 分钟内有一次
+     * 从 idle 唤醒的闹钟」则先 `becomeActiveLocked("alarm")` 再 `becomeInactiveIfAppropriateLocked()`，
+     * 而后者在 QuickDoze 打开时再把状态推回 7，`force-idle deep` 的推进循环无法前进，
+     * 最后以 `Unable to go deep idle; stopped at QUICK_DOZE_DELAY` 失败退出。
+     *
+     * 强制进入深睡是本模块的明确意图，此时跳过「让闹钟先响」这条保护，状态机才能从 7 走到 IDLE(5)。
+     * 只在 `mForceIdle == true` 且状态为 7 时短路，其余路径保持 ROM 原样（该判定还决定闹钟重排时间，
+     * 短路后按 QUICK_DOZE_DELAY_TIMEOUT 重排，不影响其他行为）。
+     */
+    fun buildS34DeviceIdleUpcomingAlarmHook(): HookSpec = HookSpec(
+        id = "S34",
+        name = "DeviceIdleController#isUpcomingAlarmClock",
+        targetClass = CLASS_DEVICE_IDLE_CONTROLLER,
+        methodName = "isUpcomingAlarmClock",
+        paramTypes = emptyList(),
+        mode = HookMode.BEFORE,
+        successLog = "获取Doze闹钟判定成功",
+        before = { param ->
+            if (!SystemState.isGreezeReady) return@HookSpec
+            val controller = SystemState.deviceIdleController ?: param.thisObject ?: return@HookSpec
+            val forced = runCatching {
+                XReflect.getObjectField(controller, "mForceIdle") as? Boolean
+            }.getOrNull()
+            // 只在「强制推进 + 卡在 QUICK_DOZE_DELAY」时短路，其余路径保持 ROM 原行为。
+            val state = runCatching {
+                XReflect.getIntField(controller, "mState").takeIf { it in 0..7 }
+            }.getOrNull()
+            if (!HookDecisions.bypassUpcomingAlarmWhileForced(forced, state)) return@HookSpec
+            param.result = false
+            if (PrefReader.systemPrefs.dozeLog) {
+                Logger.doze(Logger.Level.INFO, "[Doze]:强制推进时跳过即将到来的闹钟判定 state=$state")
             }
         }
     )

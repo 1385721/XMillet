@@ -1,4 +1,9 @@
 package io.github.univers629.millet.ui.screen
+import io.github.univers629.millet.ui.util.GlassOverlayListPopup
+import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
+import io.github.univers629.millet.ui.util.MilletTopAppBar
+import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
+import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -38,10 +43,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldDecorator
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -76,10 +88,10 @@ import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.DropdownImpl
+import io.github.univers629.millet.ui.util.GlassMenuItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import io.github.univers629.millet.ui.util.ListPopupColumn
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh
@@ -93,7 +105,6 @@ import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.basic.Search
 import top.yukonga.miuix.kmp.icon.basic.SearchCleanup
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
-import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -208,6 +219,13 @@ fun AppsScreenMiuix(
         }
     }
 
+    // 各分类数量（不受搜索词影响，只随系统应用开关变化）
+    val categoryCounts = remember(apps, showSystemApps) {
+        AppCategoryFilter.entries.map { cat ->
+            apps.count { app -> (showSystemApps || !app.isSystem || app.hasAnyConfig) && cat.matches(app) }
+        }
+    }
+
     // 模板与云名单概览：随 templateVersion / policyVersion / apps 刷新。
     val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
     val hubSummary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
@@ -217,13 +235,12 @@ fun AppsScreenMiuix(
     Scaffold(
         topBar = {
             BlurredBar(backdrop, blurActive) {
-                TopAppBar(
+                MilletTopAppBar(
                     color = barColor,
                     title = "应用策略 (${filteredApps.size})",
                     actions = {
                         val showTopPopup = remember { mutableStateOf(false) }
-                        IconButton(
-                            modifier = Modifier.padding(end = 12.dp),
+                        BarIconButton(
                             onClick = { showTopPopup.value = true },
                             holdDownState = showTopPopup.value
                         ) {
@@ -233,7 +250,7 @@ fun AppsScreenMiuix(
                                 contentDescription = "更多选项"
                             )
                         }
-                        OverlayListPopup(
+                        GlassOverlayListPopup(
                             show = showTopPopup.value,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
                             alignment = PopupPositionProvider.Align.TopEnd,
@@ -242,7 +259,7 @@ fun AppsScreenMiuix(
                             },
                             content = {
                                 ListPopupColumn {
-                                    DropdownImpl(
+                                    GlassMenuItem(
                                         text = "显示系统应用",
                                         isSelected = showSystemApps,
                                         optionSize = 1,
@@ -305,45 +322,22 @@ fun AppsScreenMiuix(
                         }
                     }
 
-                    // 2. 策略分类横向胶囊筛选条
-                    item {
-                        Row(
+                    // 2. 策略分类：下拉选择代替横向胶囊条，不再与左右切页手势争抢横向拖动
+                    item(key = "category_filter") {
+                        Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(horizontal = 12.dp)
+                                .padding(top = 4.dp, bottom = 10.dp)
                         ) {
-                            AppCategoryFilter.entries.forEachIndexed { idx, cat ->
-                                val selected = idx == selectedCategoryIndex
-                                val bgColor = if (selected) {
-                                    colorScheme.primary
-                                } else {
-                                    colorScheme.surfaceContainerHigh
-                                }
-                                val txtColor = if (selected) {
-                                    colorScheme.onPrimary
-                                } else {
-                                    colorScheme.onSurfaceVariantSummary
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(bgColor)
-                                        .clickable { selectedCategoryIndex = idx }
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                                ) {
-                                    Text(
-                                        text = cat.title,
-                                        color = txtColor,
-                                        fontSize = 13.sp,
-                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
-                                    )
-                                }
-                            }
+                            GlassDropdownPreference(
+                                title = "策略分类",
+                                items = AppCategoryFilter.entries.mapIndexed { i, cat -> "${cat.title} (${categoryCounts.getOrElse(i) { 0 }})" },
+                                selectedIndex = selectedCategoryIndex.coerceIn(0, AppCategoryFilter.entries.lastIndex),
+                                onSelectedIndexChange = { selectedCategoryIndex = it },
+                                backdrop = backdrop,
+                            )
                         }
-                        Spacer(Modifier.height(4.dp))
                     }
 
                     if (filteredApps.isEmpty()) {
@@ -383,11 +377,22 @@ internal fun MiuixCapsuleSearchBar(
     query: String,
     onQueryChange: (String) -> Unit,
     placeholder: String,
+    horizontalPadding: Dp = 12.dp,
+    topPadding: Dp = 8.dp,
+    bottomPadding: Dp = 4.dp,
 ) {
+    // TextFieldState 是输入框自身的真相来源，外部 query 只负责初始值与程序化重置
+    val state = rememberTextFieldState(query)
+    LaunchedEffect(query) {
+        if (state.text.toString() != query) state.setTextAndPlaceCursorAtEnd(query)
+    }
+    // 每次改动单向回传给调用方，调用方仍用 String 持有查询条件
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() }.collect { onQueryChange(it) }
+    }
     BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        singleLine = true,
+        state = state,
+        lineLimits = TextFieldLineLimits.SingleLine,
         textStyle = TextStyle(
             fontWeight = FontWeight.Medium,
             fontSize = 16.sp,
@@ -397,11 +402,11 @@ internal fun MiuixCapsuleSearchBar(
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .padding(top = 8.dp, bottom = 4.dp)
+            .padding(horizontal = horizontalPadding)
+            .padding(top = topPadding, bottom = bottomPadding)
             .heightIn(min = 45.dp)
             .background(colorScheme.surfaceContainerHigh, CircleShape),
-        decorationBox = { innerTextField ->
+        decorator = TextFieldDecorator { innerTextField ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -418,7 +423,7 @@ internal fun MiuixCapsuleSearchBar(
                     modifier = Modifier.weight(1f),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    if (query.isEmpty()) {
+                    if (state.text.isEmpty()) {
                         Text(
                             text = placeholder,
                             fontSize = 15.sp,
@@ -428,7 +433,7 @@ internal fun MiuixCapsuleSearchBar(
                     innerTextField()
                 }
                 AnimatedVisibility(
-                    visible = query.isNotEmpty(),
+                    visible = state.text.isNotEmpty(),
                     enter = fadeIn() + scaleIn(),
                     exit = fadeOut() + scaleOut(),
                 ) {
@@ -443,7 +448,7 @@ internal fun MiuixCapsuleSearchBar(
                                 interactionSource = null,
                                 indication = null
                             ) {
-                                onQueryChange("")
+                                state.clearText()
                             },
                     )
                 }

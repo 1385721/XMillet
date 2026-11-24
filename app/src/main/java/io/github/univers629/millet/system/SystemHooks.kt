@@ -19,9 +19,9 @@ import io.github.univers629.millet.ipc.MilletIpcContract
 import io.github.univers629.millet.ipc.SystemBinderService
 
 /**
- * 作用域 `"android"`（system_server）全部 20 个安装点总装入口（S1–S20）。
+ * 作用域 `"android"`（system_server）全部安装点总装入口（S1–S34，下表仅列 S1–S20）。
  *
- * 安装点分母核对（共 20 个安装点）：
+ * 安装点分母核对：
  * - S1 : ActivityManagerService#registerReceiverWithFeature (before)
  * - S2 : GreezeManagerService#<init> (after) —— 捕获句柄 + UpdateDialog 初始化闸门（2 条构造器 Hook）
  * - S3 : AurogonImmobulusMode#<init> (after)
@@ -42,6 +42,7 @@ import io.github.univers629.millet.ipc.SystemBinderService
  * - S18: GreezeManagerService#thawProcess (after, simplifyLog 门控)
  * - S19: AnrHelper#appNotResponding / deferAppNotResponding (before, 遍历 getDeclaredMethods())
  * - S20: GreezeManagerService#thawUid (before)
+ * - S34: DeviceIdleController#isUpcomingAlarmClock (before, 仅强制推进且状态为 7 时短路)
  */
 object SystemHooks {
 
@@ -139,6 +140,7 @@ object SystemHooks {
         BroadcastAndDozeHooks.buildS12DeviceIdleOnStartHook(),
         BroadcastAndDozeHooks.buildS13DeviceIdleMotionLockedHook(),
         BroadcastAndDozeHooks.buildS14DeviceIdleMoveToStateHook(),
+        BroadcastAndDozeHooks.buildS34DeviceIdleUpcomingAlarmHook(),
         FreezeGateHooks.buildS2GreezeLifecycleReadyHook(),
         FreezeGateHooks.buildWakeLockHook(),
         FreezeGateHooks.buildSystemProcessManagerKillHook()

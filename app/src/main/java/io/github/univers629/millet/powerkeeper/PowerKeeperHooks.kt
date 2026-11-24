@@ -10,6 +10,7 @@ import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.ModernHookInstaller
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookInstallRegistry
+import io.github.univers629.millet.core.HookDecisions
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
 import io.github.univers629.millet.core.Logger
@@ -63,6 +64,7 @@ object PowerKeeperHooks {
     private const val CLASS_PROCESS_CONFIG = "miui.process.ProcessConfig"
     private const val CLASS_KILL_PROCESS_CONTROLLER = "com.miui.powerkeeper.controller.KillProcessController"
     private const val CLASS_ACTIVE_STATE_CONTROLLER = "com.miui.powerkeeper.controller.ActiveStateController"
+    private const val CLASS_APP_CLUSTER_CONTROLLER = "com.miui.powerkeeper.controller.AppClusterController"
     private const val CLASS_AUDIO_DISGUISE_CONTROLLER = "com.miui.powerkeeper.controller.AudioDisguiseController"
     private const val CLASS_GLOBAL_FEATURE_HELPER = "com.miui.powerkeeper.provider.GlobalFeatureConfigureHelper"
     private const val CLASS_POWER_SAVE_CONFIGURE_MANAGER = "com.miui.powerkeeper.provider.PowerSaveConfigureManager"
@@ -188,7 +190,8 @@ object PowerKeeperHooks {
             buildP20BrightScenarioBaseInitHook(),
             buildP17FreezeBinderInitHook(),
             buildP18PowerKeeperManagerInitHook(),
-            buildP29MilletAppUidHook(classLoader)
+            buildP29MilletAppUidHook(classLoader),
+            buildP34ClusterDualAppHook(classLoader)
         )
         // 按当前 ROM 版本的能力过滤点位：目标类/方法在本版本不存在时跳过，
         // 既不会让安装器抛 ClassNotFound/NoSuchMethod，也不会把「本版本没有的功能」误报成 Hook 失败。
@@ -729,7 +732,8 @@ object PowerKeeperHooks {
 
     private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot, uid: Int): Boolean {
         if (pkg == null) return false
-        return AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
+        return pkg in io.github.univers629.millet.core.BuiltinProtect.FREEZE_EXEMPT_PACKAGES ||
+            AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
             ActiveImeTracker.isProtectedSystemServiceApp(PowerKeeperState.applicationContext, pkg, prefs, uid)
     }
 
@@ -1015,8 +1019,34 @@ object PowerKeeperHooks {
         mode = HookMode.BEFORE,
         before = { param ->
             val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
-            if (!io.github.univers629.millet.core.AppUidUtils.isDualAppUid(uid)) return@HookSpec
+            if (!AppUidUtils.isDualAppUid(uid)) return@HookSpec
             param.result = PrefReader.powerKeeperPrefs.freezeDualApp
+        }
+    )
+
+    /**
+     * P34（OS1–OS4）：AppClusterController#isControlApp(int)
+     *
+     * 应用集群控制（后台分组/冻结决策）用 uid 区间 `1..19999` 判定「是否受管应用」，
+     * 双开应用的 uid 形如 999xxxxx，恒被拒，导致双开应用整条链路都不进入集群管控。
+     * 这里对双开 uid 直接返回偏好开关的值，主用户应用仍走 ROM 原逻辑。
+     */
+    private fun buildP34ClusterDualAppHook(classLoader: ClassLoader): HookSpec = HookSpec(
+        id = "P34",
+        name = "AppClusterController#isControlApp",
+        targetClass = CLASS_APP_CLUSTER_CONTROLLER,
+        methodName = "isControlApp",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        gate = { RomCapabilities.hasMethod(CLASS_APP_CLUSTER_CONTROLLER, "isControlApp", classLoader) },
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val uid = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val prefs = PrefReader.powerKeeperPrefs
+            val decided = HookDecisions.clusterControlResult(uid, prefs.freezeDualApp) ?: return@HookSpec
+            param.result = decided
+            if (prefs.isLog) {
+                Logger.info("应用集群控制放行双开应用 uid=$uid freezeDualApp=$decided")
+            }
         }
     )
 }

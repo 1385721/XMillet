@@ -8,6 +8,7 @@ import android.os.Parcel
 import android.os.Process
 import android.os.RemoteException
 import io.github.univers629.millet.core.FreezeStatsCodec
+import io.github.univers629.millet.core.HookDecisions
 import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.ModernBridge
@@ -281,12 +282,26 @@ class SystemBinderService : Binder() {
         if (clientName == MilletIpcContract.CLIENT_POWER_KEEPER) {
             // powerkeeper 进程看得见 com.miui.powerkeeper.*（system_server 看不见），
             // 它的账本、能力位与官方云名单接口要留到查询时一起汇总给 App。
-            if (!hooksReport.isNullOrEmpty()) powerKeeperHooksReport = hooksReport
-            if (!capsReport.isNullOrEmpty()) powerKeeperCapsReport = capsReport
-            if (!cloudLists.isNullOrEmpty()) powerKeeperCloudLists = cloudLists
-            Logger.alwaysInfo(
-                "PowerKeeper 上报 Hook 账本: $hooksReport / 能力位: $capsReport / 云名单: ${cloudLists?.length ?: 0} 字符"
-            )
+            //
+            // 热重载时 HookInstallRegistry 先 clear 再逐条写回，此刻读出来的账本只是
+            // 「已记到第几条」；而 restoreRegistrationSnapshot 又会把上一代账本塞回来
+            // 并触发一次重绑上报，两条上报的先后顺序不定。先到完整、后到残缺时，
+            // 界面会一直显示少几个点位（残缺账本还会随快照代代相传），故按 total 单调采纳。
+            val incomingWire = HookInstallRegistry.decodeWireFormat(hooksReport)
+            val currentWire = HookInstallRegistry.decodeWireFormat(powerKeeperHooksReport)
+            if (HookDecisions.acceptLedgerReport(incomingWire, currentWire)) {
+                if (!hooksReport.isNullOrEmpty()) powerKeeperHooksReport = hooksReport
+                if (!capsReport.isNullOrEmpty()) powerKeeperCapsReport = capsReport
+                if (!cloudLists.isNullOrEmpty()) powerKeeperCloudLists = cloudLists
+                Logger.alwaysInfo(
+                    "PowerKeeper 上报 Hook 账本: $hooksReport / 能力位: $capsReport / 云名单: ${cloudLists?.length ?: 0} 字符"
+                )
+            } else {
+                Logger.alwaysWarn(
+                    "PowerKeeper 上报的 Hook 账本不完整（${incomingWire.installed}/${incomingWire.total} < " +
+                        "${currentWire.installed}/${currentWire.total}），保留已缓存的完整账本"
+                )
+            }
         }
         try {
             callbackBinder.linkToDeath(deathRecipient, 0)

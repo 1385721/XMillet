@@ -1,4 +1,6 @@
 package io.github.univers629.millet.ui
+import androidx.compose.runtime.SideEffect
+import io.github.univers629.millet.ui.util.PopupBackdropHolder
 
 import android.content.ComponentName
 import android.content.Context
@@ -54,7 +56,6 @@ import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.CloudListCodec
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.OobeManager
-import io.github.univers629.millet.core.BatteryPolicyHelper
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.RootHelper
@@ -91,6 +92,7 @@ import io.github.univers629.millet.ui.theme.XMilletMiuixTheme
 import io.github.univers629.millet.ui.util.AppUpdateController
 import io.github.univers629.millet.ui.util.AppUpdateDownloadState
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import kotlinx.serialization.Serializable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -108,7 +110,7 @@ import top.yukonga.miuix.kmp.nav.core.NavBackStack
 import top.yukonga.miuix.kmp.nav.core.NavDisplay
 import top.yukonga.miuix.kmp.nav.core.NavDisplayEffects
 import top.yukonga.miuix.kmp.nav.core.NavKey
-import top.yukonga.miuix.kmp.nav.core.navBackStackOf
+import top.yukonga.miuix.kmp.nav.core.rememberNavBackStack
 import top.yukonga.miuix.kmp.nav.core.rememberNavSystemCornerRadius
 import top.yukonga.miuix.kmp.nav.transition.NavSwipeDirection
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -130,17 +132,33 @@ import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
  */
 class MainActivity : ComponentActivity() {
 
+    // 返回栈以 JSON 持久化，所有路由都必须是可序列化的多态子类。
+    @Serializable
     private sealed interface Route : NavKey {
+        @Serializable
         data object Main : Route
-        data class AppProfile(val app: InstalledAppUiModel) : Route
+
+        // 只携带身份，不携带完整模型：模型里的策略布尔会随配置变化，放进路由会让相等性不稳定，
+        // 也无法跨进程重建。展示所需字段在组合时按包名与 UID 从已加载列表解析。
+        @Serializable
+        data class AppProfile(val packageName: String, val uid: Int) : Route
+        @Serializable
         data object PolicyTemplates : Route
+        @Serializable
         data class PolicyTemplateDetail(val templateId: String) : Route
+        @Serializable
         data object CloudWhitelist : Route
+        @Serializable
         data object Appearance : Route
+        @Serializable
         data object Oobe : Route
+        @Serializable
         data object About : Route
+        @Serializable
         data object AboutKnowledge : Route
+        @Serializable
         data object AboutRepo : Route
+        @Serializable
         data object AboutLicenses : Route
     }
 
@@ -148,9 +166,16 @@ class MainActivity : ComponentActivity() {
         val backStack: NavBackStack,
     ) {
         fun push(key: NavKey) {
-            if (key !in backStack) {
+            val identity = routeIdentity(key)
+            if (backStack.none { routeIdentity(it) == identity }) {
                 backStack.add(key)
             }
+        }
+
+        // 同一路由重复压栈会触发 contentKey 冲突，因此按路由身份去重。
+        private fun routeIdentity(key: NavKey): Any = when (key) {
+            is Route.AppProfile -> key.packageName to key.uid
+            else -> key
         }
 
         fun pop() {
@@ -164,7 +189,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun rememberNavigator(startRoute: Route): Navigator {
-        val backStack = remember { navBackStackOf(startRoute) }
+        // 返回栈随 Activity 重建一起恢复：配置变更、深色切换、进程被回收后都不会退回根页。
+        val backStack = rememberNavBackStack<Route>(startRoute)
         return remember(backStack) { Navigator(backStack) }
     }
 
@@ -267,12 +293,20 @@ class MainActivity : ComponentActivity() {
             mainPagerState.syncPage()
         }
 
-        // 主界面 Tab 返回首页拦截（经共享 NavigationEventDispatcher 仲裁，让位于已打开的 Miuix 浮层）
+        // 主界面 Tab 返回首页拦截（经共享 NavigationEventDispatcher 仲裁，让位于已打开的 Miuix 浮层）。
+        // 返回栈有子页时也保持启用：NavDisplay 的处理器在 SideEffect 里才切到启用，压栈那一帧
+        // 会出现「两边都未启用」的空窗，此时系统按无处理器处理，直接结束 Activity。
         val mainBackEventState = rememberNavigationEventState(NavigationEventInfo.None)
         NavigationBackHandler(
             state = mainBackEventState,
-            isBackEnabled = navigator.backStack.size == 1 && mainPagerState.selectedPage != 0,
-            onBackCompleted = { mainPagerState.animateToPage(0) },
+            isBackEnabled = navigator.backStack.size > 1 || mainPagerState.selectedPage != 0,
+            onBackCompleted = {
+                if (navigator.backStack.size > 1) {
+                    navigator.pop()
+                } else {
+                    mainPagerState.animateToPage(0)
+                }
+            },
         )
 
         var runtimeStatus by remember {
@@ -623,73 +657,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 按包名与 UID 打开应用策略页：优先用已加载的列表精确匹配 UID，否则按传入 UID 临时构造
+        // 按包名与 UID 打开应用策略页：路由只携带身份，页面内按身份从已加载列表解析模型，
+        // 列表尚未加载完成时由页面自行补查。
         val openProfileByTarget: (String, Int) -> Unit = { pkg, targetUid ->
             val target = installedApps.find {
                 it.packageName == pkg && (targetUid <= 0 || it.uid == targetUid)
             }
-            if (target != null) {
-                navigator.push(Route.AppProfile(target))
-            } else {
-                val pm = packageManager
-                val appInfo = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
-                val label = appInfo?.let { pm.getApplicationLabel(it).toString() } ?: pkg
-                val sp = PrefReader.openUiPrefs(this@MainActivity)
-                val resolvedUid = if (targetUid > 0) targetUid else (appInfo?.uid ?: 0)
-                navigator.push(
-                    Route.AppProfile(
-                        InstalledAppUiModel(
-                            appName = label,
-                            packageName = pkg,
-                            uid = resolvedUid,
-                            versionName = "",
-                            versionCode = 0,
-                            isSystem = ((appInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0,
-                            applicationInfo = appInfo,
-                            inWhiteSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.WHITE_APP_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inMessageSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.MESSAGE_APP_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inForceFreezeSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.FORCE_FREEZE_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inBlockThawSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.BLOCK_THAW_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inForbidSyncSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.FORBID_SYNC_BINDER_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inNotFreezeFgsSet = AppUidUtils.containsPolicyTarget(
-                                PrefReader.readUiStringSet(
-                                    sp,
-                                    PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET
-                                ), pkg, resolvedUid
-                            ),
-                            inBatteryWhiteSet = !AppUidUtils.isDualAppUid(resolvedUid) && BatteryPolicyHelper.isPackageNoRestrict(
-                                this@MainActivity,
-                                pkg
-                            ),
-                        )
-                    )
-                )
-            }
+            val resolvedUid = target?.uid
+                ?: if (targetUid > 0) targetUid
+                else (runCatching { packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull() ?: 0)
+            navigator.push(Route.AppProfile(pkg, resolvedUid))
         }
 
         // 回到前台时重新读一遍系统状态：用户可能刚在系统设置里改过「省电策略」，
@@ -741,7 +718,7 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(isProvisioned, isForeground) {
             if (!isProvisioned || !isForeground) return@LaunchedEffect
             while (true) {
-                delay(5_000)
+                delay(if (activeDestination == BottomBarDestination.Processes) 5_000L else 15_000L)
                 if (isForeground) refreshStatusAndRunningProcs()
             }
         }
@@ -762,6 +739,11 @@ class MainActivity : ComponentActivity() {
             drawRect(surfaceColor)
             drawContent()
         }
+        val popupBackdrop = rememberLayerBackdrop {
+            drawRect(surfaceColor)
+            drawContent()
+        }
+        SideEffect { PopupBackdropHolder.current = if (enableBlur) popupBackdrop else null }
 
         // 根级 Miuix Scaffold 承载最外层 MiuixPopupHost，确保所有 Tab 的 Dialog / BottomSheet / ListPopup
         // 及其暗色遮罩统一渲染在 BottomBarMiuix 之上，且共享 insets 不重复叠加
@@ -809,7 +791,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 全局界面流转控制：严格对齐 HyperCeiler OS3 官方规范（enter_home_anim + provision_out_anim）
-            Box(modifier = Modifier.fillMaxSize()) {
+            Box(modifier = Modifier.fillMaxSize().then(if (enableBlur) Modifier.layerBackdrop(popupBackdrop) else Modifier)) {
                 AnimatedContent(
                     targetState = isProvisioned,
                     transitionSpec = {
@@ -841,7 +823,9 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         val swipeDismiss =
-                            if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
+                            if (!themeState.enableSwipeBack) {
+                                NavSwipeDirection.None
+                            } else if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
                                 NavSwipeDirection.RightToLeft
                             } else {
                                 NavSwipeDirection.LeftToRight
@@ -971,7 +955,7 @@ class MainActivity : ComponentActivity() {
                                                 },
                                                 onRefresh = { loadInstalledApps(visible = true) },
                                                 onOpenAppProfile = { app ->
-                                                    navigator.push(Route.AppProfile(app))
+                                                    navigator.push(Route.AppProfile(app.packageName, app.uid))
                                                 },
                                                 bottomInnerPadding = bottomNavPadding,
                                                 policyVersion = configVersion,
@@ -1034,9 +1018,19 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            entry<Route.AppProfile>(swipeDismiss = swipeDismiss) { key ->
+                            entry<Route.AppProfile>(
+                                contentKey = { route -> route.packageName to route.uid },
+                                swipeDismiss = swipeDismiss,
+                            ) { key ->
+                                // 列表里没有该应用时（尚未加载完成、或已被过滤），按身份补查一次，
+                                // 保证从进程列表、云名单等入口进入详情页仍然可用。
+                                val resolvedApp = installedApps.find {
+                                    it.packageName == key.packageName && it.uid == key.uid
+                                } ?: remember(key.packageName, key.uid) {
+                                    buildFallbackAppModel(key.packageName, key.uid)
+                                }
                                 AppProfileScreenMiuix(
-                                    app = key.app,
+                                    app = resolvedApp,
                                     onBack = { navigator.pop() },
                                     onPolicyChanged = {
                                         configVersion++
@@ -1067,7 +1061,7 @@ class MainActivity : ComponentActivity() {
                                     templateVersion = policyTemplateVersion,
                                     onBack = { navigator.pop() },
                                     onOpenAppProfile = { app ->
-                                        navigator.push(Route.AppProfile(app))
+                                        navigator.push(Route.AppProfile(app.packageName, app.uid))
                                     },
                                     onPolicyChanged = {
                                         configVersion++
@@ -1092,7 +1086,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onBack = { navigator.pop() },
                                     onOpenAppProfile = { app ->
-                                        navigator.push(Route.AppProfile(app))
+                                        navigator.push(Route.AppProfile(app.packageName, app.uid))
                                     },
                                     configVersion = configVersion,
                                     onConfigChanged = {
@@ -1144,6 +1138,33 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+
+/**
+ * 按包名与 UID 构造应用策略页所需的模型：列表尚未加载完成或该应用被过滤时兜底。
+ * 只读取展示所需字段，策略布尔在详情页内按偏好实时读取。
+ */
+private fun Context.buildFallbackAppModel(packageName: String, uid: Int): InstalledAppUiModel {
+    val info = runCatching { packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
+    val label = info?.let { runCatching { packageManager.getApplicationLabel(it).toString() }.getOrNull() }
+    val pkgInfo = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
+    return InstalledAppUiModel(
+        appName = label ?: packageName,
+        packageName = packageName,
+        uid = if (uid > 0) uid else (info?.uid ?: 0),
+        versionName = pkgInfo?.versionName.orEmpty(),
+        versionCode = pkgInfo?.longVersionCode ?: 0L,
+        isSystem = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0,
+        applicationInfo = info,
+        inWhiteSet = false,
+        inMessageSet = false,
+        inForceFreezeSet = false,
+        inBlockThawSet = false,
+        inForbidSyncSet = false,
+        inNotFreezeFgsSet = false,
+        inBatteryWhiteSet = false,
+    )
 }
 
 /** 旧版「桌面图标取色」开关的持久化键，仅用于一次性迁移。 */

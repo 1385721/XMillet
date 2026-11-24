@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 // 本 fork 的 release 签名配置（密钥放在仓库外的 ~/.config，不进版本库）。
@@ -22,8 +23,8 @@ android {
         applicationId = "io.github.univers629.millet"
         minSdk = 33
         targetSdk = 34
-        versionCode = 1240
-        versionName = "1.2.4"
+        versionCode = 1300
+        versionName = "1.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -35,7 +36,11 @@ android {
         buildConfig = true
     }
 
+    // 上游：CI 通过环境变量提供 PKCS12 密钥库（来自仓库 Secrets），本地无密钥时 release 产物保持未签名
+    val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
+    val hasReleaseKeystore = !releaseKeystorePath.isNullOrBlank() && file(releaseKeystorePath).exists()
     signingConfigs {
+        // 本 fork：优先使用仓库外的本地密钥（~/.config/xmillet-fork/keystore.properties）
         if (forkSigningProps != null) {
             create("fork") {
                 storeFile = file(forkSigningProps.getProperty("storeFile"))
@@ -44,10 +49,24 @@ android {
                 keyPassword = forkSigningProps.getProperty("keyPassword")
             }
         }
+        create("release") {
+            if (hasReleaseKeystore) {
+                storeFile = file(releaseKeystorePath!!)
+                storeType = "PKCS12"
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_STORE_PASSWORD")
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -94,15 +113,23 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
-    implementation("androidx.navigationevent:navigationevent:1.1.2")
-    implementation("androidx.navigationevent:navigationevent-compose:1.1.2")
+    implementation("androidx.navigationevent:navigationevent:1.2.0")
+    implementation("androidx.navigationevent:navigationevent-compose:1.2.0")
 
-    // Miuix KMP UI 组件库、图标、导航、设置项与毛玻璃特效 (0.9.4)
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-nav-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
+    // Miuix KMP UI 组件库、图标、导航、设置项与毛玻璃特效 (0.9.5-beta03)
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-nav-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-material-android:0.9.5-beta03")
+    implementation("top.yukonga.miuix.kmp:miuix-glass-android:0.9.5-beta03")
+
+    // 返回栈持久化（rememberNavBackStack 的 JSON 编解码）使用
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+
+    // 预测性返回开关需要反射 ApplicationInfo 的隐藏 API
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
 
     testImplementation("junit:junit:4.13.2")
 }

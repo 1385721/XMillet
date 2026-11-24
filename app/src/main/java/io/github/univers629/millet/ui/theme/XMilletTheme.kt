@@ -42,6 +42,7 @@ import androidx.navigationevent.toNavigationEvent
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
+import io.github.univers629.millet.core.PrefsSnapshot
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.ThemeColorSpec
@@ -108,6 +109,13 @@ class UiThemeState(private val prefs: SharedPreferences) {
         val synced = PrefReader.readUiBoolean(prefs, PrefsKeys.FREEZE_STATS)
         showTombStatsTab = synced
         prefs.edit().putBoolean(KEY_SHOW_TOMB_STATS, synced).apply()
+    }
+
+    fun syncFromSnapshot(snapshot: PrefsSnapshot) {
+        if (showTombStatsTab != snapshot.freezeStats) {
+            showTombStatsTab = snapshot.freezeStats
+            prefs.edit().putBoolean(KEY_SHOW_TOMB_STATS, snapshot.freezeStats).apply()
+        }
     }
 
     var darkMode by mutableIntStateOf(prefs.getInt(KEY_THEME_DARK_MODE, 0))

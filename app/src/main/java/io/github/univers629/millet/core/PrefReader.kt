@@ -372,6 +372,41 @@ object PrefReader {
         return cleanCopy
     }
 
+    /** UI 侧通过 [PrefReader] 完成一次本地落盘后的轻量监听（仅 App 进程内使用）。 */
+    @Volatile
+    var onUiPrefsMutated: ((SharedPreferences) -> Unit)? = null
+
+    /**
+     * 读取 UI 侧完整配置快照（与 Hook 侧 [buildFullSnapshot] 共享同一默认值表）。
+     */
+    fun readUiSnapshot(prefs: SharedPreferences): PrefsSnapshot = PrefsSnapshot(
+        isLog = readUiBoolean(prefs, PrefsKeys.IS_LOG),
+        simplifyLog = readUiBoolean(prefs, PrefsKeys.SIMPLIFY_LOG),
+        disableKill = readUiBoolean(prefs, PrefsKeys.DISABLE_KILL),
+        disableCharge = readUiBoolean(prefs, PrefsKeys.DISABLE_CHARGE),
+        disableScreenOnThaw = readUiBoolean(prefs, PrefsKeys.DISABLE_SCREEN_ON_THAW),
+        blockAddPowerSaveWhitelistApps = readUiBoolean(prefs, PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS),
+        blockCloudDozeWhitelist = readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST),
+        blockCloudFrozenWhitelist = readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST),
+        batteryChangeObserve = readUiBoolean(prefs, PrefsKeys.BATTERY_CHANGE_OBSERVE),
+        logToLocal = readUiBoolean(prefs, PrefsKeys.LOG_TO_LOCAL),
+        freezeStats = readUiBoolean(prefs, PrefsKeys.FREEZE_STATS),
+        freezeDualApp = readUiBoolean(prefs, PrefsKeys.FREEZE_DUAL_APP),
+        dozeLog = readUiBoolean(prefs, PrefsKeys.DOZE_LOG),
+        enableDoze = readUiBoolean(prefs, PrefsKeys.ENABLE_DOZE),
+        skipStateCheck = readUiBoolean(prefs, PrefsKeys.SKIP_STATE_CHECK),
+        disableMotionListener = readUiBoolean(prefs, PrefsKeys.DISABLE_MOTION_LISTENER),
+        whiteAppSet = readUiStringSet(prefs, PrefsKeys.WHITE_APP_SET),
+        messageAppSet = readUiStringSet(prefs, PrefsKeys.MESSAGE_APP_SET),
+        forceFreezeSet = readUiStringSet(prefs, PrefsKeys.FORCE_FREEZE_SET),
+        blockThawSet = readUiStringSet(prefs, PrefsKeys.BLOCK_THAW_SET),
+        forbidSyncBinderSet = readUiStringSet(prefs, PrefsKeys.FORBID_SYNC_BINDER_SET),
+        notFreezeWhenHasFgsSet = readUiStringSet(prefs, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET),
+        ignoreNetworkWakeSet = readUiStringSet(prefs, PrefsKeys.IGNORE_NETWORK_WAKE_SET),
+        logType = prefs.getString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE) ?: PrefsDefaults.LOG_TYPE,
+        logLevel = prefs.getString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL) ?: PrefsDefaults.LOG_LEVEL,
+    )
+
     private fun applyPrefsSuppressed(
         prefs: SharedPreferences,
         clearFirst: Boolean = false,
@@ -385,6 +420,7 @@ object PrefReader {
             editor.block()
             editor.apply()
         }
+        onUiPrefsMutated?.invoke(prefs)
     }
 
     private fun writeKeysAndNotify(

@@ -90,12 +90,17 @@ import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
 import io.github.univers629.millet.ui.util.PolicyTemplateApplier
 import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.PolicyTemplateDetailViewModel
+import io.github.univers629.millet.ui.vm.PolicyTemplatesViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -293,6 +298,41 @@ private fun applyResultMessage(
 // ============================================================================================
 
 /**
+ * 策略模板总览页入口：连接 [PolicyTemplatesViewModel] 与纯展示 [PolicyTemplatesContent]。
+ */
+@Composable
+fun PolicyTemplatesRoute(
+    onBack: () -> Unit,
+    onOpenTemplate: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: PolicyTemplatesViewModel = viewModel {
+        PolicyTemplatesViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    PolicyTemplatesContent(
+        templates = uiState.templates,
+        usageByTemplate = uiState.usageByTemplate,
+        onBack = onBack,
+        onOpenTemplate = onOpenTemplate,
+        onSaveNewTemplate = { name, flags ->
+            val saved = vm.createCustomTemplate(name, flags)
+            if (saved != null) {
+                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
+                onOpenTemplate(saved.id)
+            } else {
+                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
+            }
+        },
+    )
+}
+
+/**
  * 策略模板总览：预设与自定义模板列表，可新建自定义模板。
  *
  * @param templateVersion 自定义模板变化后宿主递增，用于重新读取模板
@@ -311,6 +351,33 @@ fun PolicyTemplatesScreenMiuix(
     val prefs = remember { PrefReader.openUiPrefs(context) }
     val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
     val summary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
+
+    PolicyTemplatesContent(
+        templates = templates,
+        usageByTemplate = summary.usageByTemplate,
+        onBack = onBack,
+        onOpenTemplate = onOpenTemplate,
+        onSaveNewTemplate = { name, flags ->
+            val saved = PolicyTemplateStore.saveCustom(prefs, null, name, flags)
+            if (saved != null) {
+                onTemplatesChanged()
+                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
+                onOpenTemplate(saved.id)
+            } else {
+                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
+            }
+        },
+    )
+}
+
+@Composable
+fun PolicyTemplatesContent(
+    templates: List<PolicyTemplate>,
+    usageByTemplate: Map<String, Int>,
+    onBack: () -> Unit,
+    onOpenTemplate: (String) -> Unit,
+    onSaveNewTemplate: (name: String, flags: Set<PolicyFlag>) -> Unit,
+) {
     var showEditor by remember { mutableStateOf(false) }
 
     PolicySubPageScaffold(
@@ -350,7 +417,7 @@ fun PolicyTemplatesScreenMiuix(
                 templates.filter { it.builtIn }.forEach { template ->
                     TemplateArrowRow(
                         template = template,
-                        usage = summary.usageByTemplate[template.id] ?: 0,
+                        usage = usageByTemplate[template.id] ?: 0,
                         onClick = { onOpenTemplate(template.id) }
                     )
                 }
@@ -368,7 +435,7 @@ fun PolicyTemplatesScreenMiuix(
                 templates.filterNot { it.builtIn }.forEach { template ->
                     TemplateArrowRow(
                         template = template,
-                        usage = summary.usageByTemplate[template.id] ?: 0,
+                        usage = usageByTemplate[template.id] ?: 0,
                         onClick = { onOpenTemplate(template.id) }
                     )
                 }
@@ -398,14 +465,7 @@ fun PolicyTemplatesScreenMiuix(
         onDismiss = { showEditor = false },
         onSave = { name, flags ->
             showEditor = false
-            val saved = PolicyTemplateStore.saveCustom(prefs, null, name, flags)
-            if (saved != null) {
-                onTemplatesChanged()
-                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
-                onOpenTemplate(saved.id)
-            } else {
-                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
-            }
+            onSaveNewTemplate(name, flags)
         }
     )
 }
@@ -446,10 +506,41 @@ private fun TemplateArrowRow(
 // ============================================================================================
 
 /**
+ * 策略模板详情页入口：连接按 `templateId` 作用域化的 [PolicyTemplateDetailViewModel]。
+ */
+@Composable
+fun PolicyTemplateDetailRoute(
+    templateId: String,
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: PolicyTemplateDetailViewModel = viewModel(key = templateId) {
+        PolicyTemplateDetailViewModel(
+            templateId = templateId,
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    PolicyTemplateDetailContent(
+        template = uiState.template,
+        allTemplates = uiState.allTemplates,
+        apps = uiState.apps,
+        snapshot = uiState.snapshot,
+        users = uiState.users,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+        onApplyFlags = { targets, flags -> vm.applyTemplate(context, targets, flags) },
+        onSaveTemplate = vm::saveCustomTemplate,
+        onDeleteTemplate = vm::deleteCustomTemplate,
+    )
+}
+
+/**
  * 模板详情：包含的策略、正在使用的应用，以及批量套用 / 移除。
- *
- * 「在用」= 应用当前七项状态与模板完全一致；状态直接读 prefs 快照，
- * 因为 `InstalledAppUiModel` 不含「忽略网络唤醒」。
  */
 @Composable
 fun PolicyTemplateDetailScreenMiuix(
@@ -464,11 +555,57 @@ fun PolicyTemplateDetailScreenMiuix(
 ) {
     val context = LocalContext.current
     val prefs = remember { PrefReader.openUiPrefs(context) }
-    // 写入后立刻重读快照，不必等宿主异步重建应用列表。
     var localRevision by remember { mutableIntStateOf(0) }
     val allTemplates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
     val template = remember(templateId, allTemplates) { allTemplates.firstOrNull { it.id == templateId } }
     val snapshot = remember(apps, localRevision, policyVersion) { PolicyMembershipSnapshot.read(prefs) }
+    val users = remember(template, apps, snapshot) {
+        if (template == null) emptyList()
+        else apps.filter { PolicyTemplateApplier.isTargetable(it) && template.matches(snapshot.flagsOf(it)) }
+            .sortedWith(compareBy<InstalledAppUiModel> { it.appName.lowercase() }.thenBy { it.isDualApp })
+    }
+
+    PolicyTemplateDetailContent(
+        template = template,
+        allTemplates = allTemplates,
+        apps = apps,
+        snapshot = snapshot,
+        users = users,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+        onApplyFlags = { targets, flags ->
+            val result = PolicyTemplateApplier.apply(context, targets, flags, onPolicyChanged)
+            localRevision++
+            result
+        },
+        onSaveTemplate = { name, flags ->
+            val saved = template?.let { PolicyTemplateStore.saveCustom(prefs, it.id, name, flags) }
+            if (saved != null) onTemplatesChanged()
+            saved
+        },
+        onDeleteTemplate = {
+            if (template != null) {
+                PolicyTemplateStore.deleteCustom(prefs, template.id)
+                onTemplatesChanged()
+            }
+        },
+    )
+}
+
+@Composable
+private fun PolicyTemplateDetailContent(
+    template: PolicyTemplate?,
+    allTemplates: List<PolicyTemplate>,
+    apps: List<InstalledAppUiModel>,
+    snapshot: PolicyMembershipSnapshot,
+    users: List<InstalledAppUiModel>,
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+    onApplyFlags: (List<InstalledAppUiModel>, Set<PolicyFlag>) -> PolicyTemplateApplier.Result,
+    onSaveTemplate: (name: String, flags: Set<PolicyFlag>) -> PolicyTemplate?,
+    onDeleteTemplate: () -> Unit,
+) {
+    val context = LocalContext.current
 
     if (template == null) {
         PolicySubPageScaffold(title = "策略模板", onBack = onBack) {
@@ -490,11 +627,6 @@ fun PolicyTemplateDetailScreenMiuix(
         return
     }
 
-    val users = remember(template, apps, snapshot) {
-        apps.filter { PolicyTemplateApplier.isTargetable(it) && template.matches(snapshot.flagsOf(it)) }
-            .sortedWith(compareBy<InstalledAppUiModel> { it.appName.lowercase() }.thenBy { it.isDualApp })
-    }
-
     var showPicker by remember { mutableStateOf(false) }
     var showEditor by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -507,8 +639,7 @@ fun PolicyTemplateDetailScreenMiuix(
         describeChanged: (Int) -> String,
     ) {
         if (targets.isEmpty()) return
-        val result = PolicyTemplateApplier.apply(context, targets, flags, onPolicyChanged)
-        localRevision++
+        val result = onApplyFlags(targets, flags)
         Toast.makeText(context, applyResultMessage(describeChanged, result), Toast.LENGTH_LONG).show()
     }
 
@@ -769,11 +900,10 @@ fun PolicyTemplateDetailScreenMiuix(
         onSave = { name, flags ->
             showEditor = false
             val previousUsers = users
-            val saved = PolicyTemplateStore.saveCustom(prefs, template.id, name, flags)
+            val saved = onSaveTemplate(name, flags)
             if (saved == null) {
                 Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
             } else {
-                onTemplatesChanged()
                 if (saved.flags != template.flags && previousUsers.isNotEmpty()) {
                     // 组合变了：已套用旧组合的应用不会自动跟随，交给用户决定是否同步。
                     pendingResync = previousUsers to saved.flags
@@ -823,8 +953,7 @@ fun PolicyTemplateDetailScreenMiuix(
         confirmText = "删除",
         onConfirm = {
             showDeleteConfirm = false
-            PolicyTemplateStore.deleteCustom(prefs, template.id)
-            onTemplatesChanged()
+            onDeleteTemplate()
             onBack()
         },
         onDismiss = { showDeleteConfirm = false }

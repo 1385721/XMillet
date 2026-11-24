@@ -81,12 +81,17 @@ import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.StatusTagMiuix
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
 import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.AppsUiState
+import io.github.univers629.millet.ui.vm.AppsViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import io.github.univers629.millet.ui.util.GlassMenuItem
@@ -180,6 +185,41 @@ enum class AppCategoryFilter(val title: String) {
  * @param templateVersion 自定义模板增删改后由宿主递增，用于刷新模板数量
  * @param cloudLists PowerKeeper 上报或兜底读到的三条云端名单；未就绪时为 null
  */
+/**
+ * 应用策略页入口：连接 [AppsViewModel] 与纯展示 [AppsContent]。
+ */
+@Composable
+fun AppsRoute(
+    isCurrentPage: Boolean,
+    bottomInnerPadding: Dp,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+    onOpenTemplates: () -> Unit,
+    onOpenCloudWhitelist: () -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: AppsViewModel = viewModel {
+        AppsViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    AppsContent(
+        uiState = uiState.copy(isRefreshing = uiState.isRefreshing && isCurrentPage),
+        bottomInnerPadding = bottomInnerPadding,
+        onSearchQueryChange = vm::setSearchQuery,
+        onSelectedCategoryIndexChange = vm::setSelectedCategoryIndex,
+        onToggleShowSystemApps = vm::toggleShowSystemApps,
+        onResetFilters = vm::resetFilters,
+        onRefresh = vm::refresh,
+        onOpenAppProfile = onOpenAppProfile,
+        onOpenTemplates = onOpenTemplates,
+        onOpenCloudWhitelist = onOpenCloudWhitelist,
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppsScreenMiuix(
@@ -198,12 +238,6 @@ fun AppsScreenMiuix(
 ) {
     val context = LocalContext.current
     val prefs = remember { PrefReader.openUiPrefs(context) }
-    val scrollBehavior = MiuixScrollBehavior()
-    val enableBlur = LocalEnableBlur.current
-    val backdrop = rememberBlurBackdrop(enableBlur)
-    val blurActive = backdrop != null
-    val barColor = if (blurActive) Color.Transparent else colorScheme.surface
-
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var selectedCategoryIndex by rememberSaveable { mutableIntStateOf(0) }
     val selectedCategory = AppCategoryFilter.entries.getOrElse(selectedCategoryIndex) { AppCategoryFilter.ALL }
@@ -220,17 +254,67 @@ fun AppsScreenMiuix(
             sysMatch && catMatch && queryMatch
         }
     }
-
-    // 各分类数量（不受搜索词影响，只随系统应用开关变化）
     val categoryCounts = remember(apps, showSystemApps) {
         AppCategoryFilter.entries.map { cat ->
             apps.count { app -> (showSystemApps || !app.isSystem || app.hasAnyConfig) && cat.matches(app) }
         }
     }
-
-    // 模板与云名单概览：随 templateVersion / policyVersion / apps 刷新。
     val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
     val hubSummary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
+
+    AppsContent(
+        uiState = AppsUiState(
+            filteredApps = filteredApps,
+            categoryCounts = categoryCounts,
+            templateCount = templates.size,
+            hubSummary = hubSummary,
+            cloudLists = cloudLists,
+            searchQuery = searchQuery,
+            selectedCategoryIndex = selectedCategoryIndex,
+            showSystemApps = showSystemApps,
+            isRefreshing = isRefreshing,
+        ),
+        bottomInnerPadding = bottomInnerPadding,
+        onSearchQueryChange = { searchQuery = it },
+        onSelectedCategoryIndexChange = { selectedCategoryIndex = it },
+        onToggleShowSystemApps = onToggleShowSystemApps,
+        onResetFilters = {
+            searchQuery = ""
+            selectedCategoryIndex = 0
+        },
+        onRefresh = onRefresh,
+        onOpenAppProfile = onOpenAppProfile,
+        onOpenTemplates = onOpenTemplates,
+        onOpenCloudWhitelist = onOpenCloudWhitelist,
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun AppsContent(
+    uiState: AppsUiState,
+    bottomInnerPadding: Dp,
+    onSearchQueryChange: (String) -> Unit,
+    onSelectedCategoryIndexChange: (Int) -> Unit,
+    onToggleShowSystemApps: () -> Unit,
+    onResetFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+    onOpenTemplates: () -> Unit = {},
+    onOpenCloudWhitelist: () -> Unit = {},
+) {
+    val scrollBehavior = MiuixScrollBehavior()
+    val enableBlur = LocalEnableBlur.current
+    val backdrop = rememberBlurBackdrop(enableBlur)
+    val blurActive = backdrop != null
+    val barColor = if (blurActive) Color.Transparent else colorScheme.surface
+
+    val filteredApps = uiState.filteredApps
+    val categoryCounts = uiState.categoryCounts
+    val searchQuery = uiState.searchQuery
+    val selectedCategoryIndex = uiState.selectedCategoryIndex
+    val showSystemApps = uiState.showSystemApps
+    val isRefreshing = uiState.isRefreshing
 
     val pullToRefreshState = rememberPullToRefreshState()
 
@@ -306,7 +390,7 @@ fun AppsScreenMiuix(
                     item {
                         MiuixCapsuleSearchBar(
                             query = searchQuery,
-                            onQueryChange = { searchQuery = it },
+                            onQueryChange = onSearchQueryChange,
                             placeholder = "搜索应用名称、包名或 UID..."
                         )
                     }
@@ -315,9 +399,9 @@ fun AppsScreenMiuix(
                     if (searchQuery.isBlank()) {
                         item(key = "policy_hub") {
                             PolicyHubCards(
-                                templateCount = templates.size,
-                                summary = hubSummary,
-                                cloudLists = cloudLists,
+                                templateCount = uiState.templateCount,
+                                summary = uiState.hubSummary,
+                                cloudLists = uiState.cloudLists,
                                 onOpenTemplates = onOpenTemplates,
                                 onOpenCloudWhitelist = onOpenCloudWhitelist,
                             )
@@ -336,7 +420,7 @@ fun AppsScreenMiuix(
                                 title = "策略分类",
                                 items = AppCategoryFilter.entries.mapIndexed { i, cat -> "${cat.title} (${categoryCounts.getOrElse(i) { 0 }})" },
                                 selectedIndex = selectedCategoryIndex.coerceIn(0, AppCategoryFilter.entries.lastIndex),
-                                onSelectedIndexChange = { selectedCategoryIndex = it },
+                                onSelectedIndexChange = onSelectedCategoryIndexChange,
                                 backdrop = backdrop,
                             )
                         }
@@ -348,10 +432,7 @@ fun AppsScreenMiuix(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
-                                onClick = {
-                                    searchQuery = ""
-                                    selectedCategoryIndex = 0
-                                },
+                                onClick = onResetFilters,
                                 showIndication = true
                             ) {
                                 BasicComponent(
@@ -620,7 +701,8 @@ private fun AppItemCardMiuix(
 }
 
 /** 策略中枢卡片所需的汇总数据，一次计算后交给 UI，避免在重组中反复读 prefs。 */
-internal data class PolicyHubSummary(
+@Immutable
+data class PolicyHubSummary(
     /** 模板 ID → 当前完全匹配该模板的应用数 */
     val usageByTemplate: Map<String, Int>,
     /** 匹配任一模板的应用数（按包名 + UID 去重） */

@@ -76,8 +76,12 @@ import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
 import io.github.univers629.millet.ui.component.XMilletIcons
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
+import io.github.univers629.millet.ui.vm.HomeViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.univers629.millet.ui.theme.isInDarkTheme
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
@@ -126,6 +130,37 @@ data class RunningProcessUiModel(
     val isDualApp: Boolean = false,
     val iconSource: AppIconSource? = null,
 )
+
+/**
+ * 主页入口：连接 [HomeViewModel] 与纯展示 [HomeScreenMiuix]。
+ */
+@Composable
+fun HomeRoute(
+    bottomInnerPadding: Dp,
+    onNavigateToTab: (io.github.univers629.millet.ui.component.BottomBarDestination) -> Unit,
+    onNavigateToProcessList: (filterIndex: Int) -> Unit,
+    onOpenAbout: () -> Unit,
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+) {
+    val context = LocalContext.current
+    val runtimeRepo = remember(context) { context.appUiContainer.runtimeAndAppsRepository }
+    val vm: HomeViewModel = viewModel { HomeViewModel(runtimeRepo) }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    HomeScreenMiuix(
+        runtimeStatus = uiState.runtimeStatus,
+        configuredRuleCount = uiState.configuredRuleCount,
+        runningProcesses = uiState.runningProcesses,
+        bottomInnerPadding = bottomInnerPadding,
+        onRefresh = vm::refresh,
+        onThawAll = vm::thawAll,
+        onNavigateToTab = onNavigateToTab,
+        onNavigateToProcessList = onNavigateToProcessList,
+        onOpenAbout = onOpenAbout,
+        onOpenAppProfile = onOpenAppProfile,
+        snapshotUnavailable = uiState.snapshotUnavailable,
+    )
+}
 
 @Composable
 fun HomeScreenMiuix(

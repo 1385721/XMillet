@@ -32,7 +32,11 @@ import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.isInDarkTheme
+import io.github.univers629.millet.ui.vm.CloudWhitelistViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
@@ -80,6 +84,38 @@ private enum class CloudWhitelistTab(
 }
 
 /**
+ * 官方云白名单子页面入口：连接 [CloudWhitelistViewModel] 与纯展示 [CloudWhitelistContent]。
+ */
+@Composable
+fun CloudWhitelistRoute(
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: CloudWhitelistViewModel = viewModel {
+        CloudWhitelistViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    CloudWhitelistContent(
+        cloudLists = uiState.cloudLists,
+        apps = uiState.apps,
+        blockCloudDoze = uiState.blockCloudDoze,
+        blockCloudFrozen = uiState.blockCloudFrozen,
+        isRefreshing = uiState.isRefreshing,
+        onUpdateCloudDozeEnabled = vm::setCloudDozeEnabled,
+        onUpdateCloudFrozenEnabled = vm::setCloudFrozenEnabled,
+        onRefresh = vm::refresh,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+    )
+}
+
+/**
  * 官方云白名单子页面：展示 PowerKeeper 读取的三条云端名单（dozeWhiteList / frozenNewWhiteList / launchRestrict），
  * 并提供「云免冻」与「云墓碑白」总开关以屏蔽或恢复官方云端白名单（云启动放行保持只读）。
  *
@@ -105,6 +141,44 @@ fun CloudWhitelistScreenMiuix(
     var blockCloudFrozen by remember(configVersion) {
         mutableStateOf(PrefReader.readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST))
     }
+
+    CloudWhitelistContent(
+        cloudLists = cloudLists,
+        apps = apps,
+        blockCloudDoze = blockCloudDoze,
+        blockCloudFrozen = blockCloudFrozen,
+        isRefreshing = isRefreshing,
+        onUpdateCloudDozeEnabled = { enabled ->
+            val nextBlock = !enabled
+            blockCloudDoze = nextBlock
+            PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST, nextBlock)
+            onConfigChanged()
+        },
+        onUpdateCloudFrozenEnabled = { enabled ->
+            val nextBlock = !enabled
+            blockCloudFrozen = nextBlock
+            PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST, nextBlock)
+            onConfigChanged()
+        },
+        onRefresh = onRefresh,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+    )
+}
+
+@Composable
+private fun CloudWhitelistContent(
+    cloudLists: CloudListCodec.CloudLists?,
+    apps: List<InstalledAppUiModel>,
+    blockCloudDoze: Boolean,
+    blockCloudFrozen: Boolean,
+    isRefreshing: Boolean,
+    onUpdateCloudDozeEnabled: (Boolean) -> Unit,
+    onUpdateCloudFrozenEnabled: (Boolean) -> Unit,
+    onRefresh: () -> Unit,
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+) {
     val isDark = isInDarkTheme()
     val blockedBg = if (isDynamicColor) {
         colorScheme.tertiaryContainer
@@ -121,18 +195,8 @@ fun CloudWhitelistScreenMiuix(
         Color(0xFFB45309)
     }
 
-    val updateCloudDozeEnabled: (Boolean) -> Unit = { enabled ->
-        val nextBlock = !enabled
-        blockCloudDoze = nextBlock
-        PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST, nextBlock)
-        onConfigChanged()
-    }
-    val updateCloudFrozenEnabled: (Boolean) -> Unit = { enabled ->
-        val nextBlock = !enabled
-        blockCloudFrozen = nextBlock
-        PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST, nextBlock)
-        onConfigChanged()
-    }
+    val updateCloudDozeEnabled = onUpdateCloudDozeEnabled
+    val updateCloudFrozenEnabled = onUpdateCloudFrozenEnabled
 
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
     var searchQuery by rememberSaveable { mutableStateOf("") }

@@ -41,19 +41,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.univers629.millet.core.FreezeModeLabels
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.StatusTagMiuix
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.ProcessFilterMode
+import io.github.univers629.millet.ui.vm.ProcessListUiState
+import io.github.univers629.millet.ui.vm.ProcessListViewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -76,21 +83,32 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
-private enum class ProcessFilterMode(val label: String) {
-    ALL("全部"),
-    FROZEN("已冻结"),
-    RUNNING("运行中"),
-    UNKNOWN("待确认")
+/**
+ * 进程列表入口：连接 [ProcessListViewModel] 与纯展示 [ProcessListContent]。
+ */
+@Composable
+fun ProcessListRoute(
+    isCurrentPage: Boolean,
+    bottomInnerPadding: Dp,
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+) {
+    val context = LocalContext.current
+    val runtimeRepo = remember(context) { context.appUiContainer.runtimeAndAppsRepository }
+    val vm: ProcessListViewModel = viewModel { ProcessListViewModel(runtimeRepo) }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    ProcessListContent(
+        uiState = uiState.copy(isRefreshing = uiState.isRefreshing && isCurrentPage),
+        bottomInnerPadding = bottomInnerPadding,
+        onFilterIndexChange = vm::setFilterIndex,
+        onSearchQueryChange = vm::setSearchQuery,
+        onToggleShowSystemApps = vm::toggleShowSystemApps,
+        onRefresh = vm::refresh,
+        onThawAll = vm::thawAll,
+        onOpenAppProfile = onOpenAppProfile,
+    )
 }
 
-/**
- * 进程列表界面：
- * - 扫描并展示当前活跃运行进程与内核/Greeze 冻结状态
- * - 支持按应用名、包名、UID/PID 检索
- * - 提供 全部 / 已冻结 / 运行中 快速分类筛选
- * - 点击进程条目可直达单应用策略与控制面板 (AppProfile)
- * - 支持下拉刷新与右上角一键全部解冻
- */
 @Composable
 fun ProcessListScreenMiuix(
     runningProcesses: List<RunningProcessUiModel>,
@@ -103,23 +121,13 @@ fun ProcessListScreenMiuix(
     isRefreshing: Boolean = false,
     snapshotUnavailable: Boolean = false,
 ) {
-    val scrollBehavior = MiuixScrollBehavior()
-    val enableBlur = LocalEnableBlur.current
-    val backdrop = rememberBlurBackdrop(enableBlur)
-    val blurActive = backdrop != null
-    val barColor = if (blurActive) Color.Transparent else colorScheme.surface
-
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showSystemApps by rememberSaveable { mutableStateOf(true) }
     val currentFilter = ProcessFilterMode.entries.getOrElse(filterIndex) { ProcessFilterMode.ALL }
-
-    val frozenCount = remember(runningProcesses) {
-        runningProcesses.count { it.isFrozen }
-    }
+    val frozenCount = remember(runningProcesses) { runningProcesses.count { it.isFrozen } }
     val runningCount = remember(runningProcesses, frozenCount) {
         runningProcesses.count { !it.isFrozen && it.frozenCount == 0 && it.unknownCount == 0 }
     }
-
     val filteredProcesses = remember(runningProcesses, searchQuery, currentFilter, showSystemApps) {
         val q = searchQuery.trim().lowercase()
         runningProcesses.filter { proc ->
@@ -135,10 +143,57 @@ fun ProcessListScreenMiuix(
                 proc.uid.toString().contains(q) ||
                 proc.pids.any { it.toString().contains(q) } ||
                 (proc.isDualApp && "双开".contains(q))
-
             filterMatch && queryMatch && (showSystemApps || !proc.isSystem)
         }
     }
+    ProcessListContent(
+        uiState = ProcessListUiState(
+            filteredProcesses = filteredProcesses,
+            totalProcessCount = runningProcesses.size,
+            frozenCount = frozenCount,
+            runningCount = runningCount,
+            filterIndex = filterIndex,
+            searchQuery = searchQuery,
+            showSystemApps = showSystemApps,
+            isRefreshing = isRefreshing,
+            snapshotUnavailable = snapshotUnavailable,
+        ),
+        bottomInnerPadding = bottomInnerPadding,
+        onFilterIndexChange = onFilterIndexChange,
+        onSearchQueryChange = { searchQuery = it },
+        onToggleShowSystemApps = { showSystemApps = !showSystemApps },
+        onRefresh = onRefresh,
+        onThawAll = onThawAll,
+        onOpenAppProfile = onOpenAppProfile,
+    )
+}
+
+@Composable
+fun ProcessListContent(
+    uiState: ProcessListUiState,
+    bottomInnerPadding: Dp,
+    onFilterIndexChange: (Int) -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onToggleShowSystemApps: () -> Unit,
+    onRefresh: () -> Unit,
+    onThawAll: () -> Unit,
+    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+) {
+    val scrollBehavior = MiuixScrollBehavior()
+    val enableBlur = LocalEnableBlur.current
+    val backdrop = rememberBlurBackdrop(enableBlur)
+    val blurActive = backdrop != null
+    val barColor = if (blurActive) Color.Transparent else colorScheme.surface
+
+    val filteredProcesses = uiState.filteredProcesses
+    val totalProcessCount = uiState.totalProcessCount
+    val frozenCount = uiState.frozenCount
+    val runningCount = uiState.runningCount
+    val filterIndex = uiState.filterIndex
+    val searchQuery = uiState.searchQuery
+    val showSystemApps = uiState.showSystemApps
+    val isRefreshing = uiState.isRefreshing
+    val snapshotUnavailable = uiState.snapshotUnavailable
 
     val pullToRefreshState = rememberPullToRefreshState()
     var showTopPopup by remember { mutableStateOf(false) }
@@ -188,7 +243,7 @@ fun ProcessListScreenMiuix(
                                                 when (idx) {
                                                     0 -> onThawAll()
                                                     1 -> onRefresh()
-                                                    2 -> showSystemApps = !showSystemApps
+                                                    2 -> onToggleShowSystemApps()
                                                 }
                                             }
                                         )
@@ -234,7 +289,7 @@ fun ProcessListScreenMiuix(
                     item {
                         MiuixCapsuleSearchBar(
                             query = searchQuery,
-                            onQueryChange = { searchQuery = it },
+                            onQueryChange = onSearchQueryChange,
                             placeholder = "搜索进程名称、包名或 PID/UID...",
                             horizontalPadding = 0.dp,
                             topPadding = 4.dp,
@@ -253,10 +308,10 @@ fun ProcessListScreenMiuix(
                     item {
                         val filterCounts = ProcessFilterMode.entries.map { mode ->
                             when (mode) {
-                                ProcessFilterMode.ALL -> runningProcesses.size
+                                ProcessFilterMode.ALL -> totalProcessCount
                                 ProcessFilterMode.FROZEN -> frozenCount
                                 ProcessFilterMode.RUNNING -> runningCount
-                                ProcessFilterMode.UNKNOWN -> runningProcesses.size - frozenCount - runningCount
+                                ProcessFilterMode.UNKNOWN -> totalProcessCount - frozenCount - runningCount
                             }
                         }
                         // 下拉选择代替横向胶囊条：不再与左右切页手势争抢横向拖动
@@ -279,15 +334,15 @@ fun ProcessListScreenMiuix(
                                     .fillMaxWidth()
                                     .padding(vertical = 8.dp),
                                 onClick = {
-                                    searchQuery = ""
+                                    onSearchQueryChange("")
                                     onFilterIndexChange(0)
                                     onRefresh()
                                 },
                                 showIndication = true
                             ) {
                                 BasicComponent(
-                                    title = if (snapshotUnavailable) "暂时无法获取进程" else if (runningProcesses.isEmpty()) "暂无活跃应用进程" else "未找到匹配的进程",
-                                    summary = if (runningProcesses.isEmpty()) "点击此卡片或右上角刷新按钮重新扫描" else "点击重置搜索与分类"
+                                    title = if (snapshotUnavailable) "暂时无法获取进程" else if (totalProcessCount == 0) "暂无活跃应用进程" else "未找到匹配的进程",
+                                    summary = if (totalProcessCount == 0) "点击此卡片或右上角刷新按钮重新扫描" else "点击重置搜索与分类"
                                 )
                             }
                         }

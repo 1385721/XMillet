@@ -70,17 +70,24 @@ import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
+import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.ui.BackupRestoreHelper
 import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.TombStatsIcon
 import io.github.univers629.millet.ui.component.XMilletIcons
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
+import io.github.univers629.millet.ui.util.AppUpdateController
 import io.github.univers629.millet.ui.util.AppUpdateStatus
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.BugreportHelper
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.SettingsUiState
+import io.github.univers629.millet.ui.vm.SettingsViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -112,6 +119,48 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import top.yukonga.miuix.kmp.window.WindowDialog
 
+/**
+ * 设置页入口：连接 [SettingsViewModel] 与纯展示 [SettingsContent]。
+ */
+@Composable
+fun SettingsRoute(
+    themeState: UiThemeState,
+    bottomInnerPadding: Dp,
+    onOpenAppearance: () -> Unit,
+    onOpenOobe: () -> Unit,
+    onOpenAbout: () -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: SettingsViewModel = viewModel {
+        SettingsViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    SettingsContent(
+        uiState = uiState,
+        themeState = themeState,
+        bottomInnerPadding = bottomInnerPadding,
+        onSetBooleanPref = vm::setBooleanPref,
+        onSetDetailedLogging = vm::setDetailedLogging,
+        onImportBackupJson = { json -> vm.importBackupJson(context, json) },
+        onResetToDefaults = { vm.resetToDefaults(context) },
+        onCheckForUpdates = {
+            AppUpdateController.checkManually(
+                context = context,
+                currentVersionCode = BuildConfig.VERSION_CODE,
+                currentVersionName = BuildConfig.VERSION_NAME,
+            )
+        },
+        onOpenAppearance = onOpenAppearance,
+        onOpenOobe = onOpenOobe,
+        onOpenAbout = onOpenAbout,
+    )
+}
+
 @Composable
 fun SettingsScreenMiuix(
     themeState: UiThemeState,
@@ -127,43 +176,82 @@ fun SettingsScreenMiuix(
 ) {
     val context = LocalContext.current
     val sp = remember { PrefReader.openUiPrefs(context) }
+    var prefsSnapshot by remember(configVersion) { mutableStateOf(PrefReader.readUiSnapshot(sp)) }
+
+    SettingsContent(
+        uiState = SettingsUiState(
+            prefs = prefsSnapshot,
+            updateStatus = updateStatus,
+            availableUpdateVersion = availableUpdateVersion,
+        ),
+        themeState = themeState,
+        bottomInnerPadding = bottomInnerPadding,
+        onSetBooleanPref = { key, value ->
+            PrefReader.putBooleanAndNotify(sp, key, value)
+            prefsSnapshot = PrefReader.readUiSnapshot(sp)
+        },
+        onSetDetailedLogging = { enabled ->
+            PrefReader.editAllAndNotify(sp) {
+                putBoolean(PrefsKeys.IS_LOG, enabled)
+                putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
+                putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
+                putBoolean(PrefsKeys.DOZE_LOG, enabled)
+                putString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL)
+                putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
+            }
+            prefsSnapshot = PrefReader.readUiSnapshot(sp)
+        },
+        onImportBackupJson = { json ->
+            BackupRestoreHelper.importFromJson(context, json)
+            prefsSnapshot = PrefReader.readUiSnapshot(sp)
+            onConfigImportedOrReset()
+        },
+        onResetToDefaults = {
+            BackupRestoreHelper.resetToDefaults(context)
+            prefsSnapshot = PrefReader.readUiSnapshot(sp)
+            onConfigImportedOrReset()
+        },
+        onCheckForUpdates = onCheckForUpdates,
+        onOpenAppearance = onOpenAppearance,
+        onOpenOobe = onOpenOobe,
+        onOpenAbout = onOpenAbout,
+    )
+}
+
+@Composable
+fun SettingsContent(
+    uiState: SettingsUiState,
+    themeState: UiThemeState,
+    bottomInnerPadding: Dp,
+    onSetBooleanPref: (String, Boolean) -> Unit,
+    onSetDetailedLogging: (Boolean) -> Unit,
+    onImportBackupJson: (String) -> Unit,
+    onResetToDefaults: () -> Unit,
+    onCheckForUpdates: () -> Unit = {},
+    onOpenAppearance: () -> Unit = {},
+    onOpenOobe: () -> Unit = {},
+    onOpenAbout: () -> Unit,
+) {
+    val context = LocalContext.current
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
-    var disableKill by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_KILL))
-    }
-    var disableCharge by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_CHARGE))
-    }
-    var disableScreenOnThaw by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_SCREEN_ON_THAW))
-    }
-    var blockPowerSaveWhitelist by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS))
-    }
-    var freezeDualApp by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.FREEZE_DUAL_APP))
-    }
-    var isLog by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.IS_LOG))
-    }
-    var simplifyLog by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SIMPLIFY_LOG))
-    }
-
-    var enableDoze by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.ENABLE_DOZE))
-    }
-    var skipStateCheck by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SKIP_STATE_CHECK))
-    }
-    var disableMotionListener by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_MOTION_LISTENER))
-    }
+    val prefs = uiState.prefs
+    val disableKill = prefs.disableKill
+    val disableCharge = prefs.disableCharge
+    val disableScreenOnThaw = prefs.disableScreenOnThaw
+    val blockPowerSaveWhitelist = prefs.blockAddPowerSaveWhitelistApps
+    val freezeDualApp = prefs.freezeDualApp
+    val isLog = prefs.isLog
+    val simplifyLog = prefs.simplifyLog
+    val enableDoze = prefs.enableDoze
+    val skipStateCheck = prefs.skipStateCheck
+    val disableMotionListener = prefs.disableMotionListener
+    val updateStatus = uiState.updateStatus
+    val availableUpdateVersion = uiState.availableUpdateVersion
 
     var showRebootNotice by remember { mutableStateOf(false) }
 
@@ -189,8 +277,7 @@ fun SettingsScreenMiuix(
                     input.bufferedReader(Charsets.UTF_8).readText()
                 }.orEmpty()
                 if (json.isNotBlank()) {
-                    BackupRestoreHelper.importFromJson(context, json)
-                    onConfigImportedOrReset()
+                    onImportBackupJson(json)
                     Toast.makeText(context, "配置导入并同步成功", Toast.LENGTH_SHORT).show()
                 }
             }.onFailure { e ->
@@ -220,8 +307,7 @@ fun SettingsScreenMiuix(
             dismissText = "取消",
             onConfirm = {
                 showResetConfirmDialog = false
-                BackupRestoreHelper.resetToDefaults(context)
-                onConfigImportedOrReset()
+                onResetToDefaults()
                 Toast.makeText(context, "已恢复出厂默认配置", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showResetConfirmDialog = false }
@@ -363,10 +449,7 @@ fun SettingsScreenMiuix(
                             title = "禁止息屏与夜间清理后台",
                             summary = "拦截 PowerCheckerController 与 PowerStateMachine自动杀后台",
                             checked = disableKill,
-                            onCheckedChange = {
-                                disableKill = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_KILL, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_KILL, it) }
                         )
                         SwitchPreference(
                             startAction = {
@@ -382,10 +465,7 @@ fun SettingsScreenMiuix(
                             title = "禁止插电时全量解冻",
                             summary = "拦截 MilletBrightHandler what=16 与 Greezer 的插电解冻",
                             checked = disableCharge,
-                            onCheckedChange = {
-                                disableCharge = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_CHARGE, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_CHARGE, it) }
                         )
                         SwitchPreference(
                             startAction = {
@@ -401,10 +481,7 @@ fun SettingsScreenMiuix(
                             title = "亮屏时保持冻结",
                             summary = "屏幕亮起时，不让系统批量解冻后台应用。此项不控制手机进入深度睡眠",
                             checked = disableScreenOnThaw,
-                            onCheckedChange = {
-                                disableScreenOnThaw = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_SCREEN_ON_THAW, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_SCREEN_ON_THAW, it) }
                         )
                         SwitchPreference(
                             startAction = {
@@ -421,12 +498,7 @@ fun SettingsScreenMiuix(
                             summary = "拦截电量与性能后台自动增删省电白名单（保留你在系统设置里的手动修改）",
                             checked = blockPowerSaveWhitelist,
                             onCheckedChange = {
-                                blockPowerSaveWhitelist = it
-                                PrefReader.putBooleanAndNotify(
-                                    sp,
-                                    PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
-                                    it
-                                )
+                                onSetBooleanPref(PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS, it)
                             }
                         )
                         SwitchPreference(
@@ -443,14 +515,7 @@ fun SettingsScreenMiuix(
                             title = "控制双开应用冻结",
                             summary = "接管双开空间（用户 999）的冻结，应用策略单独设置；原生包名级名单仍可能共享",
                             checked = freezeDualApp,
-                            onCheckedChange = {
-                                freezeDualApp = it
-                                PrefReader.putBooleanAndNotify(
-                                    sp,
-                                    PrefsKeys.FREEZE_DUAL_APP,
-                                    it
-                                )
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.FREEZE_DUAL_APP, it) }
                         )
                     }
 
@@ -475,10 +540,7 @@ fun SettingsScreenMiuix(
                             title = "启用 Doze 省电控制增强",
                             summary = "息屏且未充电时，约 10 秒后尝试进入深度睡眠。亮屏或充电时，退出本模块开启的强制睡眠",
                             checked = enableDoze,
-                            onCheckedChange = {
-                                enableDoze = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.ENABLE_DOZE, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.ENABLE_DOZE, it) }
                         )
                         SwitchPreference(
                             startAction = {
@@ -494,10 +556,7 @@ fun SettingsScreenMiuix(
                             title = "跳过 Doze 中间传感检查",
                             summary = "当状态进入IDLE_PENDING(2)时直接跃迁至 IDLE_MAINTENANCE(6)",
                             checked = skipStateCheck,
-                            onCheckedChange = {
-                                skipStateCheck = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.SKIP_STATE_CHECK, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.SKIP_STATE_CHECK, it) }
                         )
                         SwitchPreference(
                             startAction = {
@@ -513,10 +572,7 @@ fun SettingsScreenMiuix(
                             title = "屏蔽 Doze 移动传感器唤醒",
                             summary = "DeviceIdleController#motionLocked，移动手机不退出深度睡眠",
                             checked = disableMotionListener,
-                            onCheckedChange = {
-                                disableMotionListener = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_MOTION_LISTENER, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_MOTION_LISTENER, it) }
                         )
                     }
 
@@ -541,17 +597,7 @@ fun SettingsScreenMiuix(
                             title = "开启详细运行日志",
                             summary = "记录运行拦截、电量统计与 Doze 日志并写入本地目录",
                             checked = isLog,
-                            onCheckedChange = { enabled ->
-                                isLog = enabled
-                                PrefReader.editAllAndNotify(sp) {
-                                    putBoolean(PrefsKeys.IS_LOG, enabled)
-                                    putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
-                                    putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
-                                    putBoolean(PrefsKeys.DOZE_LOG, enabled)
-                                    putString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL)
-                                    putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
-                                }
-                            }
+                            onCheckedChange = onSetDetailedLogging
                         )
                         SwitchPreference(
                             startAction = {
@@ -568,8 +614,7 @@ fun SettingsScreenMiuix(
                             summary = "跟踪单进程冻结并输出墓碑日志(F)/(T)，需重启生效",
                             checked = simplifyLog,
                             onCheckedChange = {
-                                simplifyLog = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.SIMPLIFY_LOG, it)
+                                onSetBooleanPref(PrefsKeys.SIMPLIFY_LOG, it)
                                 showRebootNotice = true
                             }
                         )

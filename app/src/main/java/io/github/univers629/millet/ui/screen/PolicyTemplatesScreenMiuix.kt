@@ -332,44 +332,6 @@ fun PolicyTemplatesRoute(
     )
 }
 
-/**
- * 策略模板总览：预设与自定义模板列表，可新建自定义模板。
- *
- * @param templateVersion 自定义模板变化后宿主递增，用于重新读取模板
- * @param onTemplatesChanged 自定义模板增删改后回调，宿主据此递增 [templateVersion]
- */
-@Composable
-fun PolicyTemplatesScreenMiuix(
-    apps: List<InstalledAppUiModel>,
-    templateVersion: Int,
-    onBack: () -> Unit,
-    onOpenTemplate: (String) -> Unit,
-    onTemplatesChanged: () -> Unit,
-    policyVersion: Int = 0,
-) {
-    val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
-    val summary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
-
-    PolicyTemplatesContent(
-        templates = templates,
-        usageByTemplate = summary.usageByTemplate,
-        onBack = onBack,
-        onOpenTemplate = onOpenTemplate,
-        onSaveNewTemplate = { name, flags ->
-            val saved = PolicyTemplateStore.saveCustom(prefs, null, name, flags)
-            if (saved != null) {
-                onTemplatesChanged()
-                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
-                onOpenTemplate(saved.id)
-            } else {
-                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
-            }
-        },
-    )
-}
-
 @Composable
 fun PolicyTemplatesContent(
     templates: List<PolicyTemplate>,
@@ -536,59 +498,6 @@ fun PolicyTemplateDetailRoute(
         onApplyFlags = { targets, flags -> vm.applyTemplate(context, targets, flags) },
         onSaveTemplate = vm::saveCustomTemplate,
         onDeleteTemplate = vm::deleteCustomTemplate,
-    )
-}
-
-/**
- * 模板详情：包含的策略、正在使用的应用，以及批量套用 / 移除。
- */
-@Composable
-fun PolicyTemplateDetailScreenMiuix(
-    templateId: String,
-    apps: List<InstalledAppUiModel>,
-    templateVersion: Int,
-    onBack: () -> Unit,
-    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
-    onPolicyChanged: () -> Unit,
-    onTemplatesChanged: () -> Unit,
-    policyVersion: Int = 0,
-) {
-    val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    var localRevision by remember { mutableIntStateOf(0) }
-    val allTemplates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
-    val template = remember(templateId, allTemplates) { allTemplates.firstOrNull { it.id == templateId } }
-    val snapshot = remember(apps, localRevision, policyVersion) { PolicyMembershipSnapshot.read(prefs) }
-    val users = remember(template, apps, snapshot) {
-        if (template == null) emptyList()
-        else apps.filter { PolicyTemplateApplier.isTargetable(it) && template.matches(snapshot.flagsOf(it)) }
-            .sortedWith(compareBy<InstalledAppUiModel> { it.appName.lowercase() }.thenBy { it.isDualApp })
-    }
-
-    PolicyTemplateDetailContent(
-        template = template,
-        allTemplates = allTemplates,
-        apps = apps,
-        snapshot = snapshot,
-        users = users,
-        onBack = onBack,
-        onOpenAppProfile = onOpenAppProfile,
-        onApplyFlags = { targets, flags ->
-            val result = PolicyTemplateApplier.apply(context, targets, flags, onPolicyChanged)
-            localRevision++
-            result
-        },
-        onSaveTemplate = { name, flags ->
-            val saved = template?.let { PolicyTemplateStore.saveCustom(prefs, it.id, name, flags) }
-            if (saved != null) onTemplatesChanged()
-            saved
-        },
-        onDeleteTemplate = {
-            if (template != null) {
-                PolicyTemplateStore.deleteCustom(prefs, template.id)
-                onTemplatesChanged()
-            }
-        },
     )
 }
 

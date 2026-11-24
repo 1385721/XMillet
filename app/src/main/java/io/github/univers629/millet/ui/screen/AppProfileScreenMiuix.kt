@@ -158,20 +158,6 @@ fun AppProfileRoute(
     )
 }
 
-/** 单应用策略详情页，展示进程快照与七个应用级策略集合。 */
-@Composable
-fun AppProfileScreenMiuix(
-    app: InstalledAppUiModel,
-    onBack: () -> Unit,
-    onPolicyChanged: () -> Unit,
-) {
-    AppProfileRoute(
-        packageName = app.packageName,
-        uid = app.uid,
-        onBack = onBack,
-    )
-}
-
 @Composable
 fun AppProfileContent(
     uiState: AppProfileUiState,

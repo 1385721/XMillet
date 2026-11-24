@@ -115,57 +115,6 @@ fun CloudWhitelistRoute(
     )
 }
 
-/**
- * 官方云白名单子页面：展示 PowerKeeper 读取的三条云端名单（dozeWhiteList / frozenNewWhiteList / launchRestrict），
- * 并提供「云免冻」与「云墓碑白」总开关以屏蔽或恢复官方云端白名单（云启动放行保持只读）。
- *
- * 云名单由 PowerKeeper 进程在开机或模块重载后异步上报，晚于首屏到达属于正常现象，
- * 未读取到时展示等待提示并允许手动刷新，不发起任何网络请求。
- */
-@Composable
-fun CloudWhitelistScreenMiuix(
-    cloudLists: CloudListCodec.CloudLists?,
-    apps: List<InstalledAppUiModel>,
-    isRefreshing: Boolean,
-    onRefresh: () -> Unit,
-    onBack: () -> Unit,
-    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
-    configVersion: Int = 0,
-    onConfigChanged: () -> Unit = {},
-) {
-    val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    var blockCloudDoze by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST))
-    }
-    var blockCloudFrozen by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST))
-    }
-
-    CloudWhitelistContent(
-        cloudLists = cloudLists,
-        apps = apps,
-        blockCloudDoze = blockCloudDoze,
-        blockCloudFrozen = blockCloudFrozen,
-        isRefreshing = isRefreshing,
-        onUpdateCloudDozeEnabled = { enabled ->
-            val nextBlock = !enabled
-            blockCloudDoze = nextBlock
-            PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST, nextBlock)
-            onConfigChanged()
-        },
-        onUpdateCloudFrozenEnabled = { enabled ->
-            val nextBlock = !enabled
-            blockCloudFrozen = nextBlock
-            PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST, nextBlock)
-            onConfigChanged()
-        },
-        onRefresh = onRefresh,
-        onBack = onBack,
-        onOpenAppProfile = onOpenAppProfile,
-    )
-}
-
 @Composable
 private fun CloudWhitelistContent(
     cloudLists: CloudListCodec.CloudLists?,

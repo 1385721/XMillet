@@ -162,63 +162,6 @@ fun SettingsRoute(
 }
 
 @Composable
-fun SettingsScreenMiuix(
-    themeState: UiThemeState,
-    configVersion: Int = 0,
-    bottomInnerPadding: Dp,
-    updateStatus: AppUpdateStatus = AppUpdateStatus.Idle,
-    availableUpdateVersion: String? = null,
-    onCheckForUpdates: () -> Unit = {},
-    onOpenAppearance: () -> Unit = {},
-    onOpenOobe: () -> Unit = {},
-    onOpenAbout: () -> Unit,
-    onConfigImportedOrReset: () -> Unit,
-) {
-    val context = LocalContext.current
-    val sp = remember { PrefReader.openUiPrefs(context) }
-    var prefsSnapshot by remember(configVersion) { mutableStateOf(PrefReader.readUiSnapshot(sp)) }
-
-    SettingsContent(
-        uiState = SettingsUiState(
-            prefs = prefsSnapshot,
-            updateStatus = updateStatus,
-            availableUpdateVersion = availableUpdateVersion,
-        ),
-        themeState = themeState,
-        bottomInnerPadding = bottomInnerPadding,
-        onSetBooleanPref = { key, value ->
-            PrefReader.putBooleanAndNotify(sp, key, value)
-            prefsSnapshot = PrefReader.readUiSnapshot(sp)
-        },
-        onSetDetailedLogging = { enabled ->
-            PrefReader.editAllAndNotify(sp) {
-                putBoolean(PrefsKeys.IS_LOG, enabled)
-                putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
-                putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
-                putBoolean(PrefsKeys.DOZE_LOG, enabled)
-                putString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL)
-                putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
-            }
-            prefsSnapshot = PrefReader.readUiSnapshot(sp)
-        },
-        onImportBackupJson = { json ->
-            BackupRestoreHelper.importFromJson(context, json)
-            prefsSnapshot = PrefReader.readUiSnapshot(sp)
-            onConfigImportedOrReset()
-        },
-        onResetToDefaults = {
-            BackupRestoreHelper.resetToDefaults(context)
-            prefsSnapshot = PrefReader.readUiSnapshot(sp)
-            onConfigImportedOrReset()
-        },
-        onCheckForUpdates = onCheckForUpdates,
-        onOpenAppearance = onOpenAppearance,
-        onOpenOobe = onOpenOobe,
-        onOpenAbout = onOpenAbout,
-    )
-}
-
-@Composable
 fun SettingsContent(
     uiState: SettingsUiState,
     themeState: UiThemeState,

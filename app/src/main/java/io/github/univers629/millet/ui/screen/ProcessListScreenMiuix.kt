@@ -34,7 +34,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -105,65 +104,6 @@ fun ProcessListRoute(
         onToggleShowSystemApps = vm::toggleShowSystemApps,
         onRefresh = vm::refresh,
         onThawAll = vm::thawAll,
-        onOpenAppProfile = onOpenAppProfile,
-    )
-}
-
-@Composable
-fun ProcessListScreenMiuix(
-    runningProcesses: List<RunningProcessUiModel>,
-    bottomInnerPadding: Dp,
-    filterIndex: Int = 0,
-    onFilterIndexChange: (Int) -> Unit = {},
-    onRefresh: () -> Unit,
-    onThawAll: () -> Unit,
-    onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
-    isRefreshing: Boolean = false,
-    snapshotUnavailable: Boolean = false,
-) {
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    var showSystemApps by rememberSaveable { mutableStateOf(true) }
-    val currentFilter = ProcessFilterMode.entries.getOrElse(filterIndex) { ProcessFilterMode.ALL }
-    val frozenCount = remember(runningProcesses) { runningProcesses.count { it.isFrozen } }
-    val runningCount = remember(runningProcesses, frozenCount) {
-        runningProcesses.count { !it.isFrozen && it.frozenCount == 0 && it.unknownCount == 0 }
-    }
-    val filteredProcesses = remember(runningProcesses, searchQuery, currentFilter, showSystemApps) {
-        val q = searchQuery.trim().lowercase()
-        runningProcesses.filter { proc ->
-            val filterMatch = when (currentFilter) {
-                ProcessFilterMode.ALL -> true
-                ProcessFilterMode.FROZEN -> proc.isFrozen
-                ProcessFilterMode.RUNNING -> !proc.isFrozen && proc.frozenCount == 0 && proc.unknownCount == 0
-                ProcessFilterMode.UNKNOWN -> proc.unknownCount > 0 || (!proc.isFrozen && proc.frozenCount > 0)
-            }
-            val queryMatch = q.isEmpty() ||
-                proc.appName.lowercase().contains(q) ||
-                proc.packageName.lowercase().contains(q) ||
-                proc.uid.toString().contains(q) ||
-                proc.pids.any { it.toString().contains(q) } ||
-                (proc.isDualApp && "双开".contains(q))
-            filterMatch && queryMatch && (showSystemApps || !proc.isSystem)
-        }
-    }
-    ProcessListContent(
-        uiState = ProcessListUiState(
-            filteredProcesses = filteredProcesses,
-            totalProcessCount = runningProcesses.size,
-            frozenCount = frozenCount,
-            runningCount = runningCount,
-            filterIndex = filterIndex,
-            searchQuery = searchQuery,
-            showSystemApps = showSystemApps,
-            isRefreshing = isRefreshing,
-            snapshotUnavailable = snapshotUnavailable,
-        ),
-        bottomInnerPadding = bottomInnerPadding,
-        onFilterIndexChange = onFilterIndexChange,
-        onSearchQueryChange = { searchQuery = it },
-        onToggleShowSystemApps = { showSystemApps = !showSystemApps },
-        onRefresh = onRefresh,
-        onThawAll = onThawAll,
         onOpenAppProfile = onOpenAppProfile,
     )
 }

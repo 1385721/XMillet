@@ -75,8 +75,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.core.CloudListCodec
-import io.github.univers629.millet.core.PolicyTemplate
-import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
@@ -85,8 +83,6 @@ import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
-import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
-import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import io.github.univers629.millet.ui.vm.AppsUiState
 import io.github.univers629.millet.ui.vm.AppsViewModel
@@ -214,75 +210,6 @@ fun AppsRoute(
         onToggleShowSystemApps = vm::toggleShowSystemApps,
         onResetFilters = vm::resetFilters,
         onRefresh = vm::refresh,
-        onOpenAppProfile = onOpenAppProfile,
-        onOpenTemplates = onOpenTemplates,
-        onOpenCloudWhitelist = onOpenCloudWhitelist,
-    )
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-fun AppsScreenMiuix(
-    apps: List<InstalledAppUiModel>,
-    isRefreshing: Boolean,
-    showSystemApps: Boolean,
-    onToggleShowSystemApps: () -> Unit,
-    onRefresh: () -> Unit,
-    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
-    bottomInnerPadding: Dp,
-    policyVersion: Int = 0,
-    templateVersion: Int = 0,
-    cloudLists: CloudListCodec.CloudLists? = null,
-    onOpenTemplates: () -> Unit = {},
-    onOpenCloudWhitelist: () -> Unit = {},
-) {
-    val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    var selectedCategoryIndex by rememberSaveable { mutableIntStateOf(0) }
-    val selectedCategory = AppCategoryFilter.entries.getOrElse(selectedCategoryIndex) { AppCategoryFilter.ALL }
-
-    val filteredApps = remember(apps, searchQuery, selectedCategory, showSystemApps) {
-        val q = searchQuery.trim().lowercase()
-        apps.filter { app ->
-            val sysMatch = showSystemApps || !app.isSystem || app.hasAnyConfig
-            val catMatch = selectedCategory.matches(app)
-            val queryMatch = q.isEmpty() ||
-                app.appName.lowercase().contains(q) ||
-                app.packageName.lowercase().contains(q) ||
-                app.uid.toString().contains(q)
-            sysMatch && catMatch && queryMatch
-        }
-    }
-    val categoryCounts = remember(apps, showSystemApps) {
-        AppCategoryFilter.entries.map { cat ->
-            apps.count { app -> (showSystemApps || !app.isSystem || app.hasAnyConfig) && cat.matches(app) }
-        }
-    }
-    val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
-    val hubSummary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
-
-    AppsContent(
-        uiState = AppsUiState(
-            filteredApps = filteredApps,
-            categoryCounts = categoryCounts,
-            templateCount = templates.size,
-            hubSummary = hubSummary,
-            cloudLists = cloudLists,
-            searchQuery = searchQuery,
-            selectedCategoryIndex = selectedCategoryIndex,
-            showSystemApps = showSystemApps,
-            isRefreshing = isRefreshing,
-        ),
-        bottomInnerPadding = bottomInnerPadding,
-        onSearchQueryChange = { searchQuery = it },
-        onSelectedCategoryIndexChange = { selectedCategoryIndex = it },
-        onToggleShowSystemApps = onToggleShowSystemApps,
-        onResetFilters = {
-            searchQuery = ""
-            selectedCategoryIndex = 0
-        },
-        onRefresh = onRefresh,
         onOpenAppProfile = onOpenAppProfile,
         onOpenTemplates = onOpenTemplates,
         onOpenCloudWhitelist = onOpenCloudWhitelist,
@@ -700,7 +627,6 @@ private fun AppItemCardMiuix(
     }
 }
 
-/** 策略中枢卡片所需的汇总数据，一次计算后交给 UI，避免在重组中反复读 prefs。 */
 @Immutable
 data class PolicyHubSummary(
     /** 模板 ID → 当前完全匹配该模板的应用数 */
@@ -710,32 +636,6 @@ data class PolicyHubSummary(
     /** 本机已安装且命中任一云白名单的独立包数 */
     val cloudInstalledCount: Int,
 )
-
-internal fun buildPolicyHubSummary(
-    prefs: SharedPreferences,
-    apps: List<InstalledAppUiModel>,
-    templates: List<PolicyTemplate>,
-): PolicyHubSummary {
-    val snapshot = PolicyMembershipSnapshot.read(prefs)
-    val flagsByApp = apps.mapNotNull { app ->
-        snapshot.flagsOf(app).takeIf { it.isNotEmpty() }?.let { app to it }
-    }
-    val usage = templates.associate { template ->
-        template.id to flagsByApp.count { (_, flags) -> template.matches(flags) }
-    }
-    val applied = flagsByApp.count { (_, flags) -> templates.any { it.matches(flags) } }
-    // 云名单按包名下发，双开实例与主应用算同一个。
-    val cloudInstalled = apps.asSequence()
-        .filter { it.inCloudDozeWhite || it.inCloudFrozenWhite || it.inCloudLaunchAllow }
-        .map { it.packageName }
-        .distinct()
-        .count()
-    return PolicyHubSummary(
-        usageByTemplate = usage,
-        appliedApps = applied,
-        cloudInstalledCount = cloudInstalled,
-    )
-}
 
 @Composable
 private fun PolicyHubCards(

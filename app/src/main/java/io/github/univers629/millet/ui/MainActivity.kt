@@ -1,21 +1,15 @@
 package io.github.univers629.millet.ui
-import androidx.compose.runtime.SideEffect
-import io.github.univers629.millet.ui.util.PopupBackdropHolder
 
 import android.content.ComponentName
-import android.content.Context
 import android.content.SharedPreferences
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -29,62 +23,55 @@ import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults.flingBehavior
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.univers629.millet.BuildConfig
-import io.github.univers629.millet.core.AppUidUtils
-import io.github.univers629.millet.core.CloudListCodec
-import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.OobeManager
-import io.github.univers629.millet.core.PrefReader
-import io.github.univers629.millet.core.PrefsKeys
-import io.github.univers629.millet.core.RootHelper
-import io.github.univers629.millet.core.SETTING_MILLET_NO_RESTRICT_APP
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppUpdateDialogMiuix
-import io.github.univers629.millet.ui.component.BottomBarMiuix
 import io.github.univers629.millet.ui.component.BottomBarDestination
-import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
-import io.github.univers629.millet.ui.component.MainPagerState
+import io.github.univers629.millet.ui.component.BottomBarMiuix
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.rememberMainPagerState
-import io.github.univers629.millet.ui.model.AppIconSource
+import io.github.univers629.millet.ui.di.appUiContainer
+import io.github.univers629.millet.ui.nav.NavEntryStoreRegistry
+import io.github.univers629.millet.ui.nav.ProvideNavEntryViewModelStore
+import io.github.univers629.millet.ui.nav.SyncNavBackStackStores
 import io.github.univers629.millet.ui.screen.AboutKnowledgeScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutLicensesScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutRepoScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutScreenMiuix
-import io.github.univers629.millet.ui.screen.AppProfileScreenMiuix
-import io.github.univers629.millet.ui.screen.AppsScreenMiuix
-import io.github.univers629.millet.ui.screen.CloudWhitelistScreenMiuix
-import io.github.univers629.millet.ui.screen.HomeScreenMiuix
-import io.github.univers629.millet.ui.screen.InstalledAppUiModel
+import io.github.univers629.millet.ui.screen.AppProfileRoute
+import io.github.univers629.millet.ui.screen.AppsRoute
+import io.github.univers629.millet.ui.screen.CloudWhitelistRoute
+import io.github.univers629.millet.ui.screen.HomeRoute
 import io.github.univers629.millet.ui.screen.OobeScreenMiuix
-import io.github.univers629.millet.ui.screen.PolicyTemplateDetailScreenMiuix
-import io.github.univers629.millet.ui.screen.PolicyTemplatesScreenMiuix
-import io.github.univers629.millet.ui.screen.ProcessListScreenMiuix
-import io.github.univers629.millet.ui.screen.RunningProcessUiModel
-import io.github.univers629.millet.ui.screen.SettingsScreenMiuix
+import io.github.univers629.millet.ui.screen.PolicyTemplateDetailRoute
+import io.github.univers629.millet.ui.screen.PolicyTemplatesRoute
+import io.github.univers629.millet.ui.screen.ProcessListRoute
+import io.github.univers629.millet.ui.screen.SettingsRoute
 import io.github.univers629.millet.ui.screen.ThemeSettingsScreenMiuix
+import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBar
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBarBlur
@@ -92,18 +79,11 @@ import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.theme.XMilletMiuixTheme
 import io.github.univers629.millet.ui.util.AppUpdateController
 import io.github.univers629.millet.ui.util.AppUpdateDownloadState
+import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.MainShellViewModel
+import io.github.univers629.millet.ui.vm.ProcessListViewModel
 import kotlinx.serialization.Serializable
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import androidx.compose.foundation.pager.PagerDefaults.flingBehavior
-import androidx.navigationevent.NavigationEventInfo
-import androidx.navigationevent.compose.NavigationBackHandler
-import androidx.navigationevent.compose.rememberNavigationEventState
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
@@ -118,18 +98,8 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
 
 /**
- * XMillet 2.0 统一现代化主界面（基于 Miuix KMP 0.9.4）：
- * - 核心主页面（基于 HorizontalPager 物理弹簧平滑联动）：
- *   1. 主页（状态总览、核心服务连接检测、已冻结应用管理、环境参数、活跃进程概览）
- *   2. 进程列表（活跃应用与系统进程扫描、冻结状态、内存占用）
- *   3. 墓碑统计（可选显示：冻结、唤醒原因、时段分布、拦截统计与单应用明细）
- *   4. 应用策略（7 大分类胶囊过滤、Miuix 胶囊搜索栏、下拉刷新、应用卡片列表）
- *   5. 设置与个性化（Millet 墓碑冻结策略、Doze 深度睡眠、Miuix 莫奈调色板、悬浮底栏、备份恢复）
- * - 平滑二级子页面（接入 Miuix NavDisplay 连续栈深度与系统预测返回手势，支持全屏侧滑平滑返回）：
- *   - 单应用策略配置页 (AppProfileScreenMiuix)
- *   - 个性化主题页 (ThemeSettingsScreenMiuix)
- *   - 权限向导页 (OobeScreenMiuix)
- *   - 关于与文档页群 (AboutScreenMiuix 等)
+ * XMillet 主界面宿主 Activity：仅负责导航壳层、前景生命周期编排与主题提供，
+ * 业务状态与计算下沉至各页面 `ViewModel` 与响应式 `Repository`。
  */
 class MainActivity : ComponentActivity() {
 
@@ -140,25 +110,34 @@ class MainActivity : ComponentActivity() {
         data object Main : Route
 
         // 只携带身份，不携带完整模型：模型里的策略布尔会随配置变化，放进路由会让相等性不稳定，
-        // 也无法跨进程重建。展示所需字段在组合时按包名与 UID 从已加载列表解析。
+        // 也无法跨进程重建。展示所需字段在组合时按包名与 UID 从仓库解析。
         @Serializable
         data class AppProfile(val packageName: String, val uid: Int) : Route
+
         @Serializable
         data object PolicyTemplates : Route
+
         @Serializable
         data class PolicyTemplateDetail(val templateId: String) : Route
+
         @Serializable
         data object CloudWhitelist : Route
+
         @Serializable
         data object Appearance : Route
+
         @Serializable
         data object Oobe : Route
+
         @Serializable
         data object About : Route
+
         @Serializable
         data object AboutKnowledge : Route
+
         @Serializable
         data object AboutRepo : Route
+
         @Serializable
         data object AboutLicenses : Route
     }
@@ -173,8 +152,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 同一路由重复压栈会触发 contentKey 冲突，因此按路由身份去重。
-        private fun routeIdentity(key: NavKey): Any = when (key) {
+        fun routeIdentity(key: NavKey): Any = when (key) {
             is Route.AppProfile -> key.packageName to key.uid
             else -> key
         }
@@ -190,7 +168,6 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun rememberNavigator(startRoute: Route): Navigator {
-        // 返回栈随 Activity 重建一起恢复：配置变更、深色切换、进程被回收后都不会退回根页。
         val backStack = rememberNavBackStack<Route>(startRoute)
         return remember(backStack) { Navigator(backStack) }
     }
@@ -207,16 +184,23 @@ class MainActivity : ComponentActivity() {
                 android.graphics.Color.TRANSPARENT
             )
         )
-        val prefs = PrefReader.openUiPrefs(this)
-        migrateRemovedThemedIconAlias(prefs)
-        val themeState = UiThemeState(prefs)
+        val container = appUiContainer
+        migrateRemovedThemedIconAlias(container.uiPrefs)
 
         // 尝试建立跨进程双向 Binder 连接
         PowerKeeperBinderClient.bindFromApp(this)
 
         setContent {
-            XMilletMiuixTheme(themeState = themeState) {
-                MainActivityContent(themeState = themeState)
+            val shellVm: MainShellViewModel = viewModel {
+                MainShellViewModel(
+                    themeState = UiThemeState(container.uiPrefs),
+                    initialProvisioned = OobeManager.isProvisioned(this@MainActivity),
+                    policyRepo = container.policyRepository,
+                    runtimeRepo = container.runtimeAndAppsRepository,
+                )
+            }
+            XMilletMiuixTheme(themeState = shellVm.themeState) {
+                MainActivityContent(shellVm = shellVm)
             }
         }
     }
@@ -233,8 +217,6 @@ class MainActivity : ComponentActivity() {
         val legacyState = packageManager.getComponentEnabledSetting(legacyAlias)
         val legacyToggle = prefs.getBoolean(KEY_THEMED_ICON_LEGACY, false)
         val legacyAliasEnabled = legacyState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-        // 旧设备可能停在「默认别名被停用、主题别名被启用」的状态：升级后主题别名已不再是功能，
-        // 若不再处理，桌面将没有图标。这里把状态迁回默认别名，并停用遗留别名。
         if ((legacyToggle || legacyAliasEnabled) &&
             aliasState == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
         ) {
@@ -259,12 +241,23 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun MainActivityContent(themeState: UiThemeState) {
-        val coroutineScope = rememberCoroutineScope()
-        var processFilterIndex by rememberSaveable { mutableIntStateOf(0) }
+    private fun MainActivityContent(shellVm: MainShellViewModel) {
+        val container = remember { appUiContainer }
+        val themeState = shellVm.themeState
         val navigator = rememberNavigator(Route.Main)
+        val navStoreRegistry: NavEntryStoreRegistry = viewModel { NavEntryStoreRegistry() }
+        val processListVm: ProcessListViewModel = viewModel {
+            ProcessListViewModel(container.runtimeAndAppsRepository)
+        }
 
-        // Pager 状态：页序由可见底栏目的地决定（墓碑统计可在设置中隐藏），下标一律经由 destinations 换算
+        val activeRouteIdentities = navigator.backStack.mapTo(HashSet()) { navigator.routeIdentity(it) }
+        SyncNavBackStackStores(navStoreRegistry, activeRouteIdentities)
+
+        val currentRoute = navigator.current()
+        LaunchedEffect(currentRoute) {
+            shellVm.onRouteChanged(currentRoute == Route.Main)
+        }
+
         val destinations = remember(themeState.showTombStatsTab) {
             BottomBarDestination.visible(themeState.showTombStatsTab)
         }
@@ -276,12 +269,11 @@ class MainActivity : ComponentActivity() {
             if (idx >= 0) mainPagerState.animateToPage(idx)
         }
 
-        // 墓碑统计 Tab 被隐藏/恢复时，保持停留在当前目的地（例如设置页不跳页）；若当前目的地已不可见则回到主页
-        var activeDestination by remember { mutableStateOf(BottomBarDestination.Home) }
+        val activeDestination by shellVm.activeDestination.collectAsStateWithLifecycle()
         val settledPage = mainPagerState.pagerState.settledPage
         val currentPage = mainPagerState.pagerState.currentPage
-        LaunchedEffect(settledPage) {
-            destinations.getOrNull(settledPage)?.let { activeDestination = it }
+        LaunchedEffect(settledPage, destinations) {
+            destinations.getOrNull(settledPage)?.let(shellVm::onDestinationSettled)
         }
         LaunchedEffect(destinations) {
             val target = destinations.indexOf(activeDestination).let { if (it >= 0) it else 0 }
@@ -310,427 +302,42 @@ class MainActivity : ComponentActivity() {
             },
         )
 
-        var runtimeStatus by remember {
-            mutableStateOf(PowerKeeperBinderClient.RuntimeStatusSnapshot())
-        }
-        var runningProcesses by remember {
-            mutableStateOf<List<RunningProcessUiModel>>(emptyList())
-        }
-        var installedApps by remember {
-            mutableStateOf<List<InstalledAppUiModel>>(emptyList())
-        }
-        var isAppsRefreshing by remember { mutableStateOf(false) }
-        // 云名单是否已经真正读到：模块侧上报的云名单可能晚于首屏到达，
-        // 首屏读云库会读到空，需要在模块上报后补读一次。
-        var cloudConfigApplied by remember { mutableStateOf(false) }
-        var resolvedCloudLists by remember { mutableStateOf<CloudListCodec.CloudLists?>(null) }
-        var dualAppsSyncedFromBinder by remember { mutableStateOf(false) }
-        // 是否已经成功问过一次系统服务；用于区分「还没问」和「问了但没有模块」
-        var systemServiceProbed by remember { mutableStateOf(false) }
-        var showSystemApps by rememberSaveable { mutableStateOf(false) }
-        var configVersion by remember { mutableIntStateOf(0) }
-        var policyTemplateVersion by remember { mutableIntStateOf(0) }
-
-        // 开箱引导（OOBE / Provision）完成状态检查（首次安装/启动时强制进入权限向导）
-        var isProvisioned by rememberSaveable {
-            mutableStateOf(OobeManager.isProvisioned(this@MainActivity))
-        }
-
-        var updateNoticeDialog by remember { mutableStateOf(false) }
-
-        // 注册来自 system_server / PowerKeeper 的异步消息回调
-        DisposableEffect(Unit) {
-            PowerKeeperBinderClient.onAppUpdateNoticeReceived = {
-                updateNoticeDialog = true
-            }
-            onDispose {
-                PowerKeeperBinderClient.onAppUpdateNoticeReceived = null
-            }
-        }
-
-        var isProcessesRefreshing by remember { mutableStateOf(false) }
-        // 首次采集完成前不误报「快照不可用」，仅在真实查询失败或返回空快照对象时才展示提示横幅。
-        var processSnapshotUnavailable by remember { mutableStateOf(false) }
-        // 同一页面只允许一个采集任务；失败保留旧结果，不将连接故障解释成空快照。
-        val processRefreshGuard = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-        // 周期刷新与隐式刷新不设置下拉刷新状态：仅用户主动下拉或点刷新时显示刷新指示器。
-        fun refreshStatusAndRunningProcs(visible: Boolean = false) {
-            if (!processRefreshGuard.compareAndSet(false, true)) return
-            if (visible) isProcessesRefreshing = true
-            coroutineScope.launch {
-                try {
-                        val status = withContext(Dispatchers.IO) {
-                            if (!PowerKeeperBinderClient.pingAlive()) {
-                                PowerKeeperBinderClient.bindFromApp(this@MainActivity)
-                            }
-                            PowerKeeperBinderClient.queryRuntimeStatus()
-                        }
-                        runtimeStatus = status
-                        systemServiceProbed = true
-
-                        val procs = withContext(Dispatchers.IO) {
-                            val pm = packageManager
-                            val byPkgUid =
-                                LinkedHashMap<String, MutableList<RootHelper.ProcessRawEntry>>()
-
-                            // 进程快照只取 system_server 侧：它本来就有权限读 /proc，App 不需要 root。
-                            // 采集失败保留旧结果，不在后台拉起 su 触发授权弹窗。
-                            val snapshot = PowerKeeperBinderClient.queryProcessSnapshot()
-                                ?: return@withContext null
-                            for (raw in snapshot.entries) {
-                                // 未确认所属包的进程保留在快照中，不构造应用分组。
-                                if (raw.packageName.isBlank()) continue
-                                byPkgUid.getOrPut("${raw.packageName}:${raw.uid}") { ArrayList() }
-                                    .add(raw)
-                            }
-
-                            if (byPkgUid.isNotEmpty()) {
-                                byPkgUid.values.mapNotNull { rawEntries ->
-                                    val first = rawEntries.firstOrNull() ?: return@mapNotNull null
-                                    val pkg = first.packageName
-                                    val uid = first.uid
-                                    if (pkg == packageName) return@mapNotNull null
-                                    if (!AppUidUtils.isManagedAppUid(uid, includeDualApp = true)) {
-                                        return@mapNotNull null
-                                    }
-                                    val appInfo =
-                                        runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
-
-                                    val label = appInfo?.let {
-                                        runCatching {
-                                            pm.getApplicationLabel(it).toString().trim()
-                                        }.getOrNull()
-                                    }.orEmpty().ifEmpty { pkg }
-                                    val pids = rawEntries.map { it.pid }
-                                    val totalMemKb = rawEntries.sumOf { it.rssKb }
-                                    val fTypes = rawEntries.map { it.freezerType }
-                                        .filter { it != RootHelper.FreezerType.UNKNOWN }.toSet()
-                                    val kernelFrozenCount =
-                                        rawEntries.count { it.freezeState == RootHelper.FreezeState.FROZEN }
-                                    val unknownCount =
-                                        rawEntries.count { it.freezeState == RootHelper.FreezeState.UNKNOWN }
-
-                                    val isSys = ((appInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
-                                    RunningProcessUiModel(
-                                        appName = label,
-                                        packageName = pkg,
-                                        uid = uid,
-                                        pids = pids,
-                                        isFrozen = kernelFrozenCount == rawEntries.size,
-                                        freezerTypes = fTypes,
-                                        processCount = rawEntries.size,
-                                        frozenCount = kernelFrozenCount,
-                                        unknownCount = unknownCount,
-                                        memSizeKb = totalMemKb,
-                                        formattedMemSize = RootHelper.formatMemSize(totalMemKb),
-                                        isSystem = isSys,
-                                        isDualApp = AppUidUtils.isDualAppUid(uid),
-                                        iconSource = AppIconSource.fromOrNull(appInfo)
-                                    )
-                                }.sortedWith(
-                                    compareByDescending<RunningProcessUiModel> { it.isFrozen }
-                                        .thenByDescending { it.memSizeKb }
-                                        .thenBy { it.appName.lowercase() }
-                                )
-                            } else {
-                                emptyList()
-                            }
-                        }
-                        if (procs != null) runningProcesses = procs
-                        processSnapshotUnavailable = procs == null
-                    } catch (error: Exception) {
-                        if (error is kotlinx.coroutines.CancellationException) throw error
-                        processSnapshotUnavailable = true
-                        Logger.error("刷新进程快照失败", error)
-                } finally {
-                    if (visible) isProcessesRefreshing = false
-                    processRefreshGuard.set(false)
-                }
-            }
-        }
-
-        // 加载已安装应用策略
-        var appLoadGeneration by remember { mutableStateOf(0L) }
-        fun loadInstalledApps(visible: Boolean = false) {
-            appLoadGeneration += 1L
-            val generation = appLoadGeneration
-            if (visible) isAppsRefreshing = true
-            coroutineScope.launch {
-                try {
-                    val (apps, loadedCloudLists, dualLoaded) = withContext(Dispatchers.IO) {
-                        val sp = PrefReader.openUiPrefs(this@MainActivity)
-                        val whiteSet = PrefReader.readUiStringSet(sp, PrefsKeys.WHITE_APP_SET)
-                        val msgSet = PrefReader.readUiStringSet(sp, PrefsKeys.MESSAGE_APP_SET)
-                        val forceSet = PrefReader.readUiStringSet(sp, PrefsKeys.FORCE_FREEZE_SET)
-                        val blockThawSet = PrefReader.readUiStringSet(sp, PrefsKeys.BLOCK_THAW_SET)
-                        val forbidSyncSet =
-                            PrefReader.readUiStringSet(sp, PrefsKeys.FORBID_SYNC_BINDER_SET)
-                        val fgsSet =
-                            PrefReader.readUiStringSet(sp, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET)
-
-                        val pm = packageManager
-                        // 优先用 powerkeeper 通过官方 GlobalFeatureConfigureHelper 读到的云名单：
-                        // 那是系统自己给这三条名单准备的入口，不依赖 Root、也不依赖数据库路径。
-                        // 只有模块侧还没上报（首次开机、HotReload 期间）才退回 App 自读数据库的兜底。
-                        val wireCloud = runtimeStatus.cloudLists
-                        val cloudConfig = if (wireCloud != null && !wireCloud.isEmpty) {
-                            io.github.univers629.millet.core.CloudConfigReader.CloudConfig(
-                                dozeWhiteList = wireCloud.dozeWhiteList,
-                                frozenNewWhiteList = wireCloud.frozenNewWhiteList,
-                                launchRestrict = wireCloud.launchRestrict,
-                            )
-                        } else if (systemServiceProbed && !runtimeStatus.binderAlive) {
-                            // 模块不存在（没人通过官方接口上报）时才自读数据库；这条路要 root。
-                            io.github.univers629.millet.core.CloudConfigReader.load(
-                                this@MainActivity,
-                                force = true
-                            )
-                        } else {
-                            // 系统服务在、但 PowerKeeper 还没上报：先用空名单，等上报后自动重建列表。
-                            // 不再为了一份名单去起 root shell。
-                            io.github.univers629.millet.core.CloudConfigReader.CloudConfig()
-                        }
-
-                        @Suppress("DEPRECATION")
-                        val installedList = pm.getInstalledApplications(0)
-
-                        // 「电池白名单」不落盘、也不写 prefs：每次加载都以系统实际状态为准，
-                        // 这样用户在系统设置里改成「无限制」再回来立刻能看到标签，关掉也不会残留。
-                        // 数据源是 PowerKeeper 生成的 Settings.System.MILLET_NO_RESTRICT_APP ——
-                        // Greezer 真正认的「无限制」名单就是它；AOSP deviceidle 白名单与它不同步，
-                        // 用 PowerManager.isIgnoringBatteryOptimizations() 会得到假阴性。
-                        // 该值只含用户主动设置过的应用，天然不含系统预置包。
-                        val systemUnrestricted = runCatching {
-                            android.provider.Settings.System.getString(
-                                contentResolver,
-                                SETTING_MILLET_NO_RESTRICT_APP
-                            )
-                        }.getOrNull()
-                            ?.split(',')
-                            ?.map { it.trim() }
-                            ?.filter { it.isNotEmpty() }
-                            ?.toHashSet()
-                            ?: HashSet()
-
-                        val result = ArrayList<InstalledAppUiModel>(installedList.size)
-                        val primaryInfoByPkg = HashMap<String, ApplicationInfo>(installedList.size)
-                        val seenKeys = HashSet<String>(installedList.size)
-
-                        fun buildAppModel(
-                            pkg: String,
-                            uid: Int,
-                            info: ApplicationInfo?,
-                            isSys: Boolean,
-                        ): InstalledAppUiModel {
-                            val label = info?.let {
-                                runCatching {
-                                    pm.getApplicationLabel(it).toString()
-                                }.getOrNull()
-                            } ?: pkg
-                            val pInfo = runCatching { pm.getPackageInfo(pkg, 0) }.getOrNull()
-                            val verCode =
-                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                                    pInfo?.longVersionCode ?: 0L
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    (pInfo?.versionCode ?: 0).toLong()
-                                }
-                            return InstalledAppUiModel(
-                                appName = label,
-                                packageName = pkg,
-                                uid = uid,
-                                versionName = pInfo?.versionName.orEmpty(),
-                                versionCode = verCode,
-                                isSystem = isSys,
-                                iconSource = AppIconSource.fromOrNull(info),
-                                inWhiteSet = AppUidUtils.containsPolicyTarget(whiteSet, pkg, uid),
-                                inMessageSet = AppUidUtils.containsPolicyTarget(msgSet, pkg, uid),
-                                inForceFreezeSet = AppUidUtils.containsPolicyTarget(
-                                    forceSet,
-                                    pkg,
-                                    uid
-                                ),
-                                inBlockThawSet = AppUidUtils.containsPolicyTarget(
-                                    blockThawSet,
-                                    pkg,
-                                    uid
-                                ),
-                                inForbidSyncSet = AppUidUtils.containsPolicyTarget(
-                                    forbidSyncSet,
-                                    pkg,
-                                    uid
-                                ),
-                                inNotFreezeFgsSet = AppUidUtils.containsPolicyTarget(
-                                    fgsSet,
-                                    pkg,
-                                    uid
-                                ),
-                                inBatteryWhiteSet = !AppUidUtils.isDualAppUid(uid) && pkg in systemUnrestricted,
-                                inCloudDozeWhite = pkg in cloudConfig.dozeWhiteList,
-                                inCloudFrozenWhite = pkg in cloudConfig.frozenNewWhiteList,
-                                inCloudLaunchAllow = pkg in cloudConfig.launchRestrict
-                            )
-                        }
-
-                        for (info in installedList) {
-                            val pkg = info.packageName ?: continue
-                            primaryInfoByPkg[pkg] = info
-                            if (!seenKeys.add("$pkg:${info.uid}")) continue
-                            val isSys = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                            result.add(buildAppModel(pkg, info.uid, info, isSys))
-                        }
-
-                        // 单独列出双开空间 (user 999) 应用，与主应用分开展示与查看进程
-                        val dualEntries = PowerKeeperBinderClient.queryDualApps()
-                        val dualLoaded = dualEntries != null
-                        if (dualEntries != null) {
-                            for (entry in dualEntries) {
-                                if (!seenKeys.add("${entry.packageName}:${entry.uid}")) continue
-                                val info = primaryInfoByPkg[entry.packageName]
-                                    ?: runCatching {
-                                        pm.getApplicationInfo(
-                                            entry.packageName,
-                                            0
-                                        )
-                                    }.getOrNull()
-                                val isSys = (entry.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
-                                        ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
-                                result.add(buildAppModel(entry.packageName, entry.uid, info, isSys))
-                            }
-                        }
-                        // 兜底补充运行中进程已观察到的双开 UID（例如模块刚热加载前未连上新事务）
-                        for (proc in runningProcesses) {
-                            if (!proc.isDualApp) continue
-                            if (!seenKeys.add("${proc.packageName}:${proc.uid}")) continue
-                            val info = primaryInfoByPkg[proc.packageName] ?: proc.iconSource?.applicationInfo
-                            val isSys = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
-                            result.add(buildAppModel(proc.packageName, proc.uid, info, isSys))
-                        }
-
-                        result.sortWith(
-                            compareByDescending<InstalledAppUiModel> { it.hasAnyConfig }
-                                .thenBy { it.appName.lowercase() }
-                                .thenBy { it.packageName }
-                                .thenBy { it.isDualApp }
-                        )
-                        val loadedCloudLists = if (cloudConfig.isEmpty) {
-                            null
-                        } else {
-                            CloudListCodec.CloudLists(
-                                dozeWhiteList = cloudConfig.dozeWhiteList,
-                                frozenNewWhiteList = cloudConfig.frozenNewWhiteList,
-                                launchRestrict = cloudConfig.launchRestrict,
-                            )
-                        }
-                        Triple(result, loadedCloudLists, dualLoaded)
-                    }
-                    if (generation == appLoadGeneration) {
-                        installedApps = apps
-                        cloudConfigApplied = loadedCloudLists != null
-                        if (loadedCloudLists != null) resolvedCloudLists = loadedCloudLists
-                        if (dualLoaded) dualAppsSyncedFromBinder = true
-                    }
-                } catch (error: Exception) {
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    Logger.error("加载应用策略失败", error)
-                } finally {
-                    if (visible && generation == appLoadGeneration) isAppsRefreshing = false
-                }
-            }
-        }
-
-        LaunchedEffect(isProvisioned, runtimeStatus.binderAlive) {
-            if (isProvisioned && runtimeStatus.binderAlive && !dualAppsSyncedFromBinder) {
-                loadInstalledApps()
-            }
-        }
-
-        // 云名单由 PowerKeeper 通过官方接口上报，开机后可能比首屏列表晚到；
-        // 到齐后重建一次列表让三个云标签出现。这里用 snapshotFlow 事件等待，
-        // 避免固定间隔轮询唤醒；同时不依赖 root 授权（云名单已改走跨进程接口）。
-        LaunchedEffect(isProvisioned) {
-            if (!isProvisioned) return@LaunchedEffect
-            if (runtimeStatus.cloudLists == null) {
-                withTimeoutOrNull(20_000L) {
-                    snapshotFlow { runtimeStatus.cloudLists }.first { it != null }
-                }
-            }
-            if (runtimeStatus.cloudLists != null && !cloudConfigApplied) {
-                loadInstalledApps()
-            }
-        }
-
-        // 按包名与 UID 打开应用策略页：路由只携带身份，页面内按身份从已加载列表解析模型，
-        // 列表尚未加载完成时由页面自行补查。
-        val openProfileByTarget: (String, Int) -> Unit = { pkg, targetUid ->
-            val target = installedApps.find {
-                it.packageName == pkg && (targetUid <= 0 || it.uid == targetUid)
-            }
-            val resolvedUid = target?.uid
-                ?: if (targetUid > 0) targetUid
-                else (runCatching { packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull() ?: 0)
-            navigator.push(Route.AppProfile(pkg, resolvedUid))
-        }
-
-        // 回到前台时重新读一遍系统状态：用户可能刚在系统设置里改过「省电策略」，
-        // 而电池白名单标签、进程冻结状态都以系统实际状态为准，不重读就会一直显示旧值。
+        val isProvisioned by shellVm.isProvisioned.collectAsStateWithLifecycle()
+        val serviceAlive by shellVm.serviceAliveFlow.collectAsStateWithLifecycle()
+        val updateNoticeDialog by PowerKeeperBinderClient.appUpdateNoticeFlow.collectAsStateWithLifecycle()
+        val updateUiState by AppUpdateController.uiState.collectAsStateWithLifecycle()
         val lifecycleOwner = LocalLifecycleOwner.current
-        // 前台可见性：状态轮询只在页面前台跑，退到后台就停，省电也省 Binder 往返。
-        var isForeground by remember { mutableStateOf(true) }
-        DisposableEffect(lifecycleOwner, isProvisioned) {
-            if (!isProvisioned) return@DisposableEffect onDispose { }
-            val observer = LifecycleEventObserver { _, event ->
-                when (event) {
-                    Lifecycle.Event.ON_RESUME -> {
-                        isForeground = true
-                        refreshStatusAndRunningProcs()
-                        loadInstalledApps()
-                    }
+        val lifecycleState by lifecycleOwner.lifecycle.currentStateAsState()
+        val isForegroundStarted = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
 
-                    Lifecycle.Event.ON_PAUSE -> {
-                        isForeground = false
-                    }
-
-                    else -> Unit
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-
-        // 仅在已完成开箱向导（进入主界面）后才执行繁重的进程扫描与全系统应用加载，避免在 OOBE 进场动画期间争抢 CPU/IO
-        val uiPrefs = remember { PrefReader.openUiPrefs(this@MainActivity) }
-        val updateUiState by AppUpdateController.uiState.collectAsState()
         LaunchedEffect(updateUiState.pendingAutoInstall) {
             if (updateUiState.pendingAutoInstall) {
                 AppUpdateController.consumeAutoInstall(this@MainActivity)
             }
         }
-        LaunchedEffect(isProvisioned) {
-            if (isProvisioned) {
-                refreshStatusAndRunningProcs()
-                loadInstalledApps()
+
+        // 仅在完成开箱向导且处于前台（STARTED）时刷新应用列表、检查更新与运行态采样；
+        // 退到后台或熄屏（ON_STOP）自动取消采样循环，严格遵守零后台轮询约束。
+        LaunchedEffect(lifecycleOwner, isProvisioned) {
+            if (!isProvisioned) return@LaunchedEffect
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                shellVm.onForegroundStart()
                 AppUpdateController.checkOnAppLaunch(
-                    prefs = uiPrefs,
+                    prefs = container.uiPrefs,
                     currentVersionCode = BuildConfig.VERSION_CODE,
                     currentVersionName = BuildConfig.VERSION_NAME,
                 )
+                shellVm.runForegroundPolling()
             }
         }
 
-        // 周期刷新运行状态与进程快照（仅在主界面存活且在前台时运行）。
-        // 进程快照必须跟着一起刷：冻结判定只采信内核证据，只刷 status 会让
-        // 「已冻结 / 运行中」的徽章停在几秒前的状态，与详情页的实时结果对不上。
-        // 沿用前台 5 秒请求间隔，快照由 system_server 采集，不触发 App su。
-        LaunchedEffect(isProvisioned, isForeground) {
-            if (!isProvisioned || !isForeground) return@LaunchedEffect
-            while (true) {
-                delay(if (activeDestination == BottomBarDestination.Processes) 5_000L else 15_000L)
-                if (isForeground) refreshStatusAndRunningProcs()
+        val openProfileByTarget: (String, Int) -> Unit = { pkg, targetUid ->
+            val resolvedUid = shellVm.resolveTargetUid(pkg, targetUid) { p ->
+                runCatching { packageManager.getApplicationInfo(p, 0).uid }.getOrNull() ?: 0
             }
+            navigator.push(Route.AppProfile(pkg, resolvedUid))
         }
 
-        // 底部留白计算（根据是否启用悬浮底栏自适应）
         val enableBlur = LocalEnableBlur.current
         val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
         val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
@@ -738,8 +345,8 @@ class MainActivity : ComponentActivity() {
 
         val bottomNavPadding =
             WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
-                    WindowInsets.captionBar.asPaddingValues().calculateBottomPadding() +
-                    if (enableFloatingBottomBar) 96.dp else 72.dp
+                WindowInsets.captionBar.asPaddingValues().calculateBottomPadding() +
+                if (enableFloatingBottomBar) 96.dp else 72.dp
 
         val blurBackdrop = rememberBlurBackdrop(enableBlur)
         val backdrop = rememberLayerBackdrop {
@@ -759,7 +366,6 @@ class MainActivity : ComponentActivity() {
             containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
         ) {
-            // 模块更新提示弹窗
             if (updateNoticeDialog) {
                 MiuixConfirmDialog(
                     show = true,
@@ -767,12 +373,11 @@ class MainActivity : ComponentActivity() {
                     message = "检测到 XMillet 模块已更新，请重启系统框架以加载最新 Hook 逻辑。",
                     confirmText = "知道了",
                     dismissText = null,
-                    onConfirm = { updateNoticeDialog = false },
-                    onDismiss = { updateNoticeDialog = false }
+                    onConfirm = { PowerKeeperBinderClient.consumeAppUpdateNotice() },
+                    onDismiss = { PowerKeeperBinderClient.consumeAppUpdateNotice() }
                 )
             }
 
-            // 远端版本更新弹窗（每进程仅在打开应用时静默检查一次；避免与模块重启提示弹窗重叠）
             val availableRelease = updateUiState.availableRelease
             if (!updateNoticeDialog && updateUiState.dialogVisible && availableRelease != null) {
                 AppUpdateDialogMiuix(
@@ -781,7 +386,7 @@ class MainActivity : ComponentActivity() {
                     release = availableRelease,
                     downloadState = updateUiState.downloadState,
                     onDismiss = { AppUpdateController.dismissDialog() },
-                    onIgnoreVersion = { AppUpdateController.ignoreCurrentRelease(uiPrefs) },
+                    onIgnoreVersion = { AppUpdateController.ignoreCurrentRelease(container.uiPrefs) },
                     onOpenReleasePage = {
                         AppUpdateController.openReleasePage(this@MainActivity, availableRelease.htmlUrl)
                     },
@@ -797,8 +402,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            // 全局界面流转控制：严格对齐 HyperCeiler OS3 官方规范（enter_home_anim + provision_out_anim）
-            Box(modifier = Modifier.fillMaxSize().then(if (enableBlur) Modifier.layerBackdrop(popupBackdrop) else Modifier)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (enableBlur) Modifier.layerBackdrop(popupBackdrop) else Modifier)
+            ) {
                 AnimatedContent(
                     targetState = isProvisioned,
                     transitionSpec = {
@@ -825,7 +433,7 @@ class MainActivity : ComponentActivity() {
                             isPreview = false,
                             onComplete = {
                                 OobeManager.setProvisioned(this@MainActivity, true)
-                                isProvisioned = true
+                                shellVm.markProvisioned()
                             }
                         )
                     } else {
@@ -844,7 +452,6 @@ class MainActivity : ComponentActivity() {
                             onBack = { navigator.pop() },
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            // 根路由：禁止 swipeDismiss 销毁主界面
                             entry<Route.Main>(swipeDismiss = NavSwipeDirection.None) {
                                 Box(modifier = Modifier.fillMaxSize()) {
                                     HorizontalPager(
@@ -852,18 +459,17 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier
                                             .fillMaxSize()
                                             .then(
-                                                if (blurBackdrop != null) Modifier.layerBackdrop(
-                                                    blurBackdrop
-                                                ) else Modifier
+                                                if (blurBackdrop != null) Modifier.layerBackdrop(blurBackdrop)
+                                                else Modifier
                                             )
                                             .then(
-                                                if (enableFloatingBottomBar && enableFloatingBottomBarBlur) Modifier.layerBackdrop(
-                                                    backdrop
-                                                ) else Modifier
+                                                if (enableFloatingBottomBar && enableFloatingBottomBarBlur) {
+                                                    Modifier.layerBackdrop(backdrop)
+                                                } else {
+                                                    Modifier
+                                                }
                                             ),
-                                        beyondViewportPageCount = (destinations.size - 1).coerceAtLeast(
-                                            0
-                                        ),
+                                        beyondViewportPageCount = (destinations.size - 1).coerceAtLeast(0),
                                         overscrollEffect = null,
                                         flingBehavior = flingBehavior(
                                             state = mainPagerState.pagerState,
@@ -872,140 +478,54 @@ class MainActivity : ComponentActivity() {
                                     ) { page ->
                                         val isCurrentPage = page == settledPage
                                         when (destinations.getOrNull(page)) {
-                                            BottomBarDestination.Home -> HomeScreenMiuix(
-                                                runtimeStatus = runtimeStatus,
-                                                configuredRuleCount = installedApps.asSequence()
-                                                    .filter { it.hasAnyConfig }
-                                                    .map { "${it.packageName}:${it.uid}" }
-                                                    .distinct()
-                                                    .count(),
-                                                runningProcesses = runningProcesses,
+                                            BottomBarDestination.Home -> HomeRoute(
                                                 bottomInnerPadding = bottomNavPadding,
-                                                onRefresh = {
-                                                    refreshStatusAndRunningProcs(visible = true)
-                                                    loadInstalledApps(visible = true)
-                                                },
-                                                onThawAll = {
-                                                    coroutineScope.launch {
-                                                        withContext(Dispatchers.IO) {
-                                                            PowerKeeperBinderClient.thawAllFrozenUids()
-                                                        }
-                                                        refreshStatusAndRunningProcs()
-                                                    }
-                                                },
                                                 onNavigateToTab = navigateTo,
                                                 onNavigateToProcessList = { filterIndex ->
-                                                    processFilterIndex = filterIndex
+                                                    processListVm.applyPresetFilter(filterIndex)
                                                     navigateTo(BottomBarDestination.Processes)
-                                                    refreshStatusAndRunningProcs()
                                                 },
                                                 onOpenAbout = { navigator.push(Route.About) },
-                                                onOpenAppProfile = { pkg, uid ->
-                                                    openProfileByTarget(
-                                                        pkg,
-                                                        uid
-                                                    )
-                                                },
-                                                snapshotUnavailable = processSnapshotUnavailable
+                                                onOpenAppProfile = openProfileByTarget,
                                             )
 
-                                            BottomBarDestination.Processes -> ProcessListScreenMiuix(
-                                                runningProcesses = runningProcesses,
-                                                isRefreshing = isProcessesRefreshing && isCurrentPage,
-                                                snapshotUnavailable = processSnapshotUnavailable,
+                                            BottomBarDestination.Processes -> ProcessListRoute(
+                                                isCurrentPage = isCurrentPage,
                                                 bottomInnerPadding = bottomNavPadding,
-                                                filterIndex = processFilterIndex,
-                                                onFilterIndexChange = { processFilterIndex = it },
-                                                onRefresh = {
-                                                    refreshStatusAndRunningProcs(visible = true)
-                                                },
-                                                onThawAll = {
-                                                    coroutineScope.launch {
-                                                        withContext(Dispatchers.IO) {
-                                                            PowerKeeperBinderClient.thawAllFrozenUids()
-                                                        }
-                                                        refreshStatusAndRunningProcs()
-                                                    }
-                                                },
-                                                onOpenAppProfile = { pkg, uid ->
-                                                    openProfileByTarget(
-                                                        pkg,
-                                                        uid
-                                                    )
-                                                },
+                                                onOpenAppProfile = openProfileByTarget,
                                             )
 
                                             BottomBarDestination.TombStats -> TombStatsScreenMiuix(
-                                                isActive = isCurrentPage && isForeground,
-                                                serviceAlive = runtimeStatus.binderAlive,
+                                                isActive = isCurrentPage && isForegroundStarted && currentRoute == Route.Main,
+                                                serviceAlive = serviceAlive,
                                                 statsEnabled = themeState.showTombStatsTab,
                                                 bottomInnerPadding = bottomNavPadding,
-                                                onEnableStats = {
-                                                    themeState.updateShowTombStatsTab(
-                                                        true
-                                                    )
-                                                },
-                                                onOpenAppProfile = { pkg, uid ->
-                                                    openProfileByTarget(
-                                                        pkg,
-                                                        uid
-                                                    )
-                                                }
+                                                onEnableStats = { themeState.updateShowTombStatsTab(true) },
+                                                onOpenAppProfile = openProfileByTarget,
                                             )
 
-                                            BottomBarDestination.Apps -> AppsScreenMiuix(
-                                                apps = installedApps,
-                                                isRefreshing = isAppsRefreshing && isCurrentPage,
-                                                showSystemApps = showSystemApps,
-                                                onToggleShowSystemApps = {
-                                                    showSystemApps = !showSystemApps
-                                                },
-                                                onRefresh = { loadInstalledApps(visible = true) },
+                                            BottomBarDestination.Apps -> AppsRoute(
+                                                isCurrentPage = isCurrentPage,
+                                                bottomInnerPadding = bottomNavPadding,
                                                 onOpenAppProfile = { app ->
                                                     navigator.push(Route.AppProfile(app.packageName, app.uid))
                                                 },
-                                                bottomInnerPadding = bottomNavPadding,
-                                                policyVersion = configVersion,
-                                                templateVersion = policyTemplateVersion,
-                                                cloudLists = runtimeStatus.cloudLists?.takeUnless { it.isEmpty }
-                                                    ?: resolvedCloudLists,
-                                                onOpenTemplates = {
-                                                    navigator.push(Route.PolicyTemplates)
-                                                },
-                                                onOpenCloudWhitelist = {
-                                                    navigator.push(Route.CloudWhitelist)
-                                                }
+                                                onOpenTemplates = { navigator.push(Route.PolicyTemplates) },
+                                                onOpenCloudWhitelist = { navigator.push(Route.CloudWhitelist) },
                                             )
 
-                                            BottomBarDestination.Settings -> SettingsScreenMiuix(
+                                            BottomBarDestination.Settings -> SettingsRoute(
                                                 themeState = themeState,
-                                                configVersion = configVersion,
                                                 bottomInnerPadding = bottomNavPadding,
-                                                updateStatus = updateUiState.status,
-                                                availableUpdateVersion = updateUiState.availableRelease?.versionName,
-                                                onCheckForUpdates = {
-                                                    AppUpdateController.checkManually(
-                                                        context = this@MainActivity,
-                                                        currentVersionCode = BuildConfig.VERSION_CODE,
-                                                        currentVersionName = BuildConfig.VERSION_NAME,
-                                                    )
-                                                },
                                                 onOpenAppearance = { navigator.push(Route.Appearance) },
                                                 onOpenOobe = { navigator.push(Route.Oobe) },
                                                 onOpenAbout = { navigator.push(Route.About) },
-                                                onConfigImportedOrReset = {
-                                                    themeState.syncTombStatsFromPrefs()
-                                                    configVersion++
-                                                    loadInstalledApps()
-                                                    refreshStatusAndRunningProcs()
-                                                }
                                             )
 
                                             null -> Unit
                                         }
                                     }
 
-                                    // 底部 Miuix 导航栏（与 MainPagerState 物理弹簧联动）
                                     BottomBarMiuix(
                                         mainState = mainPagerState,
                                         blurBackdrop = blurBackdrop,
@@ -1016,7 +536,6 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
-                            // 二级子页面交由 NavDisplay 统一处理系统预测返回与侧滑退栈，保证页面内浮层可优先拦截返回键
                             entry<Route.Appearance>(swipeDismiss = swipeDismiss) {
                                 ThemeSettingsScreenMiuix(
                                     themeState = themeState,
@@ -1028,77 +547,59 @@ class MainActivity : ComponentActivity() {
                                 contentKey = { route -> route.packageName to route.uid },
                                 swipeDismiss = swipeDismiss,
                             ) { key ->
-                                // 列表里没有该应用时（尚未加载完成、或已被过滤），按身份补查一次，
-                                // 保证从进程列表、云名单等入口进入详情页仍然可用。
-                                val resolvedApp = installedApps.find {
-                                    it.packageName == key.packageName && it.uid == key.uid
-                                } ?: remember(key.packageName, key.uid) {
-                                    buildFallbackAppModel(key.packageName, key.uid)
+                                ProvideNavEntryViewModelStore(
+                                    registry = navStoreRegistry,
+                                    entryKey = navigator.routeIdentity(key),
+                                ) {
+                                    AppProfileRoute(
+                                        packageName = key.packageName,
+                                        uid = key.uid,
+                                        onBack = { navigator.pop() },
+                                    )
                                 }
-                                AppProfileScreenMiuix(
-                                    app = resolvedApp,
-                                    onBack = { navigator.pop() },
-                                    onPolicyChanged = {
-                                        configVersion++
-                                        loadInstalledApps()
-                                    },
-                                )
                             }
 
                             entry<Route.PolicyTemplates>(swipeDismiss = swipeDismiss) {
-                                PolicyTemplatesScreenMiuix(
-                                    apps = installedApps,
-                                    templateVersion = policyTemplateVersion,
-                                    onBack = { navigator.pop() },
-                                    onOpenTemplate = { templateId ->
-                                        navigator.push(Route.PolicyTemplateDetail(templateId))
-                                    },
-                                    onTemplatesChanged = {
-                                        policyTemplateVersion++
-                                    },
-                                    policyVersion = configVersion,
-                                )
+                                ProvideNavEntryViewModelStore(
+                                    registry = navStoreRegistry,
+                                    entryKey = Route.PolicyTemplates,
+                                ) {
+                                    PolicyTemplatesRoute(
+                                        onBack = { navigator.pop() },
+                                        onOpenTemplate = { templateId ->
+                                            navigator.push(Route.PolicyTemplateDetail(templateId))
+                                        },
+                                    )
+                                }
                             }
 
                             entry<Route.PolicyTemplateDetail>(swipeDismiss = swipeDismiss) { key ->
-                                PolicyTemplateDetailScreenMiuix(
-                                    templateId = key.templateId,
-                                    apps = installedApps,
-                                    templateVersion = policyTemplateVersion,
-                                    onBack = { navigator.pop() },
-                                    onOpenAppProfile = { app ->
-                                        navigator.push(Route.AppProfile(app.packageName, app.uid))
-                                    },
-                                    onPolicyChanged = {
-                                        configVersion++
-                                        loadInstalledApps()
-                                    },
-                                    onTemplatesChanged = {
-                                        policyTemplateVersion++
-                                    },
-                                    policyVersion = configVersion,
-                                )
+                                ProvideNavEntryViewModelStore(
+                                    registry = navStoreRegistry,
+                                    entryKey = key,
+                                ) {
+                                    PolicyTemplateDetailRoute(
+                                        templateId = key.templateId,
+                                        onBack = { navigator.pop() },
+                                        onOpenAppProfile = { app ->
+                                            navigator.push(Route.AppProfile(app.packageName, app.uid))
+                                        },
+                                    )
+                                }
                             }
 
                             entry<Route.CloudWhitelist>(swipeDismiss = swipeDismiss) {
-                                CloudWhitelistScreenMiuix(
-                                    cloudLists = runtimeStatus.cloudLists?.takeUnless { it.isEmpty }
-                                        ?: resolvedCloudLists,
-                                    apps = installedApps,
-                                    isRefreshing = isAppsRefreshing || isProcessesRefreshing,
-                                    onRefresh = {
-                                        refreshStatusAndRunningProcs(visible = true)
-                                        loadInstalledApps(visible = true)
-                                    },
-                                    onBack = { navigator.pop() },
-                                    onOpenAppProfile = { app ->
-                                        navigator.push(Route.AppProfile(app.packageName, app.uid))
-                                    },
-                                    configVersion = configVersion,
-                                    onConfigChanged = {
-                                        configVersion++
-                                    },
-                                )
+                                ProvideNavEntryViewModelStore(
+                                    registry = navStoreRegistry,
+                                    entryKey = Route.CloudWhitelist,
+                                ) {
+                                    CloudWhitelistRoute(
+                                        onBack = { navigator.pop() },
+                                        onOpenAppProfile = { app ->
+                                            navigator.push(Route.AppProfile(app.packageName, app.uid))
+                                        },
+                                    )
+                                }
                             }
 
                             entry<Route.Oobe>(swipeDismiss = swipeDismiss) {
@@ -1122,21 +623,15 @@ class MainActivity : ComponentActivity() {
                             }
 
                             entry<Route.AboutKnowledge>(swipeDismiss = swipeDismiss) {
-                                AboutKnowledgeScreenMiuix(
-                                    onBack = { navigator.pop() }
-                                )
+                                AboutKnowledgeScreenMiuix(onBack = { navigator.pop() })
                             }
 
                             entry<Route.AboutRepo>(swipeDismiss = swipeDismiss) {
-                                AboutRepoScreenMiuix(
-                                    onBack = { navigator.pop() }
-                                )
+                                AboutRepoScreenMiuix(onBack = { navigator.pop() })
                             }
 
                             entry<Route.AboutLicenses>(swipeDismiss = swipeDismiss) {
-                                AboutLicensesScreenMiuix(
-                                    onBack = { navigator.pop() }
-                                )
+                                AboutLicensesScreenMiuix(onBack = { navigator.pop() })
                             }
                         }
                     }
@@ -1144,33 +639,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-}
-
-
-/**
- * 按包名与 UID 构造应用策略页所需的模型：列表尚未加载完成或该应用被过滤时兜底。
- * 只读取展示所需字段，策略布尔在详情页内按偏好实时读取。
- */
-private fun Context.buildFallbackAppModel(packageName: String, uid: Int): InstalledAppUiModel {
-    val info = runCatching { packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
-    val label = info?.let { runCatching { packageManager.getApplicationLabel(it).toString() }.getOrNull() }
-    val pkgInfo = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
-    return InstalledAppUiModel(
-        appName = label ?: packageName,
-        packageName = packageName,
-        uid = if (uid > 0) uid else (info?.uid ?: 0),
-        versionName = pkgInfo?.versionName.orEmpty(),
-        versionCode = pkgInfo?.longVersionCode ?: 0L,
-        isSystem = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0,
-        iconSource = AppIconSource.fromOrNull(info),
-        inWhiteSet = false,
-        inMessageSet = false,
-        inForceFreezeSet = false,
-        inBlockThawSet = false,
-        inForbidSyncSet = false,
-        inNotFreezeFgsSet = false,
-        inBatteryWhiteSet = false,
-    )
 }
 
 /** 旧版「桌面图标取色」开关的持久化键，仅用于一次性迁移。 */

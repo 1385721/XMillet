@@ -28,9 +28,11 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +80,7 @@ data class AppUpdateUiState(
     val availableRelease: AppReleaseInfo? = null,
     val dialogVisible: Boolean = false,
     val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
+    val pendingAutoInstall: Boolean = false,
 )
 
 /** 调用系统安装器的结果。 */
@@ -111,6 +114,7 @@ object AppUpdateController {
     private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
 
     private val autoCheckGate = SingleRunUpdateCheckGate()
+    private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _uiState = MutableStateFlow(AppUpdateUiState())
     val uiState: StateFlow<AppUpdateUiState> = _uiState.asStateFlow()
 
@@ -127,7 +131,7 @@ object AppUpdateController {
         prefs: SharedPreferences,
         currentVersionCode: Int,
         currentVersionName: String,
-        scope: CoroutineScope,
+        scope: CoroutineScope = controllerScope,
     ) {
         if (!autoCheckGate.tryAcquire()) return
         if (checkJob?.isActive == true) return
@@ -171,8 +175,9 @@ object AppUpdateController {
         context: Context,
         currentVersionCode: Int,
         currentVersionName: String,
-        scope: CoroutineScope,
+        scope: CoroutineScope = controllerScope,
     ) {
+        val appContext = context.applicationContext ?: context
         val current = _uiState.value
         if (current.status == AppUpdateStatus.Checking) return
         if (current.status == AppUpdateStatus.Available && current.availableRelease != null) {
@@ -202,13 +207,17 @@ object AppUpdateController {
                     _uiState.update {
                         it.copy(status = AppUpdateStatus.UpToDate, availableRelease = null, dialogVisible = false)
                     }
-                    Toast.makeText(context, "当前已是最新版本", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(appContext, "当前已是最新版本", Toast.LENGTH_SHORT).show()
+                    }
                 }
 
                 is AppUpdateCheckResult.Error -> {
                     Logger.warn("手动检查更新失败: ${result.message}")
                     _uiState.update { it.copy(status = AppUpdateStatus.Failed) }
-                    Toast.makeText(context, "检查更新失败，请检查网络连接", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(appContext, "检查更新失败，请检查网络连接", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
@@ -231,16 +240,38 @@ object AppUpdateController {
         dismissDialog()
     }
 
-    /** 开始下载当前可用版本的 APK，下载并校验完成后自动调起系统安装器。 */
-    fun startDownload(context: Context, scope: CoroutineScope) {
+    /** 开始下载当前可用版本的 APK，下载并校验完成后标记待安装（由前景 Activity 消费，避免持有销毁后的窗口引用）。 */
+    fun startDownload(
+        context: Context,
+        scope: CoroutineScope = controllerScope,
+    ) {
+        val appContext = context.applicationContext ?: context
+        startDownloadWithScope(
+            scope = scope,
+            openPage = { url -> openReleasePage(appContext, url) },
+            showFailedToast = {
+                Toast.makeText(appContext, "下载失败，可重试或在浏览器打开", Toast.LENGTH_SHORT).show()
+            },
+            downloader = { tagName, asset, onProgress ->
+                downloadVerifiedApk(appContext, tagName, asset, onProgress)
+            },
+        )
+    }
+
+    internal fun startDownloadWithScope(
+        scope: CoroutineScope,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+        openPage: (String) -> Unit = {},
+        showFailedToast: () -> Unit = {},
+        downloader: suspend (String, AppReleaseAsset, (Long, Long) -> Unit) -> File,
+    ) {
         val release = _uiState.value.availableRelease ?: return
         val asset = release.apkAsset
         if (asset == null) {
-            openReleasePage(context, release.htmlUrl)
+            openPage(release.htmlUrl)
             return
         }
         if (downloadJob?.isActive == true) return
-        val appContext = context.applicationContext
         val generation = downloadGeneration.incrementAndGet()
         _uiState.update {
             it.copy(
@@ -248,13 +279,14 @@ object AppUpdateController {
                     tagName = release.tagName,
                     bytesRead = 0L,
                     totalBytes = asset.sizeBytes,
-                )
+                ),
+                pendingAutoInstall = false,
             )
         }
         downloadJob = scope.launch {
             try {
-                val apkFile = withContext(Dispatchers.IO) {
-                    downloadVerifiedApk(appContext, release.tagName, asset) { read, total ->
+                val apkFile = withContext(ioDispatcher) {
+                    downloader(release.tagName, asset) { read, total ->
                         if (downloadGeneration.get() == generation) {
                             _uiState.update { state ->
                                 if (state.availableRelease?.tagName == release.tagName &&
@@ -277,15 +309,17 @@ object AppUpdateController {
                 if (downloadGeneration.get() != generation) return@launch
                 _uiState.update { state ->
                     if (state.availableRelease?.tagName == release.tagName) {
-                        state.copy(downloadState = AppUpdateDownloadState.Ready(release.tagName, apkFile.absolutePath))
+                        state.copy(
+                            downloadState = AppUpdateDownloadState.Ready(release.tagName, apkFile.absolutePath),
+                            pendingAutoInstall = true,
+                        )
                     } else {
                         state
                     }
                 }
-                installReadyApk(context)
             } catch (c: CancellationException) {
                 if (downloadGeneration.get() == generation) {
-                    _uiState.update { it.copy(downloadState = AppUpdateDownloadState.Idle) }
+                    _uiState.update { it.copy(downloadState = AppUpdateDownloadState.Idle, pendingAutoInstall = false) }
                 }
                 throw c
             } catch (t: Throwable) {
@@ -297,16 +331,26 @@ object AppUpdateController {
                                 downloadState = AppUpdateDownloadState.Failed(
                                     tagName = release.tagName,
                                     message = "下载失败，可重试或在浏览器打开",
-                                )
+                                ),
+                                pendingAutoInstall = false,
                             )
                         } else {
                             state
                         }
                     }
-                    Toast.makeText(context, "下载失败，可重试或在浏览器打开", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.Main) {
+                        showFailedToast()
+                    }
                 }
             }
         }
+    }
+
+    /** 前台 UI 消费下载完成事件并拉起系统安装器。 */
+    fun consumeAutoInstall(context: Context) {
+        if (!_uiState.value.pendingAutoInstall) return
+        _uiState.update { it.copy(pendingAutoInstall = false) }
+        installReadyApk(context)
     }
 
     /** 取消进行中的 APK 下载并恢复空闲状态。 */
@@ -608,6 +652,25 @@ object AppUpdateController {
         } catch (_: Throwable) {
             AppUpdateInstallResult.Failed
         }
+    }
+
+    internal fun setAvailableReleaseForTest(release: AppReleaseInfo) {
+        _uiState.value = AppUpdateUiState(
+            status = AppUpdateStatus.Available,
+            availableRelease = release,
+            dialogVisible = true,
+            downloadState = AppUpdateDownloadState.Idle,
+            pendingAutoInstall = false,
+        )
+    }
+
+    internal fun resetForTest() {
+        checkJob?.cancel()
+        downloadJob?.cancel()
+        checkJob = null
+        downloadJob = null
+        downloadGeneration.incrementAndGet()
+        _uiState.value = AppUpdateUiState()
     }
 
     private fun userAgent(): String = "XMillet-Android/${BuildConfig.VERSION_NAME}"

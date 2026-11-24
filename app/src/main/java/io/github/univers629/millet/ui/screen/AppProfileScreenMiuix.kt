@@ -354,7 +354,7 @@ fun AppProfileScreenMiuix(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             AppIconImage(
-                                applicationInfo = app.applicationInfo,
+                                iconSource = app.iconSource,
                                 label = app.appName,
                                 modifier = Modifier.size(64.dp)
                             )

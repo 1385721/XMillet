@@ -6,7 +6,6 @@ import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.content.SharedPreferences
-import android.content.pm.ApplicationInfo
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -52,6 +51,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
@@ -81,6 +81,7 @@ import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.StatusTagMiuix
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
@@ -110,6 +111,7 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+@Immutable
 data class InstalledAppUiModel(
     val appName: String,
     val packageName: String,
@@ -117,7 +119,7 @@ data class InstalledAppUiModel(
     val versionName: String,
     val versionCode: Long,
     val isSystem: Boolean,
-    val applicationInfo: ApplicationInfo?,
+    val iconSource: AppIconSource? = null,
     val inWhiteSet: Boolean,
     val inMessageSet: Boolean,
     val inForceFreezeSet: Boolean,
@@ -478,7 +480,7 @@ private fun AppItemCardMiuix(
             verticalAlignment = Alignment.CenterVertically
         ) {
             AppIconImage(
-                applicationInfo = app.applicationInfo,
+                iconSource = app.iconSource,
                 label = app.appName,
                 modifier = Modifier
                     .padding(end = 12.dp)

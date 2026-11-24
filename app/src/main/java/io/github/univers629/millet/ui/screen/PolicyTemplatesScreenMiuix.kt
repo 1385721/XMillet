@@ -218,7 +218,7 @@ internal fun PolicyAppRowCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             AppIconImage(
-                applicationInfo = app.applicationInfo,
+                iconSource = app.iconSource,
                 label = app.appName,
                 modifier = Modifier
                     .padding(end = 12.dp)
@@ -1137,7 +1137,7 @@ private fun PolicyAppPickerSheet(
                         ) {
                             SelectionIndicator(checked = checked)
                             AppIconImage(
-                                applicationInfo = app.applicationInfo,
+                                iconSource = app.iconSource,
                                 label = app.appName,
                                 modifier = Modifier
                                     .padding(start = 12.dp, end = 12.dp)

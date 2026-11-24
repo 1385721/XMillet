@@ -78,7 +78,7 @@ object XposedPrefsBridge {
     private const val ALL_GROUPS_KEY = "*"
 
     private val syncLock = Any()
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val _frameworkState = MutableStateFlow(XposedFrameworkState())
     val frameworkState: StateFlow<XposedFrameworkState> = _frameworkState.asStateFlow()
 

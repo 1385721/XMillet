@@ -88,8 +88,11 @@ dependencies {
     // LibXposed 服务端：让 LSPosed 能把本应用的设置以 RemotePreferences 递给 Hook 进程
     implementation("io.github.libxposed:service:102.0.0")
 
-    // Jetpack Compose & Activity
+    // Jetpack Compose & Activity & Lifecycle
     implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.navigationevent:navigationevent:1.2.0")
@@ -111,5 +114,6 @@ dependencies {
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
 

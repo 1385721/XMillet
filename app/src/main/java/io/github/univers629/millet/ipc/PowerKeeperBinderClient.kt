@@ -20,6 +20,9 @@ import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.StatsWindow
 import io.github.univers629.millet.powerkeeper.PowerKeeperCloudLists
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * powerkeeper 与 App 侧共用的跨进程 Binder 客户端代理及粘性广播握手器。
@@ -96,11 +99,18 @@ object PowerKeeperBinderClient {
     @Volatile
     private var lastStatusFailure: String? = null
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    private val _appUpdateNoticeFlow = MutableStateFlow(false)
+    val appUpdateNoticeFlow: StateFlow<Boolean> = _appUpdateNoticeFlow.asStateFlow()
 
     /** App 侧收到版本更新提示时的 UI 回调 */
     @Volatile
     var onAppUpdateNoticeReceived: (() -> Unit)? = null
+
+    fun consumeAppUpdateNotice() {
+        _appUpdateNoticeFlow.value = false
+    }
 
     /**
      * 通过注册 `"XMillet-Binder"` 广播从 system_server 取回 Binder 句柄。
@@ -281,6 +291,7 @@ object PowerKeeperBinderClient {
             return
         }
         if (message == MilletIpcContract.MSG_IS_UPDATE) {
+            _appUpdateNoticeFlow.value = true
             mainHandler.post { onAppUpdateNoticeReceived?.invoke() }
             return
         }

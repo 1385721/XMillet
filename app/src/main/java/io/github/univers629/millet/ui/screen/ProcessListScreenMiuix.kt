@@ -136,8 +136,7 @@ fun ProcessListScreenMiuix(
                 proc.pids.any { it.toString().contains(q) } ||
                 (proc.isDualApp && "双开".contains(q))
 
-            val isSystem = ((proc.applicationInfo?.flags ?: 0) and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-            filterMatch && queryMatch && (showSystemApps || !isSystem)
+            filterMatch && queryMatch && (showSystemApps || !proc.isSystem)
         }
     }
 
@@ -306,7 +305,7 @@ fun ProcessListScreenMiuix(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AppIconImage(
-                                        applicationInfo = proc.applicationInfo,
+                                        iconSource = proc.iconSource,
                                         label = proc.appName,
                                         modifier = Modifier
                                             .padding(end = 12.dp)

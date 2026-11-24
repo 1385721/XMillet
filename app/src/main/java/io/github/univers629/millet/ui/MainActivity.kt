@@ -68,6 +68,7 @@ import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
 import io.github.univers629.millet.ui.component.MainPagerState
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.rememberMainPagerState
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.screen.AboutKnowledgeScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutLicensesScreenMiuix
 import io.github.univers629.millet.ui.screen.AboutRepoScreenMiuix
@@ -409,6 +410,7 @@ class MainActivity : ComponentActivity() {
                                     val unknownCount =
                                         rawEntries.count { it.freezeState == RootHelper.FreezeState.UNKNOWN }
 
+                                    val isSys = ((appInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
                                     RunningProcessUiModel(
                                         appName = label,
                                         packageName = pkg,
@@ -421,8 +423,9 @@ class MainActivity : ComponentActivity() {
                                         unknownCount = unknownCount,
                                         memSizeKb = totalMemKb,
                                         formattedMemSize = RootHelper.formatMemSize(totalMemKb),
+                                        isSystem = isSys,
                                         isDualApp = AppUidUtils.isDualAppUid(uid),
-                                        applicationInfo = appInfo
+                                        iconSource = AppIconSource.fromOrNull(appInfo)
                                     )
                                 }.sortedWith(
                                     compareByDescending<RunningProcessUiModel> { it.isFrozen }
@@ -539,7 +542,7 @@ class MainActivity : ComponentActivity() {
                                 versionName = pInfo?.versionName.orEmpty(),
                                 versionCode = verCode,
                                 isSystem = isSys,
-                                applicationInfo = info,
+                                iconSource = AppIconSource.fromOrNull(info),
                                 inWhiteSet = AppUidUtils.containsPolicyTarget(whiteSet, pkg, uid),
                                 inMessageSet = AppUidUtils.containsPolicyTarget(msgSet, pkg, uid),
                                 inForceFreezeSet = AppUidUtils.containsPolicyTarget(
@@ -599,7 +602,7 @@ class MainActivity : ComponentActivity() {
                         for (proc in runningProcesses) {
                             if (!proc.isDualApp) continue
                             if (!seenKeys.add("${proc.packageName}:${proc.uid}")) continue
-                            val info = primaryInfoByPkg[proc.packageName] ?: proc.applicationInfo
+                            val info = primaryInfoByPkg[proc.packageName] ?: proc.iconSource?.applicationInfo
                             val isSys = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
                             result.add(buildAppModel(proc.packageName, proc.uid, info, isSys))
                         }
@@ -698,6 +701,11 @@ class MainActivity : ComponentActivity() {
         // 仅在已完成开箱向导（进入主界面）后才执行繁重的进程扫描与全系统应用加载，避免在 OOBE 进场动画期间争抢 CPU/IO
         val uiPrefs = remember { PrefReader.openUiPrefs(this@MainActivity) }
         val updateUiState by AppUpdateController.uiState.collectAsState()
+        LaunchedEffect(updateUiState.pendingAutoInstall) {
+            if (updateUiState.pendingAutoInstall) {
+                AppUpdateController.consumeAutoInstall(this@MainActivity)
+            }
+        }
         LaunchedEffect(isProvisioned) {
             if (isProvisioned) {
                 refreshStatusAndRunningProcs()
@@ -706,7 +714,6 @@ class MainActivity : ComponentActivity() {
                     prefs = uiPrefs,
                     currentVersionCode = BuildConfig.VERSION_CODE,
                     currentVersionName = BuildConfig.VERSION_NAME,
-                    scope = coroutineScope,
                 )
             }
         }
@@ -783,7 +790,7 @@ class MainActivity : ComponentActivity() {
                             is AppUpdateDownloadState.Ready ->
                                 AppUpdateController.installReadyApk(this@MainActivity)
                             else ->
-                                AppUpdateController.startDownload(this@MainActivity, coroutineScope)
+                                AppUpdateController.startDownload(this@MainActivity)
                         }
                     },
                     onCancelDownload = { AppUpdateController.cancelDownload() },
@@ -981,7 +988,6 @@ class MainActivity : ComponentActivity() {
                                                         context = this@MainActivity,
                                                         currentVersionCode = BuildConfig.VERSION_CODE,
                                                         currentVersionName = BuildConfig.VERSION_NAME,
-                                                        scope = coroutineScope,
                                                     )
                                                 },
                                                 onOpenAppearance = { navigator.push(Route.Appearance) },
@@ -1156,7 +1162,7 @@ private fun Context.buildFallbackAppModel(packageName: String, uid: Int): Instal
         versionName = pkgInfo?.versionName.orEmpty(),
         versionCode = pkgInfo?.longVersionCode ?: 0L,
         isSystem = ((info?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0,
-        applicationInfo = info,
+        iconSource = AppIconSource.fromOrNull(info),
         inWhiteSet = false,
         inMessageSet = false,
         inForceFreezeSet = false,

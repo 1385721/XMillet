@@ -104,6 +104,7 @@ import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.isInDarkTheme
 import io.github.univers629.millet.ui.util.BlurredBar
@@ -182,7 +183,7 @@ data class AppFreezeStats(
     val topRawReasons: List<Pair<String, Int>> = emptyList(),
     // ---- 以下由 App 侧 PackageManager 解析填充 ----
     val label: String = packageName,
-    val applicationInfo: ApplicationInfo? = null,
+    val iconSource: AppIconSource? = null,
     val isSystem: Boolean = false,
     val isDualApp: Boolean = false,
     val members: List<StatsPackageMember> = emptyList(),
@@ -203,7 +204,7 @@ data class StatsRecentEvent(
     val rule: InterceptRule? = null,
     val rawReason: String = "",
     val label: String = packageName,
-    val applicationInfo: ApplicationInfo? = null,
+    val iconSource: AppIconSource? = null,
     val isSystem: Boolean = false,
     val isDualApp: Boolean = false,
     val members: List<StatsPackageMember> = emptyList(),
@@ -273,7 +274,7 @@ object FreezeStatsRepository {
     private data class ResolvedAppMeta(
         val packageName: String,
         val label: String,
-        val applicationInfo: ApplicationInfo?,
+        val iconSource: AppIconSource?,
         val isSystem: Boolean = false,
         val isDualApp: Boolean = false,
         val members: List<StatsPackageMember> = emptyList(),
@@ -302,7 +303,7 @@ object FreezeStatsRepository {
             StatsLoadState.Ready(resolveApps(context, FreezeStatsSampleData.build(context, window)))
         }
 
-    private val labelCache = LruCache<String, Triple<String, ApplicationInfo?, Boolean>>(512)
+    private val labelCache = LruCache<String, Triple<String, AppIconSource?, Boolean>>(512)
 
     private fun resolvePackage(
         pm: android.content.pm.PackageManager,
@@ -321,19 +322,18 @@ object FreezeStatsRepository {
                     val info = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
                     val label = info?.let { runCatching { pm.getApplicationLabel(it).toString() }.getOrNull() }
                         ?.trim()?.ifEmpty { null } ?: pkg
-                    Triple(label, info, info != null && (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
+                    val isSys = info != null && (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    Triple(label, AppIconSource.fromOrNull(info), isSys)
                         .also { labelCache.put(cacheKey, it) }
                 }
-                StatsPackageMember(pkg, cached.first, cached.second)
+                StatsPackageMember(pkg, cached.first, cached.second, cached.third)
             }
             val label = statsGroupLabel(members)
             return ResolvedAppMeta(
                 packageName = "uid:$uid",
                 label = if (userId > 0 && !isDualApp) "$label (用户$userId)" else label,
-                applicationInfo = null,
-                isSystem = members.all { it.applicationInfo?.let { info ->
-                    (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                } == true },
+                iconSource = null,
+                isSystem = members.all { it.isSystem },
                 isDualApp = isDualApp,
                 members = members,
             )
@@ -353,22 +353,23 @@ object FreezeStatsRepository {
             return ResolvedAppMeta(
                 packageName = "uid:$uid",
                 label = fallbackLabel,
-                applicationInfo = null,
+                iconSource = null,
                 isSystem = false,
                 isDualApp = isDualApp,
             )
         }
-        labelCache.get(effectivePkg)?.let { (baseLabel, info, isSys) ->
+        labelCache.get(effectivePkg)?.let { (baseLabel, iconSrc, isSys) ->
             val finalLabel = if (userId > 0 && !isDualApp) "$baseLabel (用户$userId)" else baseLabel
-            return ResolvedAppMeta(effectivePkg, finalLabel, info, isSys, isDualApp)
+            return ResolvedAppMeta(effectivePkg, finalLabel, iconSrc, isSys, isDualApp)
         }
         val info = runCatching { pm.getApplicationInfo(effectivePkg, 0) }.getOrNull()
         val baseLabel = info?.let { runCatching { pm.getApplicationLabel(it).toString() }.getOrNull() }
             ?.trim()?.ifEmpty { null } ?: effectivePkg
         val isSys = info != null && (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-        labelCache.put(effectivePkg, Triple(baseLabel, info, isSys))
+        val iconSrc = AppIconSource.fromOrNull(info)
+        labelCache.put(effectivePkg, Triple(baseLabel, iconSrc, isSys))
         val finalLabel = if (userId > 0 && !isDualApp) "$baseLabel (用户$userId)" else baseLabel
-        return ResolvedAppMeta(effectivePkg, finalLabel, info, isSys, isDualApp)
+        return ResolvedAppMeta(effectivePkg, finalLabel, iconSrc, isSys, isDualApp)
     }
 
     private fun queryMemberPackages(uids: List<Int>): Map<Int, List<String>> = buildMap {
@@ -412,7 +413,7 @@ object FreezeStatsRepository {
                     killBlockedCount = a.killBlockedCount,
                     topRawReasons = a.topRawReasons,
                     label = meta.label,
-                    applicationInfo = meta.applicationInfo,
+                    iconSource = meta.iconSource,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
                     members = meta.members,
@@ -430,7 +431,7 @@ object FreezeStatsRepository {
                     rawReason = e.rawReason,
                     origin = e.origin,
                     label = meta.label,
-                    applicationInfo = meta.applicationInfo,
+                    iconSource = meta.iconSource,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
                     members = meta.members,
@@ -458,7 +459,7 @@ object FreezeStatsRepository {
                 a.copy(
                     packageName = meta.packageName,
                     label = meta.label,
-                    applicationInfo = meta.applicationInfo,
+                    iconSource = meta.iconSource,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
                     members = meta.members,
@@ -469,7 +470,7 @@ object FreezeStatsRepository {
                 e.copy(
                     packageName = meta.packageName,
                     label = meta.label,
-                    applicationInfo = meta.applicationInfo,
+                    iconSource = meta.iconSource,
                     isSystem = meta.isSystem,
                     isDualApp = meta.isDualApp,
                     members = meta.members,
@@ -1724,7 +1725,7 @@ private fun RankRow(
             modifier = Modifier.width(22.dp),
         )
         StatsAppIcon(
-            applicationInfo = app.applicationInfo,
+            iconSource = app.iconSource,
             members = app.members,
             label = app.label,
             modifier = Modifier
@@ -1866,7 +1867,7 @@ private fun RecentEventRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         StatsAppIcon(
-            applicationInfo = e.applicationInfo,
+            iconSource = e.iconSource,
             members = e.members,
             label = e.label,
             modifier = Modifier
@@ -2186,7 +2187,7 @@ private fun AppStatsDetailSheet(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatsAppIcon(
-                        applicationInfo = a.applicationInfo,
+                        iconSource = a.iconSource,
                         members = a.members,
                         label = a.label,
                         modifier = Modifier

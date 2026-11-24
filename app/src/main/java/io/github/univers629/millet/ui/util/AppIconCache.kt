@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.util.LruCache
+import io.github.univers629.millet.ui.model.AppIconSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -28,6 +29,16 @@ object AppIconCache {
     }
 
     private fun buildKey(pkg: String, uid: Int, sizePx: Int): String = "$pkg:$uid:$sizePx"
+
+    fun getCached(source: AppIconSource, sizePx: Int): Bitmap? {
+        val key = buildKey(source.packageName, source.uid, sizePx)
+        return lruCache.get(key)?.takeIf { !it.isRecycled }
+    }
+
+    suspend fun loadIcon(context: Context, source: AppIconSource, sizePx: Int): Bitmap? {
+        val appInfo = source.applicationInfo ?: return null
+        return loadIcon(context, appInfo, sizePx)
+    }
 
     fun getCached(appInfo: ApplicationInfo, sizePx: Int): Bitmap? {
         val key = buildKey(appInfo.packageName, appInfo.uid, sizePx)

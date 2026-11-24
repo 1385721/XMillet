@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Tag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -75,6 +76,7 @@ import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
 import io.github.univers629.millet.ui.component.XMilletIcons
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.isInDarkTheme
 import io.github.univers629.millet.ui.util.BlurredBar
@@ -107,6 +109,7 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+@Immutable
 data class RunningProcessUiModel(
     val appName: String,
     val packageName: String,
@@ -119,8 +122,9 @@ data class RunningProcessUiModel(
     val unknownCount: Int = 0,
     val memSizeKb: Long = 0L,
     val formattedMemSize: String = "",
+    val isSystem: Boolean = false,
     val isDualApp: Boolean = false,
-    val applicationInfo: android.content.pm.ApplicationInfo? = null
+    val iconSource: AppIconSource? = null,
 )
 
 @Composable

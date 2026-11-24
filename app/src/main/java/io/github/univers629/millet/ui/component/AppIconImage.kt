@@ -1,6 +1,5 @@
 package io.github.univers629.millet.ui.component
 
-import android.content.pm.ApplicationInfo
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -21,38 +20,36 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.util.AppIconCache
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-
-private data class IconKey(val uid: Int, val packageName: String, val sourceDir: String?)
 
 @Composable
 fun AppIconImage(
     modifier: Modifier = Modifier,
-    applicationInfo: ApplicationInfo?,
+    iconSource: AppIconSource?,
     label: String,
 ) {
-    if (applicationInfo == null) {
+    if (iconSource == null) {
         PlaceHolderBox(modifier)
         return
     }
     val density = LocalDensity.current
     val context = LocalContext.current
     val targetSizePx = with(density) { 48.dp.roundToPx() }
-    val iconKey = IconKey(applicationInfo.uid, applicationInfo.packageName, applicationInfo.sourceDir)
 
     Box(modifier = modifier) {
-        val initiallyCached = remember(iconKey) {
-            AppIconCache.getCached(applicationInfo, targetSizePx) != null
+        val initiallyCached = remember(iconSource, targetSizePx) {
+            AppIconCache.getCached(iconSource, targetSizePx) != null
         }
 
-        var appBitmap by remember(iconKey) {
-            mutableStateOf(AppIconCache.getCached(applicationInfo, targetSizePx))
+        var appBitmap by remember(iconSource, targetSizePx) {
+            mutableStateOf(AppIconCache.getCached(iconSource, targetSizePx))
         }
 
         if (!initiallyCached) {
-            LaunchedEffect(iconKey) {
-                appBitmap = AppIconCache.loadIcon(context, applicationInfo, targetSizePx)
+            LaunchedEffect(iconSource, targetSizePx) {
+                appBitmap = AppIconCache.loadIcon(context, iconSource, targetSizePx)
             }
         }
 

@@ -13,7 +13,7 @@ android {
     defaultConfig {
         applicationId = "io.github.univers629.millet"
         minSdk = 33
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 1300
         versionName = "1.3.0"
 

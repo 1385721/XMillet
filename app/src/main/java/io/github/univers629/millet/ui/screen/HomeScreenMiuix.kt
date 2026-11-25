@@ -94,7 +94,6 @@ import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import io.github.univers629.millet.ui.component.XMilletIcons
-import top.yukonga.miuix.kmp.icon.glass.CoolingFan
 import top.yukonga.miuix.kmp.icon.glass.Filter
 import top.yukonga.miuix.kmp.icon.glass.Ok
 import top.yukonga.miuix.kmp.icon.glass.Phone
@@ -102,7 +101,6 @@ import top.yukonga.miuix.kmp.icon.glass.Processor
 import top.yukonga.miuix.kmp.icon.glass.Tags
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.extended.Info as ExtendedInfo
-import top.yukonga.miuix.kmp.icon.glass.Info
 import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -225,7 +223,7 @@ fun HomeScreenMiuix(
                     actions = {
                         val allPass = runtimeStatus.binderAlive && runtimeStatus.powerKeeperConnected
                         BarIconButton(
-                            icon = MiuixIcons.Glass.Info,
+                            icon = XMilletIcons.Snowflake,
                             contentDescription = "运行环境与服务检测",
                             tint = if (allPass) colorScheme.primary else Color(0xFFFF9500),
                             onClick = { showHookCheckDialog = true },
@@ -760,7 +758,7 @@ private fun CoreServicesStatusCard(
                 .padding(16.dp)
         ) {
             InfoText(
-                icon = MiuixIcons.Glass.CoolingFan,
+                icon = XMilletIcons.Snowflake,
                 title = "GreezeManager",
                 content = if (greezeReady) "已就绪" else "未就绪",
             )
@@ -770,7 +768,7 @@ private fun CoreServicesStatusCard(
                 content = if (aurogonReady) "已就绪" else "未就绪",
             )
             InfoText(
-                icon = MiuixIcons.Glass.Processor,
+                icon = XMilletIcons.ProcessBolt,
                 title = "PowerKeeper",
                 content = if (pkConnected) "已连接" else "未连接",
                 bottomPadding = 0.dp,

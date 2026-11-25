@@ -3,10 +3,14 @@ package io.github.univers629.millet.ui.component
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * XMillet 自定义 MIUI 风格矢量图标集合。
@@ -117,5 +121,53 @@ object XMilletIcons {
             ),
             fill = SolidColor(Color.Black),
         ).build()
+    }
+
+    /**
+     * 运行环境检测雪花：三向贯穿 + 每臂两道 40° 分叉，1.5dp 圆头描边。
+     * 主体落在 24dp 视口的 [3.6..20.4] 区间，与 Miuix Original/Glass 图标的 18.8dp 光学框对齐。
+     */
+    val Snowflake: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "Snowflake",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 1.5f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+            ) {
+                val center = 12f
+                val armLength = 8.4f
+                val branchFrom = 5.4f
+                val branchLength = 2.3f
+                val branchAngle = Math.toRadians(40.0)
+                for (i in 0 until 3) {
+                    val angle = Math.toRadians(60.0 * i)
+                    val ux = sin(angle).toFloat()
+                    val uy = -cos(angle).toFloat()
+                    moveTo(center - ux * armLength, center - uy * armLength)
+                    lineTo(center + ux * armLength, center + uy * armLength)
+                }
+                for (i in 0 until 6) {
+                    val angle = Math.toRadians(60.0 * i)
+                    val ux = sin(angle).toFloat()
+                    val uy = -cos(angle).toFloat()
+                    val fromX = center + ux * branchFrom
+                    val fromY = center + uy * branchFrom
+                    for (sign in intArrayOf(1, -1)) {
+                        val turn = sign * branchAngle
+                        val vx = ux * cos(turn).toFloat() - uy * sin(turn).toFloat()
+                        val vy = ux * sin(turn).toFloat() + uy * cos(turn).toFloat()
+                        moveTo(fromX, fromY)
+                        lineTo(fromX + vx * branchLength, fromY + vy * branchLength)
+                    }
+                }
+            }
+        }.build()
     }
 }

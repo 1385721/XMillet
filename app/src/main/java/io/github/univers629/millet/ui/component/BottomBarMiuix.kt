@@ -51,10 +51,9 @@ import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.glass.GlassNavigationBar
 import top.yukonga.miuix.kmp.glass.GlassNavigationItem
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.DigitalStatistics
 import top.yukonga.miuix.kmp.icon.glass.HomeFill
 import top.yukonga.miuix.kmp.icon.glass.HomeOutline
-import top.yukonga.miuix.kmp.icon.glass.LockFill
-import top.yukonga.miuix.kmp.icon.glass.LockOutline
 import top.yukonga.miuix.kmp.icon.glass.NotesFill
 import top.yukonga.miuix.kmp.icon.glass.NotesOutline
 import top.yukonga.miuix.kmp.icon.glass.SettingsFill
@@ -138,7 +137,7 @@ enum class BottomBarDestination(
 ) {
     Home("主页", MiuixIcons.Glass.HomeOutline, MiuixIcons.Glass.HomeFill),
     Processes("进程列表", MiuixIcons.Glass.NotesOutline, MiuixIcons.Glass.NotesFill),
-    TombStats("墓碑统计", MiuixIcons.Glass.LockOutline, MiuixIcons.Glass.LockFill),
+    TombStats("墓碑统计", MiuixIcons.Glass.DigitalStatistics, MiuixIcons.Glass.DigitalStatistics),
     Settings("设置", MiuixIcons.Glass.SettingsOutline, MiuixIcons.Glass.SettingsFill);
 
     fun icon(selected: Boolean): ImageVector = if (selected) iconFill else iconOutline

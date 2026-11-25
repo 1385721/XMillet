@@ -6,6 +6,7 @@ enum class TombSection(val id: String, val label: String) {
     NATIVE_RECORDS("native_records", "系统记录"),
     WAKE_REASONS("wake_reasons", "解冻原因"),
     TIME_DISTRIBUTION("time_distribution", "解冻时间分布"),
+    DOZE("doze", "深睡归因"),
     INTERVENTION("intervention", "XMillet 干预"),
     RECENT("recent", "最近系统记录"),
     ;

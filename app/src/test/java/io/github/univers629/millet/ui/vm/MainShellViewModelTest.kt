@@ -106,10 +106,11 @@ class MainShellViewModelTest {
         val fiveTabs = BottomBarDestination.visible(showTombStats = true)
         val fourTabs = BottomBarDestination.visible(showTombStats = false)
 
-        // 关闭「墓碑统计」后，设置页下标从 4 重映射为 3；重新开启后从 3 映射回 4
-        assertEquals(3, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Settings))
-        assertEquals(4, BottomBarDestination.resolvePageIndex(fiveTabs, BottomBarDestination.Settings))
-        assertEquals(2, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Apps))
+        // 底栏已改为 4 个目的地（应用策略改为主页入口）：关闭「墓碑统计」后设置页下标从 3 重映射为 2
+        assertEquals(2, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Settings))
+        assertEquals(3, BottomBarDestination.resolvePageIndex(fiveTabs, BottomBarDestination.Settings))
+        assertEquals(1, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.Processes))
+        // 墓碑统计隐藏时回退到首页
         assertEquals(0, BottomBarDestination.resolvePageIndex(fourTabs, BottomBarDestination.TombStats))
 
         // 顶栏支持渐进式模糊：渐进模式下由 GlassTopAppBar 自行绘制，BlurredBar 不叠整块模糊

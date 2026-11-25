@@ -255,7 +255,7 @@ internal fun LazyListScope.statsContent(
         }
     }
 
-    item(key = "doze_attribution") {
+    if ("doze" in visibleSections) item(key = "doze_attribution") {
         DozeAttributionCard(
             summary = snap.dozeSummary,
             apps = snap.apps,

@@ -89,6 +89,7 @@ class UiThemeState(private val prefs: SharedPreferences) {
         private const val KEY_SWIPE_BACK = "ui_swipe_back"             // 横移返回手势，默认开启
         private const val KEY_PROGRESSIVE_BLUR = "ui_progressive_blur" // 顶栏/底栏渐进式模糊
         private const val KEY_TOMB_SECTIONS = "ui_tomb_sections"       // 墓碑统计页显示的板块
+        private const val KEY_TOMB_SECTIONS_V2 = "ui_tomb_sections_v2" // 板块偏好迁移标记（新增「深睡归因」后置位）
     }
 
     /**
@@ -121,6 +122,18 @@ class UiThemeState(private val prefs: SharedPreferences) {
         TombSection.parse(prefs.getStringSet(KEY_TOMB_SECTIONS, null)?.toSet())
     )
         private set
+
+    init {
+        // 旧版本保存的板块集合不含后加的「深睡归因」：迁移时补上并置位，之后尊重用户的开关
+        if (!prefs.getBoolean(KEY_TOMB_SECTIONS_V2, false)) {
+            val next = tombSections + TombSection.DOZE.id
+            tombSections = next
+            prefs.edit()
+                .putStringSet(KEY_TOMB_SECTIONS, next)
+                .putBoolean(KEY_TOMB_SECTIONS_V2, true)
+                .apply()
+        }
+    }
 
     fun updateTombSection(id: String, enabled: Boolean) {
         val next = tombSections.toMutableSet()

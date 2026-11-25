@@ -282,4 +282,21 @@ class FreezeStatsCodecTest {
         assertEquals("v3", FreezeStatsCodec.STORAGE_VERSION)
         assertEquals("v3", encoded.lineSequence().first())
     }
+
+    @Test
+    fun `decodeStorage losslessly absorbs legacy v2 stats without clearing`() {
+        val v2Payload = """
+            v2
+            S|1795278840209|1795438757781|1795438740601|152748187|1795591488788|a324a80c-01ae-41e4-96b4-35388772952e
+            BT|1178|380|70239547|0|0|1062680493|USER_OPEN=20,BINDER=121|NO_SCREEN_ON_THAW=173
+            BA|10246|com.miui.mediaeditor|6|1499251|0|0|OTHER=5||alert=5
+        """.trimIndent()
+        val parsed = FreezeStatsCodec.decodeStorage(v2Payload)
+        assertNotNull(parsed)
+        assertEquals(1178, parsed!!.boot!!.freezeCount)
+        assertEquals(380, parsed.boot!!.screenOffWakeCount)
+        assertEquals("com.miui.mediaeditor", parsed.boot!!.apps.single().packageName)
+        assertEquals(0, parsed.boot!!.doze.sessionCount)
+        assertEquals(0, parsed.boot!!.apps.single().jitterCount)
+    }
 }

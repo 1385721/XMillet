@@ -506,6 +506,45 @@ object BroadcastAndDozeHooks {
         }
     )
 
+    /**
+     * S38：DeviceIdleController#becomeActiveLocked(String, int, long, boolean)
+     *
+     * AOSP / MIUI 的 `becomeActiveLocked` 会直接将 `mState = 0`（ACTIVE）而不经过
+     * `moveToStateLocked(0, ...)`，导致仅 Hook `S14` 时会漏掉深睡退出事件。
+     */
+    fun buildS38DeviceIdleBecomeActiveHook(): HookSpec = HookSpec(
+        id = "S38_DOZE_BECOME_ACTIVE",
+        name = "DeviceIdleController#becomeActiveLocked",
+        targetClass = CLASS_DEVICE_IDLE_CONTROLLER,
+        methodName = "becomeActiveLocked",
+        paramTypes = listOf(
+            String::class.java,
+            Int::class.javaPrimitiveType!!,
+            Long::class.javaPrimitiveType!!,
+            Boolean::class.javaPrimitiveType!!,
+        ),
+        paramResolver = { _, clazz ->
+            clazz.declaredMethods
+                .filter { it.name == "becomeActiveLocked" }
+                .maxByOrNull { it.parameterCount }
+                ?.parameterTypes
+                ?.toList()
+        },
+        mode = HookMode.AFTER,
+        after = {
+            val prefs = PrefReader.systemPrefs
+            if (!SystemState.isGreezeReady || !prefs.freezeStats) return@HookSpec
+            val state = idleStateLocked() ?: 0
+            if (state != STATE_IDLE && state != STATE_IDLE_MAINTENANCE) {
+                val wallMs = System.currentTimeMillis()
+                val elapsedMs = SystemClock.elapsedRealtime()
+                Logger.postIoTask {
+                    FreezeStatsRecorder.onDozeStateObserved(state, wallMs, elapsedMs)
+                }
+            }
+        }
+    )
+
     // ==================== 亮灭屏广播、DeepDoze Shell 与省电白名单同步 ====================
 
     private fun <T> withDozeLock(block: () -> T): T {
@@ -673,10 +712,22 @@ object BroadcastAndDozeHooks {
         exitDozeStateLocked(reason)
     }
 
-    private fun cancelAndReleaseDoze(reason: String) = withDozeLock {
-        dozeLifecycle.cancel()
-        cancelDeepDozeAlarmLocked()
-        releaseDeepDozeLocked(reason)
+    private fun cancelAndReleaseDoze(reason: String) {
+        val postState = withDozeLock {
+            dozeLifecycle.cancel()
+            cancelDeepDozeAlarmLocked()
+            releaseDeepDozeLocked(reason)
+            idleStateLocked() ?: 0
+        }
+        if (SystemState.isGreezeReady && PrefReader.systemPrefs.freezeStats &&
+            postState != STATE_IDLE && postState != STATE_IDLE_MAINTENANCE
+        ) {
+            val wallMs = System.currentTimeMillis()
+            val elapsedMs = SystemClock.elapsedRealtime()
+            Logger.postIoTask {
+                FreezeStatsRecorder.onDozeStateObserved(postState, wallMs, elapsedMs)
+            }
+        }
     }
 
     /** Called after the current system preference snapshot has been published. */

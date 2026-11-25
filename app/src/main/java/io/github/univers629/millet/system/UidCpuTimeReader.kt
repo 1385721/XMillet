@@ -46,9 +46,9 @@ object UidCpuTimeReader {
     private var kernelReaderUnavailable = false
 
     fun read(): Snapshot {
-        readViaKernelReader()?.let { if (it.isNotEmpty()) return Snapshot(CpuStatSource.KERNEL_READER, it) }
         readViaProcUidStat()?.let { if (it.isNotEmpty()) return Snapshot(CpuStatSource.PROC_UID_STAT, it) }
         readViaCgroupCpuStat()?.let { if (it.isNotEmpty()) return Snapshot(CpuStatSource.CGROUP_CPU_STAT, it) }
+        readViaKernelReader()?.let { if (it.isNotEmpty()) return Snapshot(CpuStatSource.KERNEL_READER, it) }
         return Snapshot(CpuStatSource.NONE, emptyMap())
     }
 
@@ -79,7 +79,8 @@ object UidCpuTimeReader {
                 .also { readAbsoluteMethod = it }
 
             val result = LinkedHashMap<Int, Long>()
-            val proxy = Proxy.newProxyInstance(cbClass.classLoader, arrayOf(cbClass)) { _, m, args ->
+            val loader = cbClass.classLoader ?: UidCpuTimeReader::class.java.classLoader
+            val proxy = Proxy.newProxyInstance(loader, arrayOf(cbClass)) { _, m, args ->
                 if (m.name == "onUidCpuTime" && args != null && args.size >= 2) {
                     val uid = args[0] as? Int ?: return@newProxyInstance null
                     if (AppUidUtils.isManagedAppUid(uid)) {
@@ -96,9 +97,7 @@ object UidCpuTimeReader {
             method.invoke(reader, proxy)
             result
         }.onFailure {
-            if (it is ClassNotFoundException || it is NoSuchMethodException) {
-                kernelReaderUnavailable = true
-            }
+            kernelReaderUnavailable = true
         }.getOrNull()
     }
 

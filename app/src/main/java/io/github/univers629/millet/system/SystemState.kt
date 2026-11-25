@@ -226,6 +226,12 @@ object SystemState {
     private val broadcastProjections =
         java.util.IdentityHashMap<MutableMap<String, MutableList<String>>, BroadcastProjection>()
 
+    internal fun applyReversibleListProjection(
+        current: MutableList<String>,
+        additions: Set<String>,
+        removals: Set<String>,
+    ) = syncMessageProjection(current, additions, removals)
+
     private fun canRestrictMessagePackage(packageName: String, prefs: PrefsSnapshot): Boolean {
         val ctx = systemContext ?: return false
         val token = android.os.Binder.clearCallingIdentity()
@@ -370,6 +376,22 @@ object SystemState {
             } catch (_: Throwable) {
             }
         }
+
+        syncAlarmAllowList(messageApps, suppressMessageApps)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun syncAlarmAllowList(additions: Set<String>, removals: Set<String>) {
+        val greeze = greezeService ?: return
+        val field = XReflect.findFieldOrNull(greeze.javaClass, "mAurogonAlarmAllowList") ?: return
+        val list = runCatching {
+            if (java.lang.reflect.Modifier.isStatic(field.modifiers)) {
+                field.get(null)
+            } else {
+                field.get(greeze)
+            } as? MutableList<String>
+        }.getOrNull() ?: return
+        syncMessageProjection(list, additions, removals)
     }
 
     // ==================== 3. 包名 / UID / /proc 工具方法 ====================
@@ -938,6 +960,14 @@ object SystemState {
         "SLEEP_MODE_LIST",
         "mSystemWhiteList",
         "SYSTEM_WHITE_LIST"
+    )
+    private val LIST_APPS_SYSTEM_BLACK_FIELDS = listOf(
+        "mSystemBlackList",
+        "SYSTEM_BLACK_LIST"
+    )
+    private val LIST_APPS_EXTRA_WHITE_FIELDS = listOf(
+        "mAudioBlackList",
+        "AUDIO_BLACK_LIST"
     )
 
     @Volatile

@@ -59,6 +59,8 @@ object PowerKeeperHooks {
     private const val CLASS_POWER_STATE_MACHINE = "com.miui.powerkeeper.statemachine.PowerStateMachine"
     private const val CLASS_BRIGHT_CONTROLLER = "com.miui.powerkeeper.millet.bright.BrightController"
     private const val CLASS_FROZEN_APP_CONTROLLER = "com.miui.powerkeeper.controller.FrozenAppController"
+    private const val CLASS_APP_STATE_FROZEN_CONTROL =
+        "com.miui.powerkeeper.controller.FrozenAppController\$AppStateFrozenControl"
     private const val CLASS_FREEZE_BINDER = "com.miui.powerkeeper.millet.FreezeBinder"
     private const val CLASS_POWER_KEEPER_MANAGER = "com.miui.powerkeeper.PowerKeeperManager"
     private const val CLASS_EVENTS_AGGREGATOR = "com.miui.powerkeeper.event.EventsAggregator"
@@ -114,6 +116,11 @@ object PowerKeeperHooks {
                             PowerKeeperState.syncDualAppSupport(snapshot.freezeDualApp)
                         io.github.univers629.millet.core.PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST ->
                             PowerKeeperState.syncCloudFrozenWhiteList(snapshot.blockCloudFrozenWhitelist)
+                        "*" -> {
+                            PowerKeeperState.syncDualAppSupport(snapshot.freezeDualApp)
+                            PowerKeeperState.syncCloudFrozenWhiteList(snapshot.blockCloudFrozenWhitelist)
+                            PowerKeeperState.syncFastScreenOffFreeze(true)
+                        }
                     }
                 }
                 else -> Unit
@@ -194,7 +201,9 @@ object PowerKeeperHooks {
             buildP17FreezeBinderInitHook(),
             buildP18PowerKeeperManagerInitHook(),
             buildP29MilletAppUidHook(classLoader),
-            buildP34ClusterDualAppHook(classLoader)
+            buildP34ClusterDualAppHook(classLoader),
+            buildP35FastScreenOffFreezeHook(),
+            buildP36BrightFrozenThawHook(),
         )
         // 按当前 ROM 版本的能力过滤点位：目标类/方法在本版本不存在时跳过，
         // 既不会让安装器抛 ClassNotFound/NoSuchMethod，也不会把「本版本没有的功能」误报成 Hook 失败。
@@ -211,7 +220,12 @@ object PowerKeeperHooks {
         registerPrefReloadCallback()
         ModernHookInstaller.installAll(xposed, classLoader, buildAllSpecs(classLoader))
         runCatching { healChargingFreezeGate() }
-        if (PrefReader.powerKeeperPrefs.blockCloudFrozenWhitelist) {
+        val prefs = PrefReader.powerKeeperPrefs
+        if (PowerKeeperState.milletPolicyInstance != null) {
+            PowerKeeperState.applyMessageAndWhiteLists()
+        }
+        PowerKeeperState.syncFastScreenOffFreeze(true)
+        if (prefs.blockCloudFrozenWhitelist) {
             PowerKeeperState.syncCloudFrozenWhiteList(block = true)
         }
         logInstallSummary()
@@ -308,7 +322,16 @@ object PowerKeeperHooks {
             }
             PowerKeeperState.clearMusicApps(policy)
             PowerKeeperState.applyMessageAndWhiteLists()
-            PowerKeeperState.syncDualAppSupport(PrefReader.powerKeeperPrefs.freezeDualApp)
+            val pkPrefs = PrefReader.powerKeeperPrefs
+            PowerKeeperState.syncDualAppSupport(pkPrefs.freezeDualApp)
+            PowerKeeperState.syncFastScreenOffFreeze(true)
+            if (PowerKeeperBinderClient.isSystemServiceReady) {
+                PowerKeeperState.applicationContext?.let { appCtx ->
+                    Logger.postIoTask {
+                        runCatching { PowerKeeperBinderClient.bindFromPowerKeeper(appCtx) }
+                    }
+                }
+            }
         }
     )
 
@@ -1054,6 +1077,62 @@ object PowerKeeperHooks {
             param.result = decided
             if (prefs.isLog) {
                 Logger.info("应用集群控制放行双开应用 uid=$uid freezeDualApp=$decided")
+            }
+        }
+    )
+
+    /**
+     * P35（OS1–OS3）：FrozenAppController$AppStateFrozenControl#frozenAppLater(int delayMs)
+     * 将原生 62,000ms 的息屏延迟冻结收敛至 5,000ms。
+     */
+    private fun buildP35FastScreenOffFreezeHook(): HookSpec = HookSpec(
+        id = "P35_FAST_SCREEN_OFF_FREEZE",
+        name = "AppStateFrozenControl#frozenAppLater",
+        targetClass = CLASS_APP_STATE_FROZEN_CONTROL,
+        methodName = "frozenAppLater",
+        paramTypes = listOf(Int::class.javaPrimitiveType!!),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val prefs = PrefReader.powerKeeperPrefs
+            val delayMs = param.args.getOrNull(0) as? Int ?: return@HookSpec
+            val clamped = HookDecisions.clampScreenOffFreezeDelayMs(delayMs, true)
+            if (clamped != delayMs) {
+                param.args[0] = clamped
+                if (prefs.isLog) {
+                    Logger.info("快速息屏冻结: 延迟从 ${delayMs}ms 缩短至 ${clamped}ms")
+                }
+            }
+        }
+    )
+
+    /**
+     * P36（OS1–OS2）：BrightController#frozenThaw(List, boolean freeze, int delayMs, int reason)
+     * 亮屏/场景冻结与息屏回冻共用的 `frozenThaw` 调度入口；将其中超过 5,000ms 的冻结延迟
+     * （如 `MilletConfig.firstScreenOffDelayTime = 62000`）自动钳位至 5,000ms。
+     */
+    private fun buildP36BrightFrozenThawHook(): HookSpec = HookSpec(
+        id = "P36_BRIGHT_FROZEN_THAW",
+        name = "BrightController#frozenThaw",
+        targetClass = CLASS_BRIGHT_CONTROLLER,
+        methodName = "frozenThaw",
+        paramTypes = listOf(
+            java.util.List::class.java,
+            Boolean::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!,
+        ),
+        mode = HookMode.BEFORE,
+        before = { param ->
+            val isFreeze = (param.args.getOrNull(1) as? Boolean) ?: return@HookSpec
+            if (!isFreeze) return@HookSpec
+            val delayMs = param.args.getOrNull(2) as? Int ?: return@HookSpec
+            val prefs = PrefReader.powerKeeperPrefs
+            val clamped = HookDecisions.clampScreenOffFreezeDelayMs(delayMs, true)
+            if (clamped != delayMs) {
+                param.args[2] = clamped
+                if (prefs.isLog) {
+                    Logger.info("快速息屏冻结[BrightController]: 延迟从 ${delayMs}ms 缩短至 ${clamped}ms")
+                }
             }
         }
     )

@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.StatsEventKind
 import io.github.univers629.millet.core.StatsTimeBucket
 import io.github.univers629.millet.core.StatsWindow
@@ -208,15 +209,6 @@ internal fun LazyListScope.statsContent(
         ScreenOffBanner(snap)
     }
 
-    item(key = "doze_attribution") {
-        SmallTitle(text = "深度睡眠 · 待机与耗电归因")
-        DozeAttributionCard(
-            summary = snap.dozeSummary,
-            apps = snap.apps,
-            onOpenDetail = onOpenDetail,
-        )
-    }
-
     item(key = "wake_reasons") {
         SmallTitle(text = "系统解冻记录 · 原因")
         Card(
@@ -246,6 +238,14 @@ internal fun LazyListScope.statsContent(
                 )
             }
         }
+    }
+
+    item(key = "doze_attribution") {
+        DozeAttributionCard(
+            summary = snap.dozeSummary,
+            apps = snap.apps,
+            onOpenDetail = onOpenDetail,
+        )
     }
 
     item(key = "interventions") {

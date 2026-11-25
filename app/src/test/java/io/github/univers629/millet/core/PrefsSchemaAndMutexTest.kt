@@ -1,5 +1,6 @@
 package io.github.univers629.millet.core
 
+import io.github.univers629.millet.system.SystemState
 import io.github.univers629.millet.ui.data.InMemorySharedPreferences
 import io.github.univers629.millet.ui.data.PolicyRepository
 import io.github.univers629.millet.ui.data.PolicyWriter
@@ -114,5 +115,26 @@ class PrefsSchemaAndMutexTest {
         assertTrue("com.example.chat" in snap.notFreezeWhenHasFgsSet)
         assertFalse("com.example.chat" in snap.forceFreezeSet)
         assertFalse("com.example.chat" in snap.blockThawSet)
+    }
+
+    @Test
+    fun `SystemState applyReversibleListProjection adds removes and restores alarm allowlist`() {
+        val alarmList = mutableListOf("com.android.deskclock", "com.tencent.mm")
+
+        SystemState.applyReversibleListProjection(
+            alarmList,
+            additions = setOf("com.example.todo"),
+            removals = setOf("com.tencent.mm"),
+        )
+        assertTrue("com.android.deskclock" in alarmList)
+        assertTrue("com.example.todo" in alarmList)
+        assertFalse("com.tencent.mm" in alarmList)
+
+        SystemState.applyReversibleListProjection(
+            alarmList,
+            additions = emptySet(),
+            removals = emptySet(),
+        )
+        assertEquals(listOf("com.android.deskclock", "com.tencent.mm"), alarmList)
     }
 }

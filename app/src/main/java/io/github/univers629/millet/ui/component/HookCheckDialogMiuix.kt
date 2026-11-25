@@ -101,6 +101,8 @@ private val HOOK_ID_TARGET_HINTS: Map<String, String> = mapOf(
     "P30_CLOUD_DOZE_READ" to "GlobalFeatureConfigureHelper#getDozeWhiteListApps",
     "P31_USER_POWER_SAVE_CONFIG" to "PowerSaveConfigureManager#setPowerSaveAppConfigure",
     "P32_GET_POWER_SAVE_CONFIG" to "PowerSaveConfigureManager#getPowerSaveAppConfigure",
+    "P35_FAST_SCREEN_OFF_FREEZE" to "AppStateFrozenControl#frozenAppLater",
+    "P36_BRIGHT_FROZEN_THAW" to "BrightController#frozenThaw",
     "S2" to "GreezeManagerService#<init>",
     "S6" to "GreezeManagerService#freezeUids",
     "S7" to "GreezeManagerService#freezeAction",
@@ -109,6 +111,7 @@ private val HOOK_ID_TARGET_HINTS: Map<String, String> = mapOf(
     "S21" to "GreezeManagerService#thawUids",
     "S23" to "GreezeManagerService#freezePids",
     "S32_CLOUD_FROZEN_WL" to "ListAppsManager#dealCloudWhiteList",
+    "S38_DOZE_BECOME_ACTIVE" to "DeviceIdleController#becomeActiveLocked",
 )
 
 private fun describeHookId(id: String): String {
@@ -762,4 +765,3 @@ internal fun OverallStatusHeader(
         }
     }
 }
-

@@ -52,4 +52,15 @@ object HookDecisions {
         if (!current.hasData) return true
         return incoming.total >= current.total
     }
+
+    /** 息屏快速冻结钳位阈值：将 OS1–OS3 原生 62,000ms 延迟缩短至 5,000ms。 */
+    const val FAST_SCREEN_OFF_FREEZE_MS = 5_000
+
+    /**
+     * P35/P36：将超过 5,000ms 的息屏延迟钳位至 5,000ms，更短的延迟原样返回。
+     *
+     * [fastScreenOffFreeze] 为 false 时直接返回原延迟。
+     */
+    fun clampScreenOffFreezeDelayMs(delayMs: Int, fastScreenOffFreeze: Boolean = true): Int =
+        if (fastScreenOffFreeze && delayMs > FAST_SCREEN_OFF_FREEZE_MS) FAST_SCREEN_OFF_FREEZE_MS else delayMs
 }

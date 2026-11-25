@@ -33,7 +33,7 @@ object FreezeStatsCodec {
 
     /**
      * 磁盘持久化协议版本。v3 起加入 Doze 深度睡眠会话归因与 <10s 冻解锯齿统计，
-     * 旧格式文件自动重建以保持字段与口径一致。
+     * 读取时无损兼容吸收 v2 历史数据，并在下次落盘时自动升级为 v3。
      */
     const val STORAGE_VERSION = "v3"
 

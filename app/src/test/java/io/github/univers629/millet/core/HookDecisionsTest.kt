@@ -57,4 +57,23 @@ class HookDecisionsTest {
         // 对端没上报（total = -1）不算残缺，不阻塞已有缓存。
         assertTrue(HookDecisions.acceptLedgerReport(HookInstallRegistry.Wire(), complete))
     }
+
+    @Test
+    fun `clampScreenOffFreezeDelayMs clamps long delays only when enabled`() {
+        assertEquals(62_000, HookDecisions.clampScreenOffFreezeDelayMs(62_000, fastScreenOffFreeze = false))
+        assertEquals(3_000, HookDecisions.clampScreenOffFreezeDelayMs(3_000, fastScreenOffFreeze = false))
+
+        assertEquals(
+            HookDecisions.FAST_SCREEN_OFF_FREEZE_MS,
+            HookDecisions.clampScreenOffFreezeDelayMs(62_000, fastScreenOffFreeze = true),
+        )
+        assertEquals(
+            HookDecisions.FAST_SCREEN_OFF_FREEZE_MS,
+            HookDecisions.clampScreenOffFreezeDelayMs(10_000, fastScreenOffFreeze = true),
+        )
+        assertEquals(5_000, HookDecisions.clampScreenOffFreezeDelayMs(5_000, fastScreenOffFreeze = true))
+        assertEquals(1_500, HookDecisions.clampScreenOffFreezeDelayMs(1_500, fastScreenOffFreeze = true))
+        assertEquals(0, HookDecisions.clampScreenOffFreezeDelayMs(0, fastScreenOffFreeze = true))
+        assertEquals(-1, HookDecisions.clampScreenOffFreezeDelayMs(-1, fastScreenOffFreeze = true))
+    }
 }

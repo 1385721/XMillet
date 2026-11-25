@@ -350,12 +350,17 @@ object PrefReader {
         synchronized(migratedUiPrefs) {
             if (!migratedUiPrefs.add(prefs)) return
         }
+        val staleKeys = listOf("fastScreenOffFreeze", "launchModePolicy", "dozeEnterDelaySec")
+            .filter { prefs.contains(it) }
         val version = runCatching { prefs.getInt(PrefsSchema.KEY_SCHEMA_VERSION, 0) }.getOrDefault(0)
-        if (version >= PrefsSchema.CURRENT_VERSION) return
+        if (version >= PrefsSchema.CURRENT_VERSION && staleKeys.isEmpty()) return
         val raw = readRawUiSnapshot(prefs)
         val result = PrefsSchema.sanitizeSnapshot(raw)
         applyPrefsSuppressed(prefs, clearFirst = false) {
-            putInt(PrefsSchema.KEY_SCHEMA_VERSION, PrefsSchema.CURRENT_VERSION)
+            for (stale in staleKeys) remove(stale)
+            if (version < PrefsSchema.CURRENT_VERSION) {
+                putInt(PrefsSchema.KEY_SCHEMA_VERSION, PrefsSchema.CURRENT_VERSION)
+            }
             if (result.modified) {
                 val cleaned = result.snapshot
                 putStringSet(PrefsKeys.WHITE_APP_SET, cleaned.whiteAppSet)

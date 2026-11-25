@@ -2,8 +2,12 @@ package io.github.univers629.millet.system
 
 import android.content.Context
 import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppGateContext
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.BroadcastGateVerdict
 import io.github.univers629.millet.core.FreezeReasonClassifier
+import io.github.univers629.millet.core.GateDecision
+import io.github.univers629.millet.core.GateReason
 import io.github.univers629.millet.core.HookMode
 import io.github.univers629.millet.core.HookSpec
 import io.github.univers629.millet.core.InterceptRule
@@ -14,8 +18,9 @@ import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RomCapabilities
 import io.github.univers629.millet.core.ServiceRoleProtection
-import io.github.univers629.millet.core.UnifiedHookParam
 import io.github.univers629.millet.core.StatsEventOrigin
+import io.github.univers629.millet.core.ThawGateVerdict
+import io.github.univers629.millet.core.UnifiedHookParam
 import io.github.univers629.millet.core.XReflect
 
 /**
@@ -184,81 +189,24 @@ object FreezeGateHooks {
         }
     )
 
-    private enum class FreezeExemption {
-        NONE,
-        WHITE_LIST,
-        DEFAULT_IME,
-        ACCESSIBILITY_SERVICE,
-        UNKNOWN_SERVICE_ROLES,
-        FOREGROUND_SERVICE
-    }
+    private fun buildSystemGateContext(uid: Int, pkg: String?): AppGateContext = AppGateContext(
+        uid = uid,
+        packageName = pkg,
+        isGreezeReady = SystemState.isGreezeReady,
+        isUidFrozen = { SystemState.isUidFrozen(uid) },
+        isCurrentlyForeground = { SystemState.isPackageCurrentlyForeground(pkg) },
+        serviceRoleProvider = {
+            if (pkg.isNullOrEmpty()) {
+                ServiceRoleProtection.NONE
+            } else {
+                ActiveImeTracker.resolveServiceRoleProtection(SystemState.systemContext, pkg, uid)
+            }
+        },
+        hasForegroundService = { SystemState.checkAppFgService(uid) },
+    )
 
-    private fun evaluateFreezeExemption(
-        uid: Int,
-        pkg: String?,
-        prefs: PrefsSnapshot,
-        checkFgs: Boolean,
-    ): FreezeExemption {
-        if (pkg.isNullOrEmpty()) return FreezeExemption.NONE
-        if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid)) return FreezeExemption.WHITE_LIST
-        if (pkg in io.github.univers629.millet.core.BuiltinProtect.FREEZE_EXEMPT_PACKAGES) return FreezeExemption.WHITE_LIST
-        when (ActiveImeTracker.resolveServiceRoleProtection(SystemState.systemContext, pkg, uid)) {
-            ServiceRoleProtection.DEFAULT_IME -> return FreezeExemption.DEFAULT_IME
-            ServiceRoleProtection.ACCESSIBILITY -> return FreezeExemption.ACCESSIBILITY_SERVICE
-            ServiceRoleProtection.UNKNOWN -> return FreezeExemption.UNKNOWN_SERVICE_ROLES
-            ServiceRoleProtection.NONE -> Unit
-        }
-        if (checkFgs &&
-            !AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, pkg, uid) &&
-            AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, pkg, uid) &&
-            SystemState.checkAppFgService(uid)
-        ) {
-            return FreezeExemption.FOREGROUND_SERVICE
-        }
-        return FreezeExemption.NONE
-    }
-
-    /**
-     * 亮屏解冻豁免判断：
-     * - 核心系统 UID（`< 10000`）与用户「免冻白名单 (`whiteAppSet`)」始终随亮屏放行；
-     * - 当前正位于屏幕前台/可见的应用（含 `Activity Start` 记账与实时 `AMS` 前台兜底）放行；
-     * - 系统默认输入法、已启用的无障碍服务以及拥有活跃前台服务的 `notFreezeWhenHasFgsSet` 应用放行。
-     */
-    private fun isScreenOnThawExempt(uid: Int, pkg: String?, prefs: PrefsSnapshot): Boolean {
-        if (AppUidUtils.appIdOf(uid) in 0 until 10000) return true
-        if (pkg.isNullOrEmpty()) return false
-        if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid)) return true
-        // The ROM foreground fallback identifies packages, not individual users.
-        if (SystemState.isPackageCurrentlyForeground(pkg)) return true
-        if (ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs, uid)) return true
-        if (AppUidUtils.containsPolicyTarget(prefs.blockThawSet, pkg, uid) ||
-            AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, pkg, uid)
-        ) return false
-        return uid >= 10000 &&
-            !AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, pkg, uid) &&
-            AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, pkg, uid) &&
-            SystemState.checkAppFgService(uid)
-    }
-
-    private fun thawInterceptRule(uid: Int, pkg: String?, reason: String, prefs: PrefsSnapshot): InterceptRule? {
-        if (!SystemState.isGreezeReady || !AppUidUtils.isManagedAppUid(uid) || pkg.isNullOrEmpty() || reason.isBlank()) return null
-        if (FreezeReasonClassifier.isUserOpenReason(reason) ||
-            SystemState.isPackageCurrentlyForeground(pkg) ||
-            AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
-            ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, pkg, prefs, uid)
-        ) return null
-        if (isScreenOnThawReason(reason) && isScreenOnThawExempt(uid, pkg, prefs)) return null
-        if (!SystemState.isUidFrozen(uid)) return null
-        return when {
-            pkg == "com.tencent.mobileqq" && reason.trim().equals("broadcast", ignoreCase = true) -> InterceptRule.HARD_RULE
-            isSyncBinderThawReason(reason) && AppUidUtils.containsPolicyTarget(prefs.forbidSyncBinderSet, pkg, uid) -> InterceptRule.FORBID_SYNC_BINDER
-            isNetworkWakeReason(reason) && AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, pkg, uid) -> InterceptRule.IGNORE_NETWORK
-            prefs.disableCharge && isChargeThawReason(reason) -> InterceptRule.NO_CHARGE_THAW
-            prefs.disableScreenOnThaw && isScreenOnThawReason(reason) -> InterceptRule.NO_SCREEN_ON_THAW
-            AppUidUtils.containsPolicyTarget(prefs.blockThawSet, pkg, uid) && !isAllowedThawReason(reason) -> InterceptRule.BLOCK_THAW
-            else -> null
-        }
-    }
+    private fun thawInterceptRule(uid: Int, pkg: String?, reason: String, prefs: PrefsSnapshot): InterceptRule? =
+        (GateDecision.decideThaw(buildSystemGateContext(uid, pkg), reason, prefs) as? ThawGateVerdict.Intercept)?.rule
 
     private fun recordThawIntercept(uid: Int, pkg: String?, reason: String, rule: InterceptRule, prefs: PrefsSnapshot) {
         if (prefs.freezeStats) FreezeStatsRecorder.recordIntercept(uid, rule, reason, pkg)
@@ -360,17 +308,13 @@ object FreezeGateHooks {
             val kept = ArrayList<Int>(uids.size)
             for (uid in uids) {
                 val pkg = if (uid >= 10000) SystemState.getPackageNameForUid(uid) else null
-                val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
-                if (exemption != FreezeExemption.NONE) {
+                val gateReason = GateDecision.decideFreeze(buildSystemGateContext(uid, pkg), prefs, checkFgs = true)
+                if (gateReason.blocksFreeze) {
                     blocked = true
-                    if (prefs.freezeStats && uid >= 10000 &&
-                        exemption != FreezeExemption.DEFAULT_IME &&
-                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE &&
-                        exemption != FreezeExemption.UNKNOWN_SERVICE_ROLES
-                    ) {
+                    if (prefs.freezeStats && uid >= 10000 && gateReason.recordsProtectStat) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
-                    if (prefs.isLog) Logger.info("freezeUids 跳过受保护应用[$exemption]: $pkg uid=$uid reason=$reason")
+                    if (prefs.isLog) Logger.info("freezeUids 跳过受保护应用[${gateReason.label}]: $pkg uid=$uid reason=$reason")
                 } else {
                     kept.add(uid)
                 }
@@ -483,25 +427,27 @@ object FreezeGateHooks {
             }
 
             // 1. 白名单、当前默认输入法与 FGS 豁免判定
-            when (evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)) {
-                FreezeExemption.WHITE_LIST -> {
+            val gateReason = GateDecision.decideFreeze(buildSystemGateContext(uid, pkg), prefs, checkFgs = true)
+            when (gateReason) {
+                GateReason.WHITE_LIST,
+                GateReason.BUILTIN_PROTECT -> {
                     if (prefs.freezeStats && uid >= 10000) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
-                    if (prefs.isLog) Logger.info("FAH判断:${pkg}在白名单，因此无法被冻结")
+                    if (prefs.isLog) Logger.info("FAH判断:${pkg}在${gateReason.label}，因此无法被冻结")
                     Logger.logEvent(Logger.Level.INFO, "FAH判断白名单阻断冻结", pkg, uid, reason)
                     param.blockSafely()
                 }
-                FreezeExemption.DEFAULT_IME -> {
+                GateReason.DEFAULT_IME -> {
                     if (prefs.isLog) Logger.info("FAH判断:${pkg}为当前默认输入法，免予冻结")
                     param.blockSafely()
                 }
-                FreezeExemption.ACCESSIBILITY_SERVICE -> {
+                GateReason.ACCESSIBILITY_SERVICE -> {
                     if (prefs.isLog) Logger.info("FAH判断:${pkg}为已启用无障碍服务，免予冻结")
                     param.blockSafely()
                 }
-                FreezeExemption.UNKNOWN_SERVICE_ROLES -> param.blockSafely()
-                FreezeExemption.FOREGROUND_SERVICE -> {
+                GateReason.UNKNOWN_SERVICE_ROLES -> param.blockSafely()
+                GateReason.FOREGROUND_SERVICE -> {
                     if (prefs.freezeStats && uid >= 10000) {
                         FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                     }
@@ -509,7 +455,7 @@ object FreezeGateHooks {
                     Logger.logEvent(Logger.Level.INFO, "FAH判断具有前台服务阻断冻结", pkg, uid, reason)
                     param.blockSafely()
                 }
-                FreezeExemption.NONE -> Unit
+                GateReason.ALLOW_FREEZE -> Unit
             }
             if (!param.isSkipped) beginStats(param, listOf(uid), reason, freeze = true)
         },
@@ -557,16 +503,11 @@ object FreezeGateHooks {
             val uid = resolveAurogonAppUid(appInfoObj)
             // Missing UID fields cannot identify an independent policy target.
             if (!AppUidUtils.isManagedAppUid(uid)) return@HookSpec
-            val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = false)
-            if (exemption == FreezeExemption.WHITE_LIST) {
-                if (prefs.freezeStats) {
+            val gateReason = GateDecision.decideFreeze(buildSystemGateContext(uid, pkg), prefs, checkFgs = false)
+            if (gateReason.blocksFreeze) {
+                if (gateReason.recordsProtectStat && prefs.freezeStats) {
                     FreezeStatsRecorder.recordProtect(uid, "checkAppStatusForFreeze", pkg)
                 }
-                param.blockSafely()
-            } else if (exemption == FreezeExemption.DEFAULT_IME ||
-                exemption == FreezeExemption.ACCESSIBILITY_SERVICE ||
-                exemption == FreezeExemption.UNKNOWN_SERVICE_ROLES
-            ) {
                 param.blockSafely()
             }
         }
@@ -817,20 +758,16 @@ object FreezeGateHooks {
             for (pid in pidArray) {
                 val uid = uidForPid(pid)
                 val pkg = if (uid > 0) SystemState.getPackageNameForUid(uid) else null
-                val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = true)
-                if (exemption != FreezeExemption.NONE) {
+                val gateReason = GateDecision.decideFreeze(buildSystemGateContext(uid, pkg), prefs, checkFgs = true)
+                if (gateReason.blocksFreeze) {
                     blocked = true
-                    if (prefs.freezeStats && uid >= 10000 &&
-                        exemption != FreezeExemption.DEFAULT_IME &&
-                        exemption != FreezeExemption.ACCESSIBILITY_SERVICE &&
-                        exemption != FreezeExemption.UNKNOWN_SERVICE_ROLES
-                    ) {
+                    if (prefs.freezeStats && uid >= 10000 && gateReason.recordsProtectStat) {
                         val seen = protectedUids ?: HashSet<Int>().also { protectedUids = it }
                         if (seen.add(uid)) {
                             FreezeStatsRecorder.recordProtect(uid, reason, pkg)
                         }
                     }
-                    if (prefs.isLog) Logger.info("freezePids 跳过受保护应用进程[$exemption]: $pkg pid=$pid")
+                    if (prefs.isLog) Logger.info("freezePids 跳过受保护应用进程[${gateReason.label}]: $pkg pid=$pid")
                 } else {
                     kept.add(pid)
                 }
@@ -986,28 +923,20 @@ object FreezeGateHooks {
             val calleePkg = (param.args.getOrNull(3) as? String)?.takeIf { it.isNotEmpty() }
                 ?: SystemState.getPackageNameForUid(calleeUid)
                 ?: return@HookSpec param.invokeOriginal()
-            val rule = thawInterceptRule(calleeUid, calleePkg, "broadcast", prefs)
-            if (rule != null) {
-                recordThawIntercept(calleeUid, calleePkg, "broadcast", rule, prefs)
-                return@HookSpec false
+            when (val verdict = GateDecision.decideBroadcastAllow(buildSystemGateContext(calleeUid, calleePkg), prefs)) {
+                is BroadcastGateVerdict.Intercept -> {
+                    recordThawIntercept(calleeUid, calleePkg, "broadcast", verdict.rule, prefs)
+                    false
+                }
+                BroadcastGateVerdict.DelegateToRom -> param.invokeOriginal()
+                BroadcastGateVerdict.AllowExempt -> {
+                    if (prefs.isLog) {
+                        val action = param.args.getOrNull(4) as? String ?: "-"
+                        Logger.info("isAllowBroadcast 放行消息应用广播: $calleePkg action=$action")
+                    }
+                    true
+                }
             }
-            val suppressSoftExemption = AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, calleePkg, calleeUid) ||
-                AppUidUtils.containsPolicyTarget(prefs.blockThawSet, calleePkg, calleeUid) ||
-                AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, calleePkg, calleeUid)
-            val exempt = AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, calleePkg, calleeUid) ||
-                ActiveImeTracker.isProtectedSystemServiceApp(SystemState.systemContext, calleePkg, prefs, calleeUid) ||
-                (!suppressSoftExemption &&
-                    (AppUidUtils.containsPolicyTarget(prefs.messageAppSet, calleePkg, calleeUid) ||
-                        (AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, calleePkg, calleeUid) &&
-                            SystemState.checkAppFgService(calleeUid))))
-            if (!exempt) {
-                return@HookSpec param.invokeOriginal()
-            }
-            if (prefs.isLog) {
-                val action = param.args.getOrNull(4) as? String ?: "-"
-                Logger.info("isAllowBroadcast 放行消息应用广播: $calleePkg action=$action")
-            }
-            true
         }
     )
 
@@ -1285,14 +1214,14 @@ object FreezeGateHooks {
             // 只读缓存；未命中时 UidPackageCache 会后台解析，下次判定即生效（不在平台锁内查 PMS）
             val pkg = SystemState.getPackageNameForUid(uid) ?: return@HookSpec
             val prefs = PrefReader.systemPrefs
-            val exemption = evaluateFreezeExemption(uid, pkg, prefs, checkFgs = false)
-            if (exemption == FreezeExemption.NONE || exemption == FreezeExemption.FOREGROUND_SERVICE) return@HookSpec
+            val gateReason = GateDecision.decideFreeze(buildSystemGateContext(uid, pkg), prefs, checkFgs = false)
+            if (!gateReason.blocksFreeze) return@HookSpec
             param.result = cannotFreeze
-            if (exemption == FreezeExemption.WHITE_LIST && prefs.freezeStats) {
+            if (gateReason.recordsProtectStat && prefs.freezeStats) {
                 FreezeStatsRecorder.recordProtect(uid, "isAllowFreeze", pkg)
             }
             if (prefs.isLog) {
-                Logger.warn("系统侧阻止冻结受保护应用 $pkg (UID=$uid, $exemption)")
+                Logger.warn("系统侧阻止冻结受保护应用 $pkg (UID=$uid, ${gateReason.label})")
             }
         }
     )

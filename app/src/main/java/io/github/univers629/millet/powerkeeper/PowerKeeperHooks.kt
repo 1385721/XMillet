@@ -6,8 +6,11 @@ import android.os.Message
 import android.provider.Settings
 import io.github.libxposed.api.XposedInterface
 import io.github.univers629.millet.core.ActiveImeTracker
+import io.github.univers629.millet.core.AppGateContext
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.GateDecision
 import io.github.univers629.millet.core.ModernHookInstaller
+import io.github.univers629.millet.core.ServiceRoleProtection
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.HookDecisions
@@ -732,9 +735,14 @@ object PowerKeeperHooks {
 
     private fun isFreezeOrKillExemptPkg(pkg: String?, prefs: io.github.univers629.millet.core.PrefsSnapshot, uid: Int): Boolean {
         if (pkg == null) return false
-        return pkg in io.github.univers629.millet.core.BuiltinProtect.FREEZE_EXEMPT_PACKAGES ||
-            AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, pkg, uid) ||
-            ActiveImeTracker.isProtectedSystemServiceApp(PowerKeeperState.applicationContext, pkg, prefs, uid)
+        val ctx = AppGateContext(
+            uid = uid,
+            packageName = pkg,
+            serviceRoleProvider = {
+                ActiveImeTracker.resolveServiceRoleProtection(PowerKeeperState.applicationContext, pkg, uid)
+            },
+        )
+        return GateDecision.isFreezeOrKillExempt(ctx, prefs)
     }
 
     /**

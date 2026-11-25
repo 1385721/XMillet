@@ -202,7 +202,7 @@ object FreezeReasonClassifier {
         val trimmed = reason.trim()
         if (trimmed in ALLOWED_THAW_EXACT_REASONS) return true
         return isSyncBinderThawReason(trimmed) ||
-            trimmed.equals("broadcast", ignoreCase = true) ||
+            trimmed.startsWith("broadcast", ignoreCase = true) ||
             trimmed.startsWith("Signal ", ignoreCase = true) ||
             trimmed.startsWith("Activity Start", ignoreCase = true) ||
             trimmed.contains("toFront", ignoreCase = true) ||

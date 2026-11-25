@@ -54,6 +54,13 @@ object BroadcastAndDozeHooks {
     /** DeviceIdleController 深度睡眠状态：5 = IDLE，6 = IDLE_MAINTENANCE */
     private const val STATE_IDLE = 5
     private const val STATE_IDLE_MAINTENANCE = 6
+    private const val DEEP_DOZE_ENTER_DELAY_MS = 10_000L
+
+    private const val EVENT_NORMAL = 1
+    private const val EVENT_LIGHT_IDLE = 2
+    private const val EVENT_LIGHT_MAINTENANCE = 3
+    private const val EVENT_DEEP_IDLE = 4
+    private const val EVENT_DEEP_MAINTENANCE = 5
 
     /** 熄屏后等待多久再接管 Doze（毫秒） */
     private const val DOZE_SCHEDULE_DELAY_MS = 10_000L
@@ -531,7 +538,10 @@ object BroadcastAndDozeHooks {
                 ?.toList()
         },
         mode = HookMode.AFTER,
-        after = {
+        after = { param ->
+            if (SystemState.deviceIdleController == null && param.thisObject != null) {
+                SystemState.deviceIdleController = param.thisObject
+            }
             val prefs = PrefReader.systemPrefs
             if (!SystemState.isGreezeReady || !prefs.freezeStats) return@HookSpec
             val state = idleStateLocked() ?: 0
@@ -544,6 +554,106 @@ object BroadcastAndDozeHooks {
             }
         }
     )
+
+    /**
+     * S39：DeviceIdleController#stepIdleStateLocked(String)
+     *
+     * `moveToStateLocked(int, String)`（S14）在部分 ROM 上只有 11 条指令且为 `private`，
+     * 会被 `dex2oat` AOT 内联进 `stepIdleStateLocked(String)`，导致进入 `IDLE(5)` 时 S14 静默跳过。
+     * 这里在不会被内联的 `stepIdleStateLocked` 执行后直接读取 `mState`，确保深度睡眠进入与维护切换必达统计。
+     */
+    fun buildS39DeviceIdleStepStateHook(): HookSpec = HookSpec(
+        id = "S39_DOZE_STEP_IDLE",
+        name = "DeviceIdleController#stepIdleStateLocked",
+        targetClass = CLASS_DEVICE_IDLE_CONTROLLER,
+        methodName = "stepIdleStateLocked",
+        paramTypes = listOf(String::class.java),
+        mode = HookMode.AFTER,
+        after = { param ->
+            val controller = param.thisObject ?: SystemState.deviceIdleController ?: return@HookSpec
+            if (SystemState.deviceIdleController == null) {
+                SystemState.deviceIdleController = controller
+            }
+            val state = runCatching {
+                XReflect.getIntField(controller, "mState").takeIf { it in 0..7 }
+            }.getOrNull() ?: return@HookSpec
+
+            if (state == STATE_IDLE || state == STATE_IDLE_MAINTENANCE) {
+                withDozeLock {
+                    dozeLifecycle.cancelPendingForIdle()
+                    cancelDeepDozeAlarmLocked()
+                }
+            }
+            val prefs = PrefReader.systemPrefs
+            if (SystemState.isGreezeReady && prefs.freezeStats) {
+                val wallMs = System.currentTimeMillis()
+                val elapsedMs = SystemClock.elapsedRealtime()
+                Logger.postIoTask {
+                    FreezeStatsRecorder.onDozeStateObserved(state, wallMs, elapsedMs)
+                }
+            }
+        }
+    )
+
+    /**
+     * 从 `system_server` 内存中的 `DeviceIdleController` 事件环形缓冲区（`mEventCmds`/`mEventTimes`）
+     * 按需提取本次开机以来已结束的深度睡眠区间；零轮询、零 Root，仅在查询统计快照时按需读取。
+     */
+    fun readCompletedBootDozeIntervals(): List<FreezeStatsEngine.BootDozeInterval> {
+        val controller = SystemState.deviceIdleController ?: return emptyList()
+        val (cmds, times) = runCatching {
+            synchronized(controller) {
+                val rawCmds = (XReflect.getObjectField(controller, "mEventCmds") as? IntArray)?.clone()
+                val rawTimes = (XReflect.getObjectField(controller, "mEventTimes") as? LongArray)?.clone()
+                rawCmds to rawTimes
+            }
+        }.getOrNull() ?: return emptyList()
+        if (cmds == null || times == null) return emptyList()
+
+        val count = minOf(cmds.size, times.size)
+        if (count == 0) return emptyList()
+
+        val result = ArrayList<FreezeStatsEngine.BootDozeInterval>()
+        var inDeep = false
+        var startElapsed = 0L
+        var maintCount = 0
+        var lastCmd = 0
+
+        for (i in count - 1 downTo 0) {
+            val cmd = cmds[i]
+            val time = times[i]
+            if (cmd == 0 || time <= 0L) continue
+            when (cmd) {
+                EVENT_DEEP_IDLE, EVENT_DEEP_MAINTENANCE -> {
+                    if (!inDeep) {
+                        inDeep = true
+                        startElapsed = time
+                        maintCount = if (cmd == EVENT_DEEP_MAINTENANCE) 1 else 0
+                    } else if (lastCmd == EVENT_DEEP_IDLE && cmd == EVENT_DEEP_MAINTENANCE) {
+                        maintCount++
+                    }
+                    lastCmd = cmd
+                }
+                EVENT_NORMAL, EVENT_LIGHT_IDLE, EVENT_LIGHT_MAINTENANCE -> {
+                    if (inDeep) {
+                        val dur = time - startElapsed
+                        if (dur >= FreezeStatsEngine.MIN_DOZE_SESSION_MS) {
+                            result.add(
+                                FreezeStatsEngine.BootDozeInterval(
+                                    startElapsedMs = startElapsed,
+                                    endElapsedMs = time,
+                                    maintenanceCount = maintCount,
+                                )
+                            )
+                        }
+                        inDeep = false
+                    }
+                    lastCmd = cmd
+                }
+            }
+        }
+        return result
+    }
 
     // ==================== 亮灭屏广播、DeepDoze Shell 与省电白名单同步 ====================
 
@@ -753,7 +863,7 @@ object BroadcastAndDozeHooks {
                 ?: return@withDozeLock dozeLifecycle.cancel()
             deepDozeAlarmListener = listener
             deepDozeAlarmToken = token
-            val triggerAt = SystemClock.elapsedRealtime() + DOZE_SCHEDULE_DELAY_MS
+            val triggerAt = SystemClock.elapsedRealtime() + DEEP_DOZE_ENTER_DELAY_MS
             val exact = runCatching {
                 am.setExact(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
@@ -812,6 +922,14 @@ object BroadcastAndDozeHooks {
             val deepEntered = state == STATE_IDLE || state == STATE_IDLE_MAINTENANCE
             if (deepEntered) {
                 Logger.alwaysWarn("深度睡眠成功")
+                if (SystemState.isGreezeReady && PrefReader.systemPrefs.freezeStats) {
+                    val observedState = state
+                    val wallMs = System.currentTimeMillis()
+                    val elapsedMs = SystemClock.elapsedRealtime()
+                    Logger.postIoTask {
+                        FreezeStatsRecorder.onDozeStateObserved(observedState, wallMs, elapsedMs)
+                    }
+                }
             } else {
                 Logger.alwaysWarn("浅睡兜底生效，下次熄屏时再尝试进入深睡")
             }

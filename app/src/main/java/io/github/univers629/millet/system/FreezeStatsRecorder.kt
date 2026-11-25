@@ -276,6 +276,14 @@ class FreezeStatsEngine(
     private var recentCount = 0
     private var activeDozeSession: ActiveDozeSession? = null
     private val dozeSessionsRing = ArrayList<DozeSessionData>(MAX_DOZE_SESSIONS)
+    private var lastBackfilledElapsedMs: Long = 0L
+    private var hasExplicitResetBaseline: Boolean = false
+
+    data class BootDozeInterval(
+        val startElapsedMs: Long,
+        val endElapsedMs: Long,
+        val maintenanceCount: Int,
+    )
 
     private var dirty = false
     private var mutationSeq = 0L
@@ -755,6 +763,89 @@ class FreezeStatsEngine(
         }
     }
 
+    /**
+     * 从 `DeviceIdleController` 内存事件缓冲按需补齐本次开机以来已结束的深睡时段。
+     * 仅填补尚未被实时 Hook 记录的空窗时段（例如模块热重载前发生的深睡），不重复累计，也不触发轮询。
+     */
+    fun backfillBootDozeIntervals(
+        intervals: List<BootDozeInterval>,
+        nowWallMs: Long = clock(),
+        nowElapsedMs: Long = elapsedClock(),
+    ): Int {
+        if (intervals.isEmpty() || !enabledProvider()) return 0
+        var added = 0
+        lock.withLock {
+            if (deferredRestore != null) return 0
+            ensureCurrentDayLocked(nowWallMs)
+            val bootWallOrigin = nowWallMs - nowElapsedMs
+            val todayKey = epochDay(nowWallMs)
+            val oldestWindowDay = todayKey - (MAX_DAYS - 1)
+            val sorted = intervals.sortedBy { it.startElapsedMs }
+
+            for (iv in sorted) {
+                val durationMs = iv.endElapsedMs - iv.startElapsedMs
+                if (durationMs < MIN_DOZE_SESSION_MS) continue
+                if (iv.endElapsedMs <= lastBackfilledElapsedMs) continue
+                val startWall = bootWallOrigin + iv.startElapsedMs
+                val endWall = bootWallOrigin + iv.endElapsedMs
+                if ((restoreHandled || hasExplicitResetBaseline) && endWall <= baselineSinceMillis) continue
+
+                val active = activeDozeSession
+                if (active != null && iv.endElapsedMs >= active.startElapsedMs - 5_000L) {
+                    lastBackfilledElapsedMs = maxOf(lastBackfilledElapsedMs, iv.endElapsedMs)
+                    continue
+                }
+                val overlapsExisting = dozeSessionsRing.any { existing ->
+                    startWall < existing.endMillis + 5_000L && endWall > existing.startMillis - 5_000L
+                }
+                if (overlapsExisting) {
+                    lastBackfilledElapsedMs = maxOf(lastBackfilledElapsedMs, iv.endElapsedMs)
+                    continue
+                }
+
+                val targetDayKey = epochDay(endWall)
+                if (targetDayKey in oldestWindowDay..todayKey) {
+                    val dayBucket = days.getOrPut(targetDayKey) { DayBucket(targetDayKey) }
+                    dayBucket.dozeSessionCount++
+                    dayBucket.dozeDurationMillis += durationMs
+                    dayBucket.dozeMaintenanceCount += iv.maintenanceCount
+                }
+                bootBucket.dozeSessionCount++
+                bootBucket.dozeDurationMillis += durationMs
+                bootBucket.dozeMaintenanceCount += iv.maintenanceCount
+
+                dozeSessionsRing.add(
+                    DozeSessionData(
+                        startMillis = startWall,
+                        endMillis = endWall,
+                        durationMillis = durationMs,
+                        maintenanceCount = iv.maintenanceCount,
+                        startBatteryPct = -1,
+                        endBatteryPct = -1,
+                        chargedDuringSession = false,
+                        topApps = emptyList(),
+                    )
+                )
+                dozeSessionsRing.sortBy { it.startMillis }
+                while (dozeSessionsRing.size > MAX_DOZE_SESSIONS) {
+                    dozeSessionsRing.removeAt(0)
+                }
+
+                if (startWall < baselineSinceMillis) baselineSinceMillis = startWall
+                if (startWall < bootSinceMillis) bootSinceMillis = startWall
+                lastBackfilledElapsedMs = maxOf(lastBackfilledElapsedMs, iv.endElapsedMs)
+                added++
+            }
+            if (added > 0) {
+                markDirtyLocked()
+            }
+        }
+        if (added > 0) {
+            triggerAsyncSaveIfDirty()
+        }
+        return added
+    }
+
     private fun recordDozeIntoScopeLocked(
         scope: ScopeBucket,
         durationMs: Long,
@@ -1132,6 +1223,8 @@ class FreezeStatsEngine(
             activeFrozenSinceByUid.clear()
             activeDozeSession = null
             dozeSessionsRing.clear()
+            lastBackfilledElapsedMs = elapsedClock()
+            hasExplicitResetBaseline = true
             screenOffSinceMillis = if (!isScreenOn && enabledProvider()) now else 0L
             for (i in recentRing.indices) {
                 recentRing[i] = null
@@ -2102,6 +2195,13 @@ object FreezeStatsRecorder {
     }
 
     fun buildSnapshot(window: StatsWindow): FreezeStatsSnapshotData {
+        if (PrefReader.systemPrefs.freezeStats) {
+            val intervals = runCatching { BroadcastAndDozeHooks.readCompletedBootDozeIntervals() }
+                .getOrDefault(emptyList())
+            if (intervals.isNotEmpty()) {
+                engine.backfillBootDozeIntervals(intervals)
+            }
+        }
         return engine.buildSnapshot(window)
     }
 

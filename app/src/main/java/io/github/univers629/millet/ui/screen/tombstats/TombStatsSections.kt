@@ -417,13 +417,14 @@ private fun DozeAttributionCard(
             return@Card
         }
 
-        val dropPerHourText = if (summary.unpluggedDurationMillis >= 180_000L) {
-            val hours = summary.unpluggedDurationMillis / 3_600_000f
-            "%.1f%%/h".format(Locale.ROOT, summary.netBatteryDropPct / hours)
-        } else if (summary.totalDurationMillis > 0L) {
-            "充电会话"
-        } else {
-            "—"
+        val dropPerHourText = when {
+            summary.unpluggedDurationMillis >= 180_000L -> {
+                val hours = summary.unpluggedDurationMillis / 3_600_000f
+                "%.1f%%/h".format(Locale.ROOT, summary.netBatteryDropPct / hours)
+            }
+            summary.unpluggedDurationMillis > 0L -> "未满3分钟"
+            summary.recentSessions.any { it.chargedDuringSession } -> "充电会话"
+            else -> "待积累"
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -468,7 +469,11 @@ private fun DozeAttributionCard(
                         color = colorScheme.onSurface,
                     )
                     Text(
-                        text = "来源: ${summary.cpuSource.label}",
+                        text = if (summary.cpuSource == io.github.univers629.millet.core.CpuStatSource.NONE) {
+                            "来源: 系统历史记录"
+                        } else {
+                            "来源: ${summary.cpuSource.label}"
+                        },
                         fontSize = 11.sp,
                         color = colorScheme.onSurfaceVariantSummary,
                         maxLines = 1,
@@ -532,7 +537,11 @@ private fun DozeAttributionCard(
                 }
             } else {
                 Text(
-                    text = "本次深睡期间未检测到 ≥100ms 的应用 CPU 增量。",
+                    text = if (summary.cpuSource == io.github.univers629.millet.core.CpuStatSource.NONE) {
+                        "历史补齐会话不含单应用 CPU 明细，后续新进入的深睡将自动统计排行。"
+                    } else {
+                        "本次深睡期间未检测到 ≥100ms 的应用 CPU 增量。"
+                    },
                     fontSize = 12.sp,
                     color = colorScheme.onSurfaceVariantSummary,
                 )

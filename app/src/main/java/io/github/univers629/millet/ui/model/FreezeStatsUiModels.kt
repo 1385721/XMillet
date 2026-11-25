@@ -126,7 +126,8 @@ data class FreezeStatsSnapshot(
             totalWakeCount == 0 &&
             interceptCount == 0 &&
             protectedCount == 0 &&
-            killBlockedCount == 0
+            killBlockedCount == 0 &&
+            dozeSummary.sessionCount == 0
 }
 
 internal fun originLabel(origin: StatsEventOrigin): String = when (origin) {

@@ -29,6 +29,8 @@ object UidCpuTimeReader {
 
     private const val CLASS_USER_SYS_READER =
         "com.android.internal.os.KernelCpuUidTimeReader\$KernelCpuUidUserSysTimeReader"
+    private const val CLASS_FREQ_READER =
+        "com.android.internal.os.KernelCpuUidTimeReader\$KernelCpuUidFreqTimeReader"
     private const val CLASS_CALLBACK =
         "com.android.internal.os.KernelCpuUidTimeReader\$Callback"
     private const val PROC_UID_CPUTIME = "/proc/uid_cputime/show_uid_stat"
@@ -38,6 +40,9 @@ object UidCpuTimeReader {
 
     @Volatile
     private var readAbsoluteMethod: java.lang.reflect.Method? = null
+
+    @Volatile
+    private var readerOutputsMillis: Boolean = false
 
     @Volatile
     private var callbackInterface: Class<*>? = null
@@ -67,17 +72,39 @@ object UidCpuTimeReader {
 
     private fun readViaKernelReader(): Map<Int, Long>? {
         if (kernelReaderUnavailable) return null
-        return runCatching {
-            val reader = readerInstance ?: run {
-                val clazz = Class.forName(CLASS_USER_SYS_READER)
+        val cbClass = runCatching {
+            callbackInterface ?: Class.forName(CLASS_CALLBACK).also { callbackInterface = it }
+        }.getOrElse {
+            kernelReaderUnavailable = true
+            return null
+        }
+        val existingReader = readerInstance
+        if (existingReader != null) {
+            return invokeKernelReader(existingReader, cbClass, readerOutputsMillis)?.takeIf { it.isNotEmpty() }
+        }
+        val candidates = listOf(CLASS_USER_SYS_READER to false, CLASS_FREQ_READER to true)
+        for ((className, outputsMs) in candidates) {
+            val instance = runCatching {
+                val clazz = Class.forName(className)
                 val ctor = clazz.getDeclaredConstructor(Boolean::class.javaPrimitiveType)
                 ctor.isAccessible = true
-                ctor.newInstance(false).also { readerInstance = it }
+                ctor.newInstance(false)
+            }.getOrNull() ?: continue
+            val map = invokeKernelReader(instance, cbClass, outputsMs)
+            if (!map.isNullOrEmpty()) {
+                readerInstance = instance
+                readerOutputsMillis = outputsMs
+                return map
             }
-            val cbClass = callbackInterface ?: Class.forName(CLASS_CALLBACK).also { callbackInterface = it }
+        }
+        kernelReaderUnavailable = true
+        return null
+    }
+
+    private fun invokeKernelReader(reader: Any, cbClass: Class<*>, outputsMillis: Boolean): Map<Int, Long>? {
+        return runCatching {
             val method = readAbsoluteMethod ?: reader.javaClass.getMethod("readAbsolute", cbClass)
                 .also { readAbsoluteMethod = it }
-
             val result = LinkedHashMap<Int, Long>()
             val loader = cbClass.classLoader ?: UidCpuTimeReader::class.java.classLoader
             val proxy = Proxy.newProxyInstance(loader, arrayOf(cbClass)) { _, m, args ->
@@ -86,8 +113,8 @@ object UidCpuTimeReader {
                     if (AppUidUtils.isManagedAppUid(uid)) {
                         val times = args[1] as? LongArray
                         if (times != null && times.isNotEmpty()) {
-                            val totalUs = times.fold(0L) { acc, v -> acc + v.coerceAtLeast(0L) }
-                            val totalMs = totalUs / 1000L
+                            val totalRaw = times.fold(0L) { acc, v -> acc + v.coerceAtLeast(0L) }
+                            val totalMs = if (outputsMillis) totalRaw else totalRaw / 1000L
                             if (totalMs > 0L) result[uid] = totalMs
                         }
                     }
@@ -96,8 +123,6 @@ object UidCpuTimeReader {
             }
             method.invoke(reader, proxy)
             result
-        }.onFailure {
-            kernelReaderUnavailable = true
         }.getOrNull()
     }
 

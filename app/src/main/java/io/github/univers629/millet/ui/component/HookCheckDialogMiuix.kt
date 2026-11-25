@@ -112,6 +112,7 @@ private val HOOK_ID_TARGET_HINTS: Map<String, String> = mapOf(
     "S23" to "GreezeManagerService#freezePids",
     "S32_CLOUD_FROZEN_WL" to "ListAppsManager#dealCloudWhiteList",
     "S38_DOZE_BECOME_ACTIVE" to "DeviceIdleController#becomeActiveLocked",
+    "S39_DOZE_STEP_IDLE" to "DeviceIdleController#stepIdleStateLocked",
 )
 
 private fun describeHookId(id: String): String {
@@ -765,3 +766,4 @@ internal fun OverallStatusHeader(
         }
     }
 }
+

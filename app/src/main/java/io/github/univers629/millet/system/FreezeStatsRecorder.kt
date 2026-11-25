@@ -9,6 +9,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import io.github.univers629.millet.core.CpuStatSource
+import io.github.univers629.millet.core.DozeAppCpuData
+import io.github.univers629.millet.core.DozeSessionData
+import io.github.univers629.millet.core.DozeSummaryData
 import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.FreezeStatsCodec
 import io.github.univers629.millet.core.StatsEventOrigin
@@ -64,7 +68,11 @@ class FreezeStatsEngine(
         const val MAX_RAW_REASONS_PER_APP = 16
         const val TOP_RAW_REASONS_LIMIT = 5
         const val MAX_UID_PKG_CACHE = 512
-            const val SOURCE_NOTE_FALLBACK = "本机缺少 dispatchThawEvent，唤醒次数由 thawUid / thawUids 推断"
+        const val MAX_DOZE_SESSIONS = 24
+        const val MAX_DOZE_APPS_PER_SCOPE = 32
+        const val MIN_DOZE_SESSION_MS = 30_000L
+        const val MIN_DOZE_UID_CPU_MS = 100L
+        const val SOURCE_NOTE_FALLBACK = "本机缺少 dispatchThawEvent，唤醒次数由 thawUid / thawUids 推断"
 
         private val WAKE_CATEGORY_COUNT = WakeCategory.entries.size
         private val INTERCEPT_RULE_COUNT = InterceptRule.entries.size
@@ -100,34 +108,49 @@ class FreezeStatsEngine(
         var protectedCount: Int = 0
         var killBlockedCount: Int = 0
         val rawReasons = HashMap<String, Int>()
+        var jitterCount: Int = 0
+        val jitterReasons = HashMap<String, Int>()
 
         fun totalActivity(): Int {
-            var sum = freezeCount + protectedCount + killBlockedCount
+            var sum = freezeCount + protectedCount + killBlockedCount + jitterCount
             for (v in wakeByCategory) sum += v
             for (v in interceptByRule) sum += v
             return sum
         }
 
         fun recordRawReason(reason: String) {
+            recordBoundedReason(rawReasons, reason)
+        }
+
+        fun recordJitterReason(reason: String) {
+            recordBoundedReason(jitterReasons, reason)
+        }
+
+        fun toTopJitterReason(): String = jitterReasons.entries
+            .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            ?.key
+            .orEmpty()
+
+        private fun recordBoundedReason(target: HashMap<String, Int>, reason: String) {
             val clean = reason.trim()
             if (clean.isEmpty()) return
-            val existing = rawReasons[clean]
+            val existing = target[clean]
             if (existing != null) {
-                rawReasons[clean] = existing + 1
-            } else if (rawReasons.size < MAX_RAW_REASONS_PER_APP) {
-                rawReasons[clean] = 1
+                target[clean] = existing + 1
+            } else if (target.size < MAX_RAW_REASONS_PER_APP) {
+                target[clean] = 1
             } else {
                 var minKey: String? = null
                 var minVal = Int.MAX_VALUE
-                for ((k, v) in rawReasons) {
+                for ((k, v) in target) {
                     if (v < minVal) {
                         minVal = v
                         minKey = k
                     }
                 }
                 if (minKey != null && minVal <= 1) {
-                    rawReasons.remove(minKey)
-                    rawReasons[clean] = 1
+                    target.remove(minKey)
+                    target[clean] = 1
                 }
             }
         }
@@ -169,6 +192,14 @@ class FreezeStatsEngine(
         var killBlockedCount: Int = 0
         var frozenMillisTotal: Long = 0L
         val apps = HashMap<Int, AppAccumulator>()
+        var dozeSessionCount: Int = 0
+        var dozeDurationMillis: Long = 0L
+        var dozeMaintenanceCount: Int = 0
+        var dozeNetBatteryDropPct: Int = 0
+        var dozeUnpluggedDurationMillis: Long = 0L
+        var dozeCpuSource: CpuStatSource = CpuStatSource.NONE
+        val dozeCpuByUid = HashMap<Int, Long>()
+        val dozeSessionHitsByUid = HashMap<Int, Int>()
 
         fun getOrCreateApp(uid: Int): AppAccumulator {
             apps[uid]?.let { return it }
@@ -196,6 +227,17 @@ class FreezeStatsEngine(
     }
 
     private class BootBucket : ScopeBucket()
+
+    private data class ActiveDozeSession(
+        val startWallMs: Long,
+        val startElapsedMs: Long,
+        val startBatteryPct: Int,
+        var chargedDuringSession: Boolean,
+        var maintenanceCount: Int,
+        var lastState: Int,
+        val startCpuSource: CpuStatSource,
+        val startCpuByUid: Map<Int, Long>,
+    )
 
     private data class DeferredRestore(
         val state: FreezeStatsCodec.PersistedStatsState?,
@@ -232,6 +274,8 @@ class FreezeStatsEngine(
     private val recentRing = arrayOfNulls<StatsRecentEventData>(MAX_RECENT_EVENTS)
     private var recentNextIdx = 0
     private var recentCount = 0
+    private var activeDozeSession: ActiveDozeSession? = null
+    private val dozeSessionsRing = ArrayList<DozeSessionData>(MAX_DOZE_SESSIONS)
 
     private var dirty = false
     private var mutationSeq = 0L
@@ -433,7 +477,7 @@ class FreezeStatsEngine(
             }
             val episode = episodeStart
             if (episode != null && now - episode in 0 until FREEZE_JITTER_MS) {
-                rollbackJitterFreezeLocked(today, uid, episode)
+                rollbackJitterFreezeLocked(today, uid, episode, reason)
                 val lastBurst = lastBurstWakeAtByUid[uid]
                 if (lastBurst != null && now - lastBurst in 0 until WAKE_BURST_WINDOW_MS) {
                     // 抖动循环仍在持续：本次唤醒并入上一个批次，不重复计数、不写最近记录。
@@ -592,6 +636,160 @@ class FreezeStatsEngine(
 
     // ==================== 快照导出与重置 ====================
 
+    fun onDozeStateObserved(
+        state: Int,
+        wallMs: Long,
+        elapsedMs: Long,
+        batteryPct: Int,
+        isPlugged: Boolean,
+        cpuSnapshotProvider: () -> Pair<CpuStatSource, Map<Int, Long>>,
+    ) {
+        if (!enabledProvider()) return
+        val isDeep = state == 5 || state == 6
+        val action = lock.withLock {
+            val active = activeDozeSession
+            when {
+                active == null && isDeep -> 1 // enter
+                active != null && isDeep -> {
+                    if (isPlugged) active.chargedDuringSession = true
+                    if (active.lastState == 5 && state == 6) active.maintenanceCount++
+                    active.lastState = state
+                    0
+                }
+                active != null && !isDeep -> 2 // exit
+                else -> 0
+            }
+        }
+        if (action == 0) return
+
+        if (action == 1) {
+            val (cpuSource, cpuMap) = runCatching(cpuSnapshotProvider)
+                .getOrDefault(CpuStatSource.NONE to emptyMap())
+            lock.withLock {
+                if (activeDozeSession == null && enabledProvider()) {
+                    activeDozeSession = ActiveDozeSession(
+                        startWallMs = wallMs,
+                        startElapsedMs = elapsedMs,
+                        startBatteryPct = batteryPct,
+                        chargedDuringSession = isPlugged,
+                        maintenanceCount = 0,
+                        lastState = state,
+                        startCpuSource = cpuSource,
+                        startCpuByUid = cpuMap,
+                    )
+                }
+            }
+            return
+        }
+
+        // action == 2: exiting deep idle
+        val (endSource, endCpuMap) = runCatching(cpuSnapshotProvider)
+            .getOrDefault(CpuStatSource.NONE to emptyMap())
+        var shouldSave = false
+        lock.withLock {
+            val closed = activeDozeSession ?: return@withLock
+            activeDozeSession = null
+            if (isPlugged) closed.chargedDuringSession = true
+            val durationMs = (elapsedMs - closed.startElapsedMs).coerceAtLeast(0L)
+            if (durationMs < MIN_DOZE_SESSION_MS) return@withLock
+
+            val effectiveWallEnd = wallMs.coerceAtLeast(closed.startWallMs + durationMs)
+            val today = ensureCurrentDayLocked(effectiveWallEnd)
+            val deltas = ArrayList<Pair<Int, Long>>()
+            val source = if (closed.startCpuSource != CpuStatSource.NONE &&
+                closed.startCpuSource == endSource
+            ) {
+                for ((uid, endCpu) in endCpuMap) {
+                    if (!isTrackableAppUid(uid)) continue
+                    val startCpu = closed.startCpuByUid[uid] ?: continue
+                    val delta = endCpu - startCpu
+                    if (delta >= MIN_DOZE_UID_CPU_MS) {
+                        deltas.add(uid to delta)
+                    }
+                }
+                endSource
+            } else {
+                CpuStatSource.NONE
+            }
+            deltas.sortByDescending { it.second }
+            val topSessionApps = deltas.take(5).map { (uid, ms) ->
+                DozeAppCpuData(
+                    uid = uid,
+                    packageName = uidToPackage[uid].orEmpty(),
+                    cpuMillis = ms,
+                    sessionCount = 1,
+                )
+            }
+            val session = DozeSessionData(
+                startMillis = closed.startWallMs,
+                endMillis = effectiveWallEnd,
+                durationMillis = durationMs,
+                maintenanceCount = closed.maintenanceCount,
+                startBatteryPct = closed.startBatteryPct,
+                endBatteryPct = batteryPct,
+                chargedDuringSession = closed.chargedDuringSession,
+                topApps = topSessionApps,
+            )
+            if (dozeSessionsRing.size >= MAX_DOZE_SESSIONS) {
+                dozeSessionsRing.removeAt(0)
+            }
+            dozeSessionsRing.add(session)
+
+            val dropPct = if (!closed.chargedDuringSession &&
+                closed.startBatteryPct in 0..100 &&
+                batteryPct in 0..100
+            ) {
+                (closed.startBatteryPct - batteryPct).coerceAtLeast(0)
+            } else {
+                0
+            }
+            val unpluggedMs = if (!closed.chargedDuringSession) durationMs else 0L
+
+            recordDozeIntoScopeLocked(today, durationMs, closed.maintenanceCount, dropPct, unpluggedMs, source, deltas)
+            recordDozeIntoScopeLocked(bootBucket, durationMs, closed.maintenanceCount, dropPct, unpluggedMs, source, deltas)
+            markDirtyLocked()
+            shouldSave = true
+        }
+        if (shouldSave) {
+            triggerAsyncSaveIfDirty()
+        }
+    }
+
+    private fun recordDozeIntoScopeLocked(
+        scope: ScopeBucket,
+        durationMs: Long,
+        maintenanceCount: Int,
+        dropPct: Int,
+        unpluggedMs: Long,
+        source: CpuStatSource,
+        deltas: List<Pair<Int, Long>>,
+    ) {
+        scope.dozeSessionCount++
+        scope.dozeDurationMillis += durationMs
+        scope.dozeMaintenanceCount += maintenanceCount
+        scope.dozeNetBatteryDropPct += dropPct
+        scope.dozeUnpluggedDurationMillis += unpluggedMs
+        if (source != CpuStatSource.NONE) {
+            scope.dozeCpuSource = source
+        }
+        for ((uid, deltaMs) in deltas) {
+            scope.dozeCpuByUid[uid] = (scope.dozeCpuByUid[uid] ?: 0L) + deltaMs
+            scope.dozeSessionHitsByUid[uid] = (scope.dozeSessionHitsByUid[uid] ?: 0) + 1
+        }
+        trimDozeScopeAppsLocked(scope)
+    }
+
+    private fun trimDozeScopeAppsLocked(scope: ScopeBucket) {
+        if (scope.dozeCpuByUid.size <= MAX_DOZE_APPS_PER_SCOPE) return
+        val keep = scope.dozeCpuByUid.entries
+            .sortedByDescending { it.value }
+            .take(MAX_DOZE_APPS_PER_SCOPE)
+            .map { it.key }
+            .toHashSet()
+        scope.dozeCpuByUid.keys.retainAll(keep)
+        scope.dozeSessionHitsByUid.keys.retainAll(keep)
+    }
+
     fun buildSnapshot(window: StatsWindow): FreezeStatsSnapshotData {
         val enabled = enabledProvider()
         val preFetchTime = statsTime()
@@ -621,6 +819,14 @@ class FreezeStatsEngine(
             val killBlockedCount: Int
             val frozenMillisTotal: Long
             val rawApps: List<RawAppExport>
+            val dozeSessionCount: Int
+            val dozeDurationMillis: Long
+            val dozeMaintenanceCount: Int
+            val dozeNetBatteryDropPct: Int
+            val dozeUnpluggedDurationMillis: Long
+            val dozeCpuSource: CpuStatSource
+            val dozeRawApps: List<DozeAppCpuData>
+            val dozeRecentSessions: List<DozeSessionData>
 
             when (window) {
                 StatsWindow.TODAY -> {
@@ -642,6 +848,13 @@ class FreezeStatsEngine(
                         killBlockedCount = today.killBlockedCount
                         frozenMillisTotal = today.frozenMillisTotal
                         rawApps = exportScopeApps(today, now - cutoffMillis)
+                        dozeSessionCount = today.dozeSessionCount
+                        dozeDurationMillis = today.dozeDurationMillis
+                        dozeMaintenanceCount = today.dozeMaintenanceCount
+                        dozeNetBatteryDropPct = today.dozeNetBatteryDropPct
+                        dozeUnpluggedDurationMillis = today.dozeUnpluggedDurationMillis
+                        dozeCpuSource = today.dozeCpuSource
+                        dozeRawApps = exportDozeScopeApps(today)
                     } else {
                         freezeCount = 0
                         screenOffWakeCount = 0
@@ -650,6 +863,13 @@ class FreezeStatsEngine(
                         killBlockedCount = 0
                         frozenMillisTotal = 0L
                         rawApps = emptyList()
+                        dozeSessionCount = 0
+                        dozeDurationMillis = 0L
+                        dozeMaintenanceCount = 0
+                        dozeNetBatteryDropPct = 0
+                        dozeUnpluggedDurationMillis = 0L
+                        dozeCpuSource = CpuStatSource.NONE
+                        dozeRawApps = emptyList()
                     }
                 }
 
@@ -670,6 +890,14 @@ class FreezeStatsEngine(
                     var prot = 0
                     var killB = 0
                     var fzMs = 0L
+                    var dzSessions = 0
+                    var dzDur = 0L
+                    var dzMaint = 0
+                    var dzDrop = 0
+                    var dzUnplugged = 0L
+                    var dzSource = CpuStatSource.NONE
+                    val dzCpuMerged = HashMap<Int, Long>()
+                    val dzHitsMerged = HashMap<Int, Int>()
                     val mergedApps = HashMap<Int, AppAccumulator>()
 
                     for (offset in 0 until MAX_DAYS) {
@@ -682,6 +910,18 @@ class FreezeStatsEngine(
                         prot += d.protectedCount
                         killB += d.killBlockedCount
                         fzMs += d.frozenMillisTotal
+                        dzSessions += d.dozeSessionCount
+                        dzDur += d.dozeDurationMillis
+                        dzMaint += d.dozeMaintenanceCount
+                        dzDrop += d.dozeNetBatteryDropPct
+                        dzUnplugged += d.dozeUnpluggedDurationMillis
+                        if (d.dozeCpuSource != CpuStatSource.NONE) dzSource = d.dozeCpuSource
+                        for ((uid, cpuMs) in d.dozeCpuByUid) {
+                            dzCpuMerged[uid] = (dzCpuMerged[uid] ?: 0L) + cpuMs
+                        }
+                        for ((uid, hits) in d.dozeSessionHitsByUid) {
+                            dzHitsMerged[uid] = (dzHitsMerged[uid] ?: 0) + hits
+                        }
 
                         for ((uid, app) in d.apps) {
                             val target = mergedApps.getOrPut(uid) { AppAccumulator(uid) }
@@ -695,8 +935,12 @@ class FreezeStatsEngine(
                             target.frozenMillis += app.frozenMillis
                             target.protectedCount += app.protectedCount
                             target.killBlockedCount += app.killBlockedCount
+                            target.jitterCount += app.jitterCount
                             for ((r, c) in app.rawReasons) {
                                 target.rawReasons[r] = (target.rawReasons[r] ?: 0) + c
+                            }
+                            for ((r, c) in app.jitterReasons) {
+                                target.jitterReasons[r] = (target.jitterReasons[r] ?: 0) + c
                             }
                         }
                     }
@@ -707,6 +951,23 @@ class FreezeStatsEngine(
                     protectedCount = prot
                     killBlockedCount = killB
                     frozenMillisTotal = fzMs
+                    dozeSessionCount = dzSessions
+                    dozeDurationMillis = dzDur
+                    dozeMaintenanceCount = dzMaint
+                    dozeNetBatteryDropPct = dzDrop
+                    dozeUnpluggedDurationMillis = dzUnplugged
+                    dozeCpuSource = dzSource
+                    dozeRawApps = dzCpuMerged.entries
+                        .sortedByDescending { it.value }
+                        .take(MAX_DOZE_APPS_PER_SCOPE)
+                        .map { (uid, ms) ->
+                            DozeAppCpuData(
+                                uid = uid,
+                                packageName = "",
+                                cpuMillis = ms,
+                                sessionCount = dzHitsMerged[uid] ?: 1,
+                            )
+                        }
                     rawApps = mergedApps.values.map { acc ->
                         RawAppExport(
                             uid = acc.uid,
@@ -718,6 +979,8 @@ class FreezeStatsEngine(
                             protectedCount = acc.protectedCount,
                             killBlockedCount = acc.killBlockedCount,
                             topRawReasons = acc.toTopRawReasons(),
+                            jitterCount = acc.jitterCount,
+                            topJitterReason = acc.toTopJitterReason(),
                         )
                     }
                 }
@@ -733,8 +996,20 @@ class FreezeStatsEngine(
                     killBlockedCount = bootBucket.killBlockedCount
                     frozenMillisTotal = bootBucket.frozenMillisTotal
                     rawApps = exportScopeApps(bootBucket, now - cutoffMillis)
+                    dozeSessionCount = bootBucket.dozeSessionCount
+                    dozeDurationMillis = bootBucket.dozeDurationMillis
+                    dozeMaintenanceCount = bootBucket.dozeMaintenanceCount
+                    dozeNetBatteryDropPct = bootBucket.dozeNetBatteryDropPct
+                    dozeUnpluggedDurationMillis = bootBucket.dozeUnpluggedDurationMillis
+                    dozeCpuSource = bootBucket.dozeCpuSource
+                    dozeRawApps = exportDozeScopeApps(bootBucket)
                 }
             }
+
+            dozeRecentSessions = dozeSessionsRing
+                .asReversed()
+                .filter { it.endMillis >= cutoffMillis }
+                .take(10)
 
             val recentList = ArrayList<StatsRecentEventData>(recentCount)
             for (offset in 0 until recentCount) {
@@ -760,6 +1035,16 @@ class FreezeStatsEngine(
                 apps = rawApps,
                 recent = recentList,
                 memoryBytes = estimateMemoryBytesLocked(),
+                dozeSummary = DozeSummaryData(
+                    sessionCount = dozeSessionCount,
+                    totalDurationMillis = dozeDurationMillis,
+                    maintenanceCount = dozeMaintenanceCount,
+                    netBatteryDropPct = dozeNetBatteryDropPct,
+                    unpluggedDurationMillis = dozeUnpluggedDurationMillis,
+                    cpuSource = dozeCpuSource,
+                    apps = dozeRawApps,
+                    recentSessions = dozeRecentSessions,
+                ),
             )
         }
 
@@ -781,6 +1066,8 @@ class FreezeStatsEngine(
                     protectedCount = raw.protectedCount,
                     killBlockedCount = raw.killBlockedCount,
                     topRawReasons = raw.topRawReasons,
+                    jitterCount = raw.jitterCount,
+                    topJitterReason = raw.topJitterReason,
                 )
             }
             .sortedWith(
@@ -796,6 +1083,19 @@ class FreezeStatsEngine(
                 ev.copy(packageName = resolveSnapshotPackage(ev.uid))
             }
         }
+
+        val resolvedDozeSummary = rawCopy.dozeSummary.copy(
+            apps = rawCopy.dozeSummary.apps.map { app ->
+                app.copy(packageName = resolveSnapshotPackage(app.uid))
+            },
+            recentSessions = rawCopy.dozeSummary.recentSessions.map { session ->
+                session.copy(
+                    topApps = session.topApps.map { app ->
+                        app.copy(packageName = resolveSnapshotPackage(app.uid))
+                    }
+                )
+            },
+        )
 
         val sourceNote = if (dispatchActive) null else SOURCE_NOTE_FALLBACK
 
@@ -817,6 +1117,7 @@ class FreezeStatsEngine(
             recent = resolvedRecent,
             memoryBytes = rawCopy.memoryBytes,
             sourceNote = sourceNote,
+            dozeSummary = resolvedDozeSummary,
         )
     }
 
@@ -829,6 +1130,8 @@ class FreezeStatsEngine(
             days[lastDayKey] = DayBucket(lastDayKey)
             bootBucket = BootBucket()
             activeFrozenSinceByUid.clear()
+            activeDozeSession = null
+            dozeSessionsRing.clear()
             screenOffSinceMillis = if (!isScreenOn && enabledProvider()) now else 0L
             for (i in recentRing.indices) {
                 recentRing[i] = null
@@ -999,6 +1302,7 @@ class FreezeStatsEngine(
             app.frozenMillis += sourceApp.frozenMillis
             app.protectedCount += sourceApp.protectedCount
             app.killBlockedCount += sourceApp.killBlockedCount
+            app.jitterCount += sourceApp.jitterCount
             for (i in 0 until WAKE_CATEGORY_COUNT) app.wakeByCategory[i] += sourceApp.wakeByCategory[i]
             for (i in 0 until INTERCEPT_RULE_COUNT) app.interceptByRule[i] += sourceApp.interceptByRule[i]
             for ((reason, count) in sourceApp.rawReasons) {
@@ -1006,7 +1310,25 @@ class FreezeStatsEngine(
                     app.rawReasons[reason] = (app.rawReasons[reason] ?: 0) + count
                 }
             }
+            for ((reason, count) in sourceApp.jitterReasons) {
+                if (reason in app.jitterReasons || app.jitterReasons.size < MAX_RAW_REASONS_PER_APP) {
+                    app.jitterReasons[reason] = (app.jitterReasons[reason] ?: 0) + count
+                }
+            }
         }
+        target.dozeSessionCount += source.dozeSessionCount
+        target.dozeDurationMillis += source.dozeDurationMillis
+        target.dozeMaintenanceCount += source.dozeMaintenanceCount
+        target.dozeNetBatteryDropPct += source.dozeNetBatteryDropPct
+        target.dozeUnpluggedDurationMillis += source.dozeUnpluggedDurationMillis
+        if (source.dozeCpuSource != CpuStatSource.NONE) target.dozeCpuSource = source.dozeCpuSource
+        for ((uid, ms) in source.dozeCpuByUid) {
+            target.dozeCpuByUid[uid] = (target.dozeCpuByUid[uid] ?: 0L) + ms
+        }
+        for ((uid, hits) in source.dozeSessionHitsByUid) {
+            target.dozeSessionHitsByUid[uid] = (target.dozeSessionHitsByUid[uid] ?: 0) + hits
+        }
+        trimDozeScopeAppsLocked(target)
     }
 
     private fun triggerAsyncSaveIfDirty() {
@@ -1069,6 +1391,7 @@ class FreezeStatsEngine(
                 hourlyScreenOnWakes = d.hourlyScreenOnWakes.copyOf(),
                 hourlyScreenOffWakes = d.hourlyScreenOffWakes.copyOf(),
                 apps = d.apps.values.map { toPersistedApp(it) },
+                doze = toPersistedDozeScope(d),
             )
         }
 
@@ -1082,6 +1405,7 @@ class FreezeStatsEngine(
             wakeByCategory = intArrayToWakeMap(bootBucket.wakeByCategory),
             interceptByRule = intArrayToInterceptMap(bootBucket.interceptByRule),
             apps = bootBucket.apps.values.map { toPersistedApp(it) },
+            doze = toPersistedDozeScope(bootBucket),
         )
 
         return FreezeStatsCodec.PersistedStatsState(
@@ -1095,8 +1419,33 @@ class FreezeStatsEngine(
             days = sortedDays,
             activeFrozenSinceByUid = LinkedHashMap(activeFrozenSinceByUid),
             recent = orderedRecent,
+            dozeSessions = ArrayList(dozeSessionsRing),
         )
     }
+
+    private fun toPersistedDozeScope(scope: ScopeBucket): FreezeStatsCodec.PersistedDozeScopeData =
+        FreezeStatsCodec.PersistedDozeScopeData(
+            sessionCount = scope.dozeSessionCount,
+            totalDurationMillis = scope.dozeDurationMillis,
+            maintenanceCount = scope.dozeMaintenanceCount,
+            netBatteryDropPct = scope.dozeNetBatteryDropPct,
+            unpluggedDurationMillis = scope.dozeUnpluggedDurationMillis,
+            cpuSource = scope.dozeCpuSource,
+            apps = exportDozeScopeApps(scope),
+        )
+
+    private fun exportDozeScopeApps(scope: ScopeBucket): List<DozeAppCpuData> =
+        scope.dozeCpuByUid.entries
+            .sortedByDescending { it.value }
+            .take(MAX_DOZE_APPS_PER_SCOPE)
+            .map { (uid, cpuMs) ->
+                DozeAppCpuData(
+                    uid = uid,
+                    packageName = uidToPackage[uid].orEmpty(),
+                    cpuMillis = cpuMs,
+                    sessionCount = scope.dozeSessionHitsByUid[uid] ?: 1,
+                )
+            }
 
     private fun toPersistedApp(app: AppAccumulator): FreezeStatsCodec.PersistedAppData {
         return FreezeStatsCodec.PersistedAppData(
@@ -1109,6 +1458,8 @@ class FreezeStatsEngine(
             wakeByCategory = app.toWakeMap(),
             interceptByRule = app.toInterceptMap(),
             rawReasons = LinkedHashMap(app.rawReasons),
+            jitterCount = app.jitterCount,
+            jitterReasons = LinkedHashMap(app.jitterReasons),
         )
     }
 
@@ -1149,6 +1500,7 @@ class FreezeStatsEngine(
             for (app in d.apps) {
                 if (!populateRestoredApp(bucket, app)) droppedUntrackable = true
             }
+            populateRestoredDozeScope(bucket, d.doze)
             days[d.epochDay] = bucket
         }
         days.getOrPut(currentDayKey) { DayBucket(currentDayKey) }
@@ -1173,6 +1525,7 @@ class FreezeStatsEngine(
                 for (app in parsedBoot.apps) {
                     if (!populateRestoredApp(bootBucket, app)) droppedUntrackable = true
                 }
+                populateRestoredDozeScope(bootBucket, parsedBoot.doze)
             }
             for ((uid, since) in parsed.activeFrozenSinceByUid) {
                 if (isTrackableAppUid(uid) && since <= now) {
@@ -1204,7 +1557,32 @@ class FreezeStatsEngine(
             appendRecentLocked(ev)
         }
 
+        dozeSessionsRing.clear()
+        for (session in parsed.dozeSessions) {
+            if (session.endMillis in minRecentTime..now) {
+                if (dozeSessionsRing.size >= MAX_DOZE_SESSIONS) {
+                    dozeSessionsRing.removeAt(0)
+                }
+                dozeSessionsRing.add(session)
+            }
+        }
+
         dirty = droppedUntrackable
+    }
+
+    private fun populateRestoredDozeScope(scope: ScopeBucket, data: FreezeStatsCodec.PersistedDozeScopeData) {
+        scope.dozeSessionCount = data.sessionCount
+        scope.dozeDurationMillis = data.totalDurationMillis
+        scope.dozeMaintenanceCount = data.maintenanceCount
+        scope.dozeNetBatteryDropPct = data.netBatteryDropPct
+        scope.dozeUnpluggedDurationMillis = data.unpluggedDurationMillis
+        scope.dozeCpuSource = data.cpuSource
+        for (app in data.apps) {
+            if (!isTrackableAppUid(app.uid)) continue
+            if (app.packageName.isNotEmpty()) cachePackageName(app.uid, app.packageName)
+            scope.dozeCpuByUid[app.uid] = app.cpuMillis
+            scope.dozeSessionHitsByUid[app.uid] = app.sessionCount
+        }
     }
 
     private fun populateRestoredApp(scope: ScopeBucket, data: FreezeStatsCodec.PersistedAppData): Boolean {
@@ -1217,11 +1595,17 @@ class FreezeStatsEngine(
         acc.frozenMillis = data.frozenMillis
         acc.protectedCount = data.protectedCount
         acc.killBlockedCount = data.killBlockedCount
+        acc.jitterCount = data.jitterCount
         fillWakeArray(acc.wakeByCategory, data.wakeByCategory)
         fillInterceptArray(acc.interceptByRule, data.interceptByRule)
         for ((r, c) in data.rawReasons) {
             if (c > 0 && acc.rawReasons.size < MAX_RAW_REASONS_PER_APP) {
                 acc.rawReasons[r] = c
+            }
+        }
+        for ((r, c) in data.jitterReasons) {
+            if (c > 0 && acc.jitterReasons.size < MAX_RAW_REASONS_PER_APP) {
+                acc.jitterReasons[r] = c
             }
         }
         return true
@@ -1310,15 +1694,19 @@ class FreezeStatsEngine(
 
     /**
      * 冻结在 [FREEZE_JITTER_MS] 内就被解冻：撤销这次冻结计数和对应的最近记录，
-     * 避免把「冻一下马上被唤醒」的抖动算成一次有效冻结。
+     * 避免把「冻一下马上被唤醒」的抖动算成一次有效冻结；同时累计冻解锯齿（仰卧起坐）诊断计数。
      */
-    private fun rollbackJitterFreezeLocked(today: DayBucket, uid: Int, frozenSince: Long) {
+    private fun rollbackJitterFreezeLocked(today: DayBucket, uid: Int, frozenSince: Long, reason: String) {
         if (today.freezeCount > 0) today.freezeCount--
         val todayApp = today.getOrCreateApp(uid)
         if (todayApp.freezeCount > 0) todayApp.freezeCount--
+        todayApp.jitterCount++
+        todayApp.recordJitterReason(reason)
         if (bootBucket.freezeCount > 0) bootBucket.freezeCount--
         val bootApp = bootBucket.getOrCreateApp(uid)
         if (bootApp.freezeCount > 0) bootApp.freezeCount--
+        bootApp.jitterCount++
+        bootApp.recordJitterReason(reason)
         removeRecentFreezeLocked(uid, frozenSince)
         markDirtyLocked()
     }
@@ -1425,6 +1813,8 @@ class FreezeStatsEngine(
                 protectedCount = acc.protectedCount,
                 killBlockedCount = acc.killBlockedCount,
                 topRawReasons = acc.toTopRawReasons(),
+                jitterCount = acc.jitterCount,
+                topJitterReason = acc.toTopJitterReason(),
             )
         }
     }
@@ -1507,6 +1897,8 @@ class FreezeStatsEngine(
         val protectedCount: Int,
         val killBlockedCount: Int,
         val topRawReasons: List<Pair<String, Int>>,
+        val jitterCount: Int = 0,
+        val topJitterReason: String = "",
     )
 
     private data class RawSnapshotCopy(
@@ -1524,6 +1916,7 @@ class FreezeStatsEngine(
         val apps: List<RawAppExport>,
         val recent: List<StatsRecentEventData>,
         val memoryBytes: Long,
+        val dozeSummary: DozeSummaryData = DozeSummaryData(),
     )
 }
 
@@ -1650,6 +2043,21 @@ object FreezeStatsRecorder {
     fun getCachedPackageName(uid: Int): String? = engine.getCachedPackageName(uid)
 
     fun getCachedUidForPackage(packageName: String): Int = engine.getCachedUidForPackage(packageName)
+
+    fun onDozeStateObserved(state: Int, wallMs: Long, elapsedMs: Long) {
+        val battery = UidCpuTimeReader.readBatteryState()
+        engine.onDozeStateObserved(
+            state = state,
+            wallMs = wallMs,
+            elapsedMs = elapsedMs,
+            batteryPct = battery.levelPct,
+            isPlugged = battery.isPlugged,
+            cpuSnapshotProvider = {
+                val snap = UidCpuTimeReader.read()
+                snap.source to snap.cpuMillisByUid
+            },
+        )
+    }
 
     fun recordFreeze(
         uid: Int,

@@ -774,7 +774,7 @@ class FreezeStatsRecorderTest {
         assertEquals(3_000L, snapshot.screenOffMillis)
         assertEquals(now - 3_000L, snapshot.recent.first { it.kind == StatsEventKind.FREEZE }.timeMillis)
         assertTrue(engine.saveSync())
-        assertTrue(storage.readText().startsWith("v2"))
+        assertTrue(storage.readText().startsWith("v3"))
     }
 
     @Test

@@ -32,10 +32,10 @@ object FreezeStatsCodec {
     const val VERSION = "v1"
 
     /**
-     * 磁盘持久化协议版本。1.2.1 及更早版本的冻结/唤醒口径与当前实现不同（存在重复计数），
-     * v2 起旧文件会被整体视为无效并重新开始，避免把旧口径的历史带进新版本。
+     * 磁盘持久化协议版本。v3 起加入 Doze 深度睡眠会话归因与 <10s 冻解锯齿统计，
+     * 旧格式文件自动重建以保持字段与口径一致。
      */
-    const val STORAGE_VERSION = "v2"
+    const val STORAGE_VERSION = "v3"
 
     private const val MIN_META_FIELDS = 16
     private const val MIN_BUCKET_FIELDS = 4
@@ -51,6 +51,16 @@ object FreezeStatsCodec {
 
     // ==================== 持久化中间模型 ====================
 
+    data class PersistedDozeScopeData(
+        val sessionCount: Int = 0,
+        val totalDurationMillis: Long = 0L,
+        val maintenanceCount: Int = 0,
+        val netBatteryDropPct: Int = 0,
+        val unpluggedDurationMillis: Long = 0L,
+        val cpuSource: CpuStatSource = CpuStatSource.NONE,
+        val apps: List<DozeAppCpuData> = emptyList(),
+    )
+
     data class PersistedAppData(
         val uid: Int,
         val packageName: String,
@@ -61,6 +71,8 @@ object FreezeStatsCodec {
         val wakeByCategory: Map<WakeCategory, Int>,
         val interceptByRule: Map<InterceptRule, Int>,
         val rawReasons: Map<String, Int>,
+        val jitterCount: Int = 0,
+        val jitterReasons: Map<String, Int> = emptyMap(),
     )
 
     data class PersistedBootData(
@@ -73,6 +85,7 @@ object FreezeStatsCodec {
         val wakeByCategory: Map<WakeCategory, Int>,
         val interceptByRule: Map<InterceptRule, Int>,
         val apps: List<PersistedAppData>,
+        val doze: PersistedDozeScopeData = PersistedDozeScopeData(),
     )
 
     data class PersistedDayData(
@@ -88,6 +101,7 @@ object FreezeStatsCodec {
         val hourlyScreenOnWakes: IntArray,
         val hourlyScreenOffWakes: IntArray,
         val apps: List<PersistedAppData>,
+        val doze: PersistedDozeScopeData = PersistedDozeScopeData(),
     )
 
     data class PersistedStatsState(
@@ -101,6 +115,7 @@ object FreezeStatsCodec {
         val days: List<PersistedDayData>,
         val activeFrozenSinceByUid: Map<Int, Long>,
         val recent: List<StatsRecentEventData>,
+        val dozeSessions: List<DozeSessionData> = emptyList(),
     )
 
     // ==================== IPC 快照编解码 ====================
@@ -145,8 +160,42 @@ object FreezeStatsCodec {
                 .append(app.killBlockedCount).append('|')
                 .append(encodeWakeMap(app.wakeByCategory)).append('|')
                 .append(encodeInterceptMap(app.interceptByRule)).append('|')
-                .append(encodeReasonList(app.topRawReasons))
+                .append(encodeReasonList(app.topRawReasons)).append('|')
+                .append(app.jitterCount).append('|')
+                .append(escape(app.topJitterReason))
                 .append('\n')
+        }
+
+        val doze = snapshot.dozeSummary
+        if (doze.sessionCount > 0 || doze.apps.isNotEmpty() || doze.recentSessions.isNotEmpty()) {
+            sb.append("DZM|")
+                .append(doze.sessionCount).append('|')
+                .append(doze.totalDurationMillis).append('|')
+                .append(doze.maintenanceCount).append('|')
+                .append(doze.netBatteryDropPct).append('|')
+                .append(doze.unpluggedDurationMillis).append('|')
+                .append(doze.cpuSource.wireKey)
+                .append('\n')
+            for (app in doze.apps) {
+                sb.append("DZA|")
+                    .append(app.uid).append('|')
+                    .append(escape(app.packageName)).append('|')
+                    .append(app.cpuMillis).append('|')
+                    .append(app.sessionCount)
+                    .append('\n')
+            }
+            for (session in doze.recentSessions) {
+                sb.append("DZS|")
+                    .append(session.startMillis).append('|')
+                    .append(session.endMillis).append('|')
+                    .append(session.durationMillis).append('|')
+                    .append(session.maintenanceCount).append('|')
+                    .append(session.startBatteryPct).append('|')
+                    .append(session.endBatteryPct).append('|')
+                    .append(if (session.chargedDuringSession) '1' else '0').append('|')
+                    .append(encodeDozeSessionApps(session.topApps))
+                    .append('\n')
+            }
         }
 
         for (event in snapshot.recent) {
@@ -173,6 +222,9 @@ object FreezeStatsCodec {
         val buckets = ArrayList<StatsTimeBucket>()
         val apps = ArrayList<AppFreezeStatsData>()
         val recent = ArrayList<StatsRecentEventData>()
+        var dozeMeta: DozeMetaHeader? = null
+        val dozeApps = ArrayList<DozeAppCpuData>()
+        val dozeSessions = ArrayList<DozeSessionData>()
 
         while (lines.hasNext()) {
             val line = lines.next()
@@ -185,10 +237,29 @@ object FreezeStatsCodec {
                 "B" -> parseBucketLine(parts)?.let { buckets.add(it) }
                 "A" -> parseAppLine(parts)?.let { apps.add(it) }
                 "R" -> parseRecentLine(parts)?.let { recent.add(it) }
+                "DZM" -> if (dozeMeta == null) {
+                    dozeMeta = parseDozeMetaLine(parts)
+                }
+                "DZA" -> parseDozeAppLine(parts)?.let { dozeApps.add(it) }
+                "DZS" -> parseDozeSessionLine(parts)?.let { dozeSessions.add(it) }
             }
         }
 
         val parsedMeta = meta ?: return null
+        val dozeSummary = if (dozeMeta != null) {
+            DozeSummaryData(
+                sessionCount = dozeMeta.sessionCount,
+                totalDurationMillis = dozeMeta.totalDurationMillis,
+                maintenanceCount = dozeMeta.maintenanceCount,
+                netBatteryDropPct = dozeMeta.netBatteryDropPct,
+                unpluggedDurationMillis = dozeMeta.unpluggedDurationMillis,
+                cpuSource = dozeMeta.cpuSource,
+                apps = dozeApps,
+                recentSessions = dozeSessions,
+            )
+        } else {
+            DozeSummaryData()
+        }
         return FreezeStatsSnapshotData(
             window = parsedMeta.window,
             enabled = parsedMeta.enabled,
@@ -207,6 +278,7 @@ object FreezeStatsCodec {
             recent = recent,
             memoryBytes = parsedMeta.memoryBytes,
             sourceNote = parsedMeta.sourceNote,
+            dozeSummary = dozeSummary,
         )
     }
 
@@ -247,8 +319,28 @@ object FreezeStatsCodec {
                     .append(app.killBlockedCount).append('|')
                     .append(encodeWakeMap(app.wakeByCategory)).append('|')
                     .append(encodeInterceptMap(app.interceptByRule)).append('|')
-                    .append(encodeStringCountMap(app.rawReasons))
+                    .append(encodeStringCountMap(app.rawReasons)).append('|')
+                    .append(app.jitterCount).append('|')
+                    .append(encodeStringCountMap(app.jitterReasons))
                     .append('\n')
+            }
+            if (boot.doze.sessionCount > 0 || boot.doze.apps.isNotEmpty()) {
+                sb.append("BDZ|")
+                    .append(boot.doze.sessionCount).append('|')
+                    .append(boot.doze.totalDurationMillis).append('|')
+                    .append(boot.doze.maintenanceCount).append('|')
+                    .append(boot.doze.netBatteryDropPct).append('|')
+                    .append(boot.doze.unpluggedDurationMillis).append('|')
+                    .append(boot.doze.cpuSource.wireKey)
+                    .append('\n')
+                for (app in boot.doze.apps) {
+                    sb.append("BDA|")
+                        .append(app.uid).append('|')
+                        .append(escape(app.packageName)).append('|')
+                        .append(app.cpuMillis).append('|')
+                        .append(app.sessionCount)
+                        .append('\n')
+                }
             }
         }
 
@@ -278,9 +370,44 @@ object FreezeStatsCodec {
                     .append(app.killBlockedCount).append('|')
                     .append(encodeWakeMap(app.wakeByCategory)).append('|')
                     .append(encodeInterceptMap(app.interceptByRule)).append('|')
-                    .append(encodeStringCountMap(app.rawReasons))
+                    .append(encodeStringCountMap(app.rawReasons)).append('|')
+                    .append(app.jitterCount).append('|')
+                    .append(encodeStringCountMap(app.jitterReasons))
                     .append('\n')
             }
+            if (day.doze.sessionCount > 0 || day.doze.apps.isNotEmpty()) {
+                sb.append("DDZ|")
+                    .append(day.epochDay).append('|')
+                    .append(day.doze.sessionCount).append('|')
+                    .append(day.doze.totalDurationMillis).append('|')
+                    .append(day.doze.maintenanceCount).append('|')
+                    .append(day.doze.netBatteryDropPct).append('|')
+                    .append(day.doze.unpluggedDurationMillis).append('|')
+                    .append(day.doze.cpuSource.wireKey)
+                    .append('\n')
+                for (app in day.doze.apps) {
+                    sb.append("DDA|")
+                        .append(day.epochDay).append('|')
+                        .append(app.uid).append('|')
+                        .append(escape(app.packageName)).append('|')
+                        .append(app.cpuMillis).append('|')
+                        .append(app.sessionCount)
+                        .append('\n')
+                }
+            }
+        }
+
+        for (session in state.dozeSessions) {
+            sb.append("DS|")
+                .append(session.startMillis).append('|')
+                .append(session.endMillis).append('|')
+                .append(session.durationMillis).append('|')
+                .append(session.maintenanceCount).append('|')
+                .append(session.startBatteryPct).append('|')
+                .append(session.endBatteryPct).append('|')
+                .append(if (session.chargedDuringSession) '1' else '0').append('|')
+                .append(encodeDozeSessionApps(session.topApps))
+                .append('\n')
         }
 
         for ((uid, sinceMs) in state.activeFrozenSinceByUid) {
@@ -308,13 +435,18 @@ object FreezeStatsCodec {
                 break
             }
         }
-        if (header != STORAGE_VERSION) return null
+        if (header != STORAGE_VERSION && header != "v2") return null
 
         var storageMeta: StorageMeta? = null
         var bootTotal: BootTotalParts? = null
         val bootApps = ArrayList<PersistedAppData>()
+        var bootDozeMeta: DozeMetaHeader? = null
+        val bootDozeApps = ArrayList<DozeAppCpuData>()
         val dayHeaders = LinkedHashMap<Long, DayHeaderParts>()
         val dayAppsByDay = LinkedHashMap<Long, MutableList<PersistedAppData>>()
+        val dayDozeMetaByDay = LinkedHashMap<Long, DozeMetaHeader>()
+        val dayDozeAppsByDay = LinkedHashMap<Long, MutableList<DozeAppCpuData>>()
+        val dozeSessions = ArrayList<DozeSessionData>()
         val activeFrozen = LinkedHashMap<Int, Long>()
         val recent = ArrayList<StatsRecentEventData>()
 
@@ -330,12 +462,23 @@ object FreezeStatsCodec {
                     bootTotal = parseBootTotal(parts)
                 }
                 "BA" -> parseStorageBootApp(parts)?.let { bootApps.add(it) }
+                "BDZ" -> if (bootDozeMeta == null) {
+                    bootDozeMeta = parseDozeMetaLine(parts)
+                }
+                "BDA" -> parseDozeAppLine(parts)?.let { bootDozeApps.add(it) }
                 "D" -> parseStorageDayHeader(parts)?.let { dh ->
                     dayHeaders[dh.epochDay] = dh
                 }
                 "DA" -> parseStorageDayApp(parts)?.let { (epochDay, app) ->
                     dayAppsByDay.getOrPut(epochDay) { ArrayList() }.add(app)
                 }
+                "DDZ" -> parseDayDozeMetaLine(parts)?.let { (epochDay, header) ->
+                    dayDozeMetaByDay[epochDay] = header
+                }
+                "DDA" -> parseDayDozeAppLine(parts)?.let { (epochDay, app) ->
+                    dayDozeAppsByDay.getOrPut(epochDay) { ArrayList() }.add(app)
+                }
+                "DS" -> parseDozeSessionLine(parts)?.let { dozeSessions.add(it) }
                 "F" -> {
                     if (parts.size >= MIN_STORAGE_FROZEN_FIELDS) {
                         val uid = parts[1].toIntOrNull()
@@ -361,10 +504,20 @@ object FreezeStatsCodec {
                 wakeByCategory = bt.wakeByCategory,
                 interceptByRule = bt.interceptByRule,
                 apps = bootApps,
+                doze = PersistedDozeScopeData(
+                    sessionCount = bootDozeMeta?.sessionCount ?: 0,
+                    totalDurationMillis = bootDozeMeta?.totalDurationMillis ?: 0L,
+                    maintenanceCount = bootDozeMeta?.maintenanceCount ?: 0,
+                    netBatteryDropPct = bootDozeMeta?.netBatteryDropPct ?: 0,
+                    unpluggedDurationMillis = bootDozeMeta?.unpluggedDurationMillis ?: 0L,
+                    cpuSource = bootDozeMeta?.cpuSource ?: CpuStatSource.NONE,
+                    apps = bootDozeApps,
+                ),
             )
         }
 
         val days = dayHeaders.values.map { dh ->
+            val dDoze = dayDozeMetaByDay[dh.epochDay]
             PersistedDayData(
                 epochDay = dh.epochDay,
                 freezeCount = dh.freezeCount,
@@ -378,6 +531,15 @@ object FreezeStatsCodec {
                 hourlyScreenOnWakes = dh.hourlyOn,
                 hourlyScreenOffWakes = dh.hourlyOff,
                 apps = dayAppsByDay[dh.epochDay].orEmpty(),
+                doze = PersistedDozeScopeData(
+                    sessionCount = dDoze?.sessionCount ?: 0,
+                    totalDurationMillis = dDoze?.totalDurationMillis ?: 0L,
+                    maintenanceCount = dDoze?.maintenanceCount ?: 0,
+                    netBatteryDropPct = dDoze?.netBatteryDropPct ?: 0,
+                    unpluggedDurationMillis = dDoze?.unpluggedDurationMillis ?: 0L,
+                    cpuSource = dDoze?.cpuSource ?: CpuStatSource.NONE,
+                    apps = dayDozeAppsByDay[dh.epochDay].orEmpty(),
+                ),
             )
         }
 
@@ -392,6 +554,7 @@ object FreezeStatsCodec {
             days = days,
             activeFrozenSinceByUid = activeFrozen,
             recent = recent,
+            dozeSessions = dozeSessions,
         )
     }
 
@@ -510,6 +673,8 @@ object FreezeStatsCodec {
         val wakeMap = decodeWakeMap(parts[8])
         val interceptMap = decodeInterceptMap(parts[9])
         val reasons = decodeReasonList(parts[10])
+        val jitterCount = parts.getOrNull(11)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val topJitterReason = parts.getOrNull(12)?.let(::unescape).orEmpty()
         return AppFreezeStatsData(
             uid = uid,
             packageName = pkg,
@@ -521,6 +686,8 @@ object FreezeStatsCodec {
             protectedCount = protectedCount,
             killBlockedCount = killBlockedCount,
             topRawReasons = reasons,
+            jitterCount = jitterCount,
+            topJitterReason = topJitterReason,
         )
     }
 
@@ -588,6 +755,8 @@ object FreezeStatsCodec {
         val wakeMap = decodeWakeMap(parts[7])
         val interceptMap = decodeInterceptMap(parts[8])
         val rawReasons = decodeStringCountMap(parts[9])
+        val jitterCount = parts.getOrNull(10)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val jitterReasons = parts.getOrNull(11)?.let(::decodeStringCountMap).orEmpty()
         return PersistedAppData(
             uid = uid,
             packageName = pkg,
@@ -598,6 +767,8 @@ object FreezeStatsCodec {
             wakeByCategory = wakeMap,
             interceptByRule = interceptMap,
             rawReasons = rawReasons,
+            jitterCount = jitterCount,
+            jitterReasons = jitterReasons,
         )
     }
 
@@ -641,6 +812,8 @@ object FreezeStatsCodec {
         val wakeMap = decodeWakeMap(parts[8])
         val interceptMap = decodeInterceptMap(parts[9])
         val rawReasons = decodeStringCountMap(parts[10])
+        val jitterCount = parts.getOrNull(11)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val jitterReasons = parts.getOrNull(12)?.let(::decodeStringCountMap).orEmpty()
         return epochDay to PersistedAppData(
             uid = uid,
             packageName = pkg,
@@ -651,6 +824,101 @@ object FreezeStatsCodec {
             wakeByCategory = wakeMap,
             interceptByRule = interceptMap,
             rawReasons = rawReasons,
+            jitterCount = jitterCount,
+            jitterReasons = jitterReasons,
+        )
+    }
+
+    private data class DozeMetaHeader(
+        val sessionCount: Int,
+        val totalDurationMillis: Long,
+        val maintenanceCount: Int,
+        val netBatteryDropPct: Int,
+        val unpluggedDurationMillis: Long,
+        val cpuSource: CpuStatSource,
+    )
+
+    private fun parseDozeMetaLine(parts: List<String>): DozeMetaHeader? {
+        if (parts.size < 7) return null
+        return DozeMetaHeader(
+            sessionCount = parts[1].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            totalDurationMillis = parts[2].toLongOrNull()?.coerceAtLeast(0L) ?: return null,
+            maintenanceCount = parts[3].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            netBatteryDropPct = parts[4].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            unpluggedDurationMillis = parts[5].toLongOrNull()?.coerceAtLeast(0L) ?: return null,
+            cpuSource = CpuStatSource.fromWireKey(parts[6]),
+        )
+    }
+
+    private fun parseDayDozeMetaLine(parts: List<String>): Pair<Long, DozeMetaHeader>? {
+        if (parts.size < 8) return null
+        val epochDay = parts[1].toLongOrNull() ?: return null
+        val header = DozeMetaHeader(
+            sessionCount = parts[2].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            totalDurationMillis = parts[3].toLongOrNull()?.coerceAtLeast(0L) ?: return null,
+            maintenanceCount = parts[4].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            netBatteryDropPct = parts[5].toIntOrNull()?.coerceAtLeast(0) ?: return null,
+            unpluggedDurationMillis = parts[6].toLongOrNull()?.coerceAtLeast(0L) ?: return null,
+            cpuSource = CpuStatSource.fromWireKey(parts[7]),
+        )
+        return epochDay to header
+    }
+
+    private fun parseDozeAppLine(parts: List<String>): DozeAppCpuData? {
+        if (parts.size < 5) return null
+        val uid = parts[1].toIntOrNull() ?: return null
+        val pkg = unescape(parts[2])
+        val cpuMs = parts[3].toLongOrNull()?.coerceAtLeast(0L) ?: return null
+        val hits = parts[4].toIntOrNull()?.coerceAtLeast(0) ?: return null
+        return DozeAppCpuData(uid = uid, packageName = pkg, cpuMillis = cpuMs, sessionCount = hits)
+    }
+
+    private fun parseDayDozeAppLine(parts: List<String>): Pair<Long, DozeAppCpuData>? {
+        if (parts.size < 6) return null
+        val epochDay = parts[1].toLongOrNull() ?: return null
+        val uid = parts[2].toIntOrNull() ?: return null
+        val pkg = unescape(parts[3])
+        val cpuMs = parts[4].toLongOrNull()?.coerceAtLeast(0L) ?: return null
+        val hits = parts[5].toIntOrNull()?.coerceAtLeast(0) ?: return null
+        return epochDay to DozeAppCpuData(uid = uid, packageName = pkg, cpuMillis = cpuMs, sessionCount = hits)
+    }
+
+    private fun encodeDozeSessionApps(apps: List<DozeAppCpuData>): String {
+        if (apps.isEmpty()) return ""
+        return apps.joinToString(";") { "${it.uid},${escape(it.packageName)},${it.cpuMillis},${it.sessionCount}" }
+    }
+
+    private fun parseDozeSessionLine(parts: List<String>): DozeSessionData? {
+        if (parts.size < 9) return null
+        val startMs = parts[1].toLongOrNull() ?: return null
+        val endMs = parts[2].toLongOrNull() ?: return null
+        val durMs = parts[3].toLongOrNull()?.coerceAtLeast(0L) ?: return null
+        val maint = parts[4].toIntOrNull()?.coerceAtLeast(0) ?: return null
+        val startBat = parts[5].toIntOrNull() ?: -1
+        val endBat = parts[6].toIntOrNull() ?: -1
+        val charged = parts[7] == "1"
+        val topApps = if (parts[8].isEmpty()) {
+            emptyList()
+        } else {
+            parts[8].split(';').mapNotNull { seg ->
+                val f = seg.split(',')
+                if (f.size < 4) return@mapNotNull null
+                val uid = f[0].toIntOrNull() ?: return@mapNotNull null
+                val pkg = unescape(f[1])
+                val cpuMs = f[2].toLongOrNull()?.coerceAtLeast(0L) ?: return@mapNotNull null
+                val hits = f[3].toIntOrNull()?.coerceAtLeast(0) ?: return@mapNotNull null
+                DozeAppCpuData(uid = uid, packageName = pkg, cpuMillis = cpuMs, sessionCount = hits)
+            }
+        }
+        return DozeSessionData(
+            startMillis = startMs,
+            endMillis = endMs,
+            durationMillis = durMs,
+            maintenanceCount = maint,
+            startBatteryPct = startBat,
+            endBatteryPct = endBat,
+            chargedDuringSession = charged,
+            topApps = topApps,
         )
     }
 

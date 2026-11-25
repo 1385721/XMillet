@@ -128,6 +128,11 @@ object BroadcastAndDozeHooks {
             cancelDeepDozeAlarmLocked()
             releaseDeepDozeLocked("reload")
         }
+        val reloadWallMs = System.currentTimeMillis()
+        val reloadElapsedMs = SystemClock.elapsedRealtime()
+        Logger.postIoTask {
+            FreezeStatsRecorder.onDozeStateObserved(0, reloadWallMs, reloadElapsedMs)
+        }
         val screenCtx: Context?
         val scrReceiver: BroadcastReceiver?
         val batCtx: Context?
@@ -436,6 +441,13 @@ object BroadcastAndDozeHooks {
                 withDozeLock {
                     dozeLifecycle.cancelPendingForIdle()
                     cancelDeepDozeAlarmLocked()
+                }
+            }
+            if (SystemState.isGreezeReady && prefs.freezeStats) {
+                val wallMs = System.currentTimeMillis()
+                val elapsedMs = SystemClock.elapsedRealtime()
+                Logger.postIoTask {
+                    FreezeStatsRecorder.onDozeStateObserved(state, wallMs, elapsedMs)
                 }
             }
 

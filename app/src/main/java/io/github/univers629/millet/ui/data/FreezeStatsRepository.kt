@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.util.LruCache
+import io.github.univers629.millet.core.CpuStatSource
 import io.github.univers629.millet.core.FreezeStatsSnapshotData
 import io.github.univers629.millet.core.InterceptRule
 import io.github.univers629.millet.core.StatsEventKind
@@ -14,6 +15,9 @@ import io.github.univers629.millet.ipc.MilletIpcContract
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.model.AppFreezeStats
 import io.github.univers629.millet.ui.model.AppIconSource
+import io.github.univers629.millet.ui.model.DozeAppCpuUiModel
+import io.github.univers629.millet.ui.model.DozeSessionUiModel
+import io.github.univers629.millet.ui.model.DozeSummaryUiModel
 import io.github.univers629.millet.ui.model.FreezeStatsSnapshot
 import io.github.univers629.millet.ui.model.StatsLoadState
 import io.github.univers629.millet.ui.model.StatsRecentEvent
@@ -182,7 +186,9 @@ object FreezeStatsRepository {
     /** 将系统服务返回的纯 Kotlin 快照映射为 UI 模型并解析包名/应用名/图标 */
     fun resolveFromData(context: Context, raw: FreezeStatsSnapshotData): FreezeStatsSnapshot {
         val pm = context.packageManager
-        val packagesByUid = queryMemberPackages(raw.apps.map { it.uid } + raw.recent.map { it.uid })
+        val packagesByUid = queryMemberPackages(
+            raw.apps.map { it.uid } + raw.recent.map { it.uid } + raw.dozeSummary.apps.map { it.uid }
+        )
         val metadata = HashMap<Int, ResolvedAppMeta>()
         fun metaFor(uid: Int, pkg: String): ResolvedAppMeta = metadata.getOrPut(uid) {
             resolvePackage(pm, uid, pkg, packagesByUid[uid])
@@ -213,6 +219,8 @@ object FreezeStatsRepository {
                     protectedCount = a.protectedCount,
                     killBlockedCount = a.killBlockedCount,
                     topRawReasons = a.topRawReasons,
+                    jitterCount = a.jitterCount,
+                    topJitterReason = a.topJitterReason,
                     label = meta.label,
                     iconSource = meta.iconSource,
                     isSystem = meta.isSystem,
@@ -241,6 +249,53 @@ object FreezeStatsRepository {
             memoryBytes = raw.memoryBytes,
             sourceNote = raw.sourceNote,
             isSample = false,
+            dozeSummary = DozeSummaryUiModel(
+                sessionCount = raw.dozeSummary.sessionCount,
+                totalDurationMillis = raw.dozeSummary.totalDurationMillis,
+                maintenanceCount = raw.dozeSummary.maintenanceCount,
+                netBatteryDropPct = raw.dozeSummary.netBatteryDropPct,
+                unpluggedDurationMillis = raw.dozeSummary.unpluggedDurationMillis,
+                cpuSource = raw.dozeSummary.cpuSource,
+                apps = raw.dozeSummary.apps.map { app ->
+                    val meta = metaFor(app.uid, app.packageName)
+                    DozeAppCpuUiModel(
+                        uid = app.uid,
+                        packageName = meta.packageName,
+                        cpuMillis = app.cpuMillis,
+                        sessionCount = app.sessionCount,
+                        label = meta.label,
+                        iconSource = meta.iconSource,
+                        isSystem = meta.isSystem,
+                        isDualApp = meta.isDualApp,
+                        members = meta.members,
+                    )
+                },
+                recentSessions = raw.dozeSummary.recentSessions.map { s ->
+                    DozeSessionUiModel(
+                        startMillis = s.startMillis,
+                        endMillis = s.endMillis,
+                        durationMillis = s.durationMillis,
+                        maintenanceCount = s.maintenanceCount,
+                        startBatteryPct = s.startBatteryPct,
+                        endBatteryPct = s.endBatteryPct,
+                        chargedDuringSession = s.chargedDuringSession,
+                        topApps = s.topApps.map { app ->
+                            val meta = metaFor(app.uid, app.packageName)
+                            DozeAppCpuUiModel(
+                                uid = app.uid,
+                                packageName = meta.packageName,
+                                cpuMillis = app.cpuMillis,
+                                sessionCount = app.sessionCount,
+                                label = meta.label,
+                                iconSource = meta.iconSource,
+                                isSystem = meta.isSystem,
+                                isDualApp = meta.isDualApp,
+                                members = meta.members,
+                            )
+                        },
+                    )
+                },
+            ),
         )
     }
 
@@ -248,7 +303,10 @@ object FreezeStatsRepository {
     fun resolveApps(context: Context, snapshot: FreezeStatsSnapshot): FreezeStatsSnapshot {
         val pm = context.packageManager
         val packagesByUid = if (snapshot.isSample) emptyMap() else {
-            queryMemberPackages(snapshot.apps.map { it.uid } + snapshot.recent.map { it.uid })
+            queryMemberPackages(
+                snapshot.apps.map { it.uid } + snapshot.recent.map { it.uid } +
+                    snapshot.dozeSummary.apps.map { it.uid }
+            )
         }
         val metadata = HashMap<Int, ResolvedAppMeta>()
         fun metaFor(uid: Int, pkg: String): ResolvedAppMeta = metadata.getOrPut(uid) {
@@ -277,6 +335,34 @@ object FreezeStatsRepository {
                     members = meta.members,
                 )
             },
+            dozeSummary = snapshot.dozeSummary.copy(
+                apps = snapshot.dozeSummary.apps.map { app ->
+                    val meta = metaFor(app.uid, app.packageName)
+                    app.copy(
+                        packageName = meta.packageName,
+                        label = meta.label,
+                        iconSource = meta.iconSource,
+                        isSystem = meta.isSystem,
+                        isDualApp = meta.isDualApp,
+                        members = meta.members,
+                    )
+                },
+                recentSessions = snapshot.dozeSummary.recentSessions.map { s ->
+                    s.copy(
+                        topApps = s.topApps.map { app ->
+                            val meta = metaFor(app.uid, app.packageName)
+                            app.copy(
+                                packageName = meta.packageName,
+                                label = meta.label,
+                                iconSource = meta.iconSource,
+                                isSystem = meta.isSystem,
+                                isDualApp = meta.isDualApp,
+                                members = meta.members,
+                            )
+                        },
+                    )
+                },
+            ),
         )
     }
 }
@@ -324,6 +410,8 @@ private object FreezeStatsSampleData {
                 protectedCount = if (rnd.nextInt(5) == 0) rnd.nextInt(1, 9) else 0,
                 killBlockedCount = rnd.nextInt(0, 4),
                 topRawReasons = listOf("PACKET" to rnd.nextInt(10, 90), "Sync Binder4" to rnd.nextInt(5, 40), "broadcast" to rnd.nextInt(1, 20)),
+                jitterCount = if (i < 3) rnd.nextInt(2, 12) * scale else 0,
+                topJitterReason = if (i == 0) "PACKET" else if (i < 3) "Sync Binder" else "",
             )
         }
         val wake = WakeCategory.entries.associateWith { c -> apps.sumOf { it.wakeByCategory[c] ?: 0 } }
@@ -356,6 +444,24 @@ private object FreezeStatsSampleData {
                 rawReason = if (kind == StatsEventKind.FREEZE) "IMMOBULUS" else "PACKET",
             )
         }
+        val dozeApps = apps.take(4).mapIndexed { idx, a ->
+            DozeAppCpuUiModel(
+                uid = a.uid,
+                packageName = a.packageName,
+                cpuMillis = ((4 - idx) * 6_400L * scale),
+                sessionCount = 1 + (idx % 2),
+            )
+        }
+        val sampleSession = DozeSessionUiModel(
+            startMillis = now - 8 * 3_600_000L,
+            endMillis = now - 3_600_000L,
+            durationMillis = 7 * 3_600_000L,
+            maintenanceCount = 2,
+            startBatteryPct = 86,
+            endBatteryPct = 84,
+            chargedDuringSession = false,
+            topApps = dozeApps.take(3),
+        )
         return FreezeStatsSnapshot(
             window = window,
             sinceMillis = now - windowMillis,
@@ -373,6 +479,16 @@ private object FreezeStatsSampleData {
             recent = recent,
             memoryBytes = 64 * 1024,
             isSample = true,
+            dozeSummary = DozeSummaryUiModel(
+                sessionCount = 2 * scale,
+                totalDurationMillis = 7 * 3_600_000L * scale,
+                maintenanceCount = 2 * scale,
+                netBatteryDropPct = 2 * scale,
+                unpluggedDurationMillis = 7 * 3_600_000L * scale,
+                cpuSource = CpuStatSource.KERNEL_READER,
+                apps = dozeApps,
+                recentSessions = listOf(sampleSession),
+            ),
         )
     }
 }

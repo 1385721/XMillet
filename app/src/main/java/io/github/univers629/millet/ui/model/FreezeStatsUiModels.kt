@@ -1,6 +1,7 @@
 package io.github.univers629.millet.ui.model
 
 import androidx.compose.runtime.Immutable
+import io.github.univers629.millet.core.CpuStatSource
 import io.github.univers629.millet.core.InterceptRule
 import io.github.univers629.millet.core.StatsEventKind
 import io.github.univers629.millet.core.StatsEventOrigin
@@ -23,6 +24,8 @@ data class AppFreezeStats(
     val killBlockedCount: Int = 0,
     /** 原始 reason Top N（排查新理由用） */
     val topRawReasons: List<Pair<String, Int>> = emptyList(),
+    val jitterCount: Int = 0,
+    val topJitterReason: String = "",
     // ---- 以下由 App 侧 PackageManager 解析填充 ----
     val label: String = packageName,
     val iconSource: AppIconSource? = null,
@@ -54,6 +57,43 @@ data class StatsRecentEvent(
 )
 
 @Immutable
+data class DozeAppCpuUiModel(
+    val uid: Int,
+    val packageName: String,
+    val cpuMillis: Long,
+    val sessionCount: Int,
+    val label: String = packageName,
+    val iconSource: AppIconSource? = null,
+    val isSystem: Boolean = false,
+    val isDualApp: Boolean = false,
+    val members: List<StatsPackageMember> = emptyList(),
+)
+
+@Immutable
+data class DozeSessionUiModel(
+    val startMillis: Long,
+    val endMillis: Long,
+    val durationMillis: Long,
+    val maintenanceCount: Int,
+    val startBatteryPct: Int,
+    val endBatteryPct: Int,
+    val chargedDuringSession: Boolean,
+    val topApps: List<DozeAppCpuUiModel> = emptyList(),
+)
+
+@Immutable
+data class DozeSummaryUiModel(
+    val sessionCount: Int = 0,
+    val totalDurationMillis: Long = 0L,
+    val maintenanceCount: Int = 0,
+    val netBatteryDropPct: Int = 0,
+    val unpluggedDurationMillis: Long = 0L,
+    val cpuSource: CpuStatSource = CpuStatSource.NONE,
+    val apps: List<DozeAppCpuUiModel> = emptyList(),
+    val recentSessions: List<DozeSessionUiModel> = emptyList(),
+)
+
+@Immutable
 data class FreezeStatsSnapshot(
     val window: StatsWindow,
     /** 统计起点（墙钟毫秒） */
@@ -76,6 +116,7 @@ data class FreezeStatsSnapshot(
     /** 降级说明：例如「本机缺少 dispatchThawEvent，唤醒次数由 thawUid 推断」 */
     val sourceNote: String? = null,
     val isSample: Boolean = false,
+    val dozeSummary: DozeSummaryUiModel = DozeSummaryUiModel(),
 ) {
     val backgroundWakeCount: Int get() = wakeByCategory.entries.sumOf { if (it.key.isBackground) it.value else 0 }
     val totalWakeCount: Int get() = wakeByCategory.values.sum()

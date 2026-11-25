@@ -72,6 +72,7 @@ import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
 import io.github.univers629.millet.ui.model.AppFreezeStats
+import io.github.univers629.millet.ui.model.DozeSummaryUiModel
 import io.github.univers629.millet.ui.model.FreezeStatsSnapshot
 import io.github.univers629.millet.ui.model.RankMode
 import io.github.univers629.millet.ui.model.StatsRecentEvent
@@ -205,6 +206,15 @@ internal fun LazyListScope.statsContent(
 
     item(key = "screen_off_banner") {
         ScreenOffBanner(snap)
+    }
+
+    item(key = "doze_attribution") {
+        SmallTitle(text = "深度睡眠 · 待机与耗电归因")
+        DozeAttributionCard(
+            summary = snap.dozeSummary,
+            apps = snap.apps,
+            onOpenDetail = onOpenDetail,
+        )
     }
 
     item(key = "wake_reasons") {
@@ -369,6 +379,217 @@ private fun ScreenOffBanner(snap: FreezeStatsSnapshot) {
                     fontSize = 12.sp,
                     color = colorScheme.onSurfaceVariantSummary,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DozeAttributionCard(
+    summary: DozeSummaryUiModel,
+    apps: List<AppFreezeStats>,
+    onOpenDetail: (AppFreezeStats) -> Unit,
+) {
+    var showSessions by rememberSaveable { mutableStateOf(false) }
+    val appsByUid = remember(apps) { apps.associateBy { it.uid } }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        insideMargin = PaddingValues(16.dp),
+    ) {
+        if (summary.sessionCount == 0) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "暂无深度待机归因数据",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = colorScheme.onSurface,
+                )
+                Text(
+                    text = "息屏进入深度 Doze（IDLE / MAINTENANCE）连续满 30 秒并退出后，将自动汇总待机时长、纯净掉电速率与后台 CPU 耗时排行。",
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = colorScheme.onSurfaceVariantSummary,
+                )
+            }
+            return@Card
+        }
+
+        val dropPerHourText = if (summary.unpluggedDurationMillis >= 180_000L) {
+            val hours = summary.unpluggedDurationMillis / 3_600_000f
+            "%.1f%%/h".format(Locale.ROOT, summary.netBatteryDropPct / hours)
+        } else if (summary.totalDurationMillis > 0L) {
+            "充电会话"
+        } else {
+            "—"
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colorScheme.surfaceContainerHighest)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Text("深睡时长", fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
+                    Text(
+                        text = formatDuration(summary.totalDurationMillis),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "${summary.sessionCount} 次 · 维护 ${summary.maintenanceCount} 次",
+                        fontSize = 11.sp,
+                        color = colorScheme.onSurfaceVariantSummary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colorScheme.surfaceContainerHighest)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Text("纯净待机掉电", fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
+                    Text(
+                        text = dropPerHourText,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "来源: ${summary.cpuSource.label}",
+                        fontSize = 11.sp,
+                        color = colorScheme.onSurfaceVariantSummary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            if (summary.apps.isNotEmpty()) {
+                val topApps = summary.apps.take(5)
+                val maxCpu = topApps.maxOfOrNull { it.cpuMillis }?.coerceAtLeast(1L) ?: 1L
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "深睡期后台 CPU 消耗 Top ${topApps.size}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colorScheme.onSurfaceVariantSummary,
+                    )
+                    topApps.forEach { app ->
+                        val matched = appsByUid[app.uid]
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .then(if (matched != null) Modifier.clickable { onOpenDetail(matched) } else Modifier)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            StatsAppIcon(
+                                iconSource = app.iconSource,
+                                members = app.members,
+                                label = app.label,
+                                modifier = Modifier.padding(end = 10.dp).size(30.dp),
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = app.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = "%.1fs".format(Locale.ROOT, app.cpuMillis / 1000f),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = colorScheme.onSurface,
+                                    )
+                                }
+                                ProgressLine(
+                                    fraction = (app.cpuMillis.toFloat() / maxCpu).coerceIn(0.05f, 1f),
+                                    color = screenOffAccentColor(),
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    text = "本次深睡期间未检测到 ≥100ms 的应用 CPU 增量。",
+                    fontSize = 12.sp,
+                    color = colorScheme.onSurfaceVariantSummary,
+                )
+            }
+
+            if (summary.recentSessions.isNotEmpty()) {
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showSessions = !showSessions }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = if (showSessions) "收起最近待机分段" else "最近待机分段 (${summary.recentSessions.size})",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colorScheme.primary,
+                    )
+                    Icon(
+                        imageVector = if (showSessions) MiuixIcons.ExpandLess else MiuixIcons.ExpandMore,
+                        contentDescription = null,
+                        tint = colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                AnimatedVisibility(visible = showSessions) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        summary.recentSessions.take(6).forEach { s ->
+                            val batText = when {
+                                s.chargedDuringSession -> "充电中"
+                                s.startBatteryPct in 0..100 && s.endBatteryPct in 0..100 ->
+                                    "${s.startBatteryPct}%→${s.endBatteryPct}%"
+                                else -> "电量未知"
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "${formatClock(s.startMillis)}–${formatClock(s.endMillis)} · ${formatDuration(s.durationMillis)}",
+                                    fontSize = 12.sp,
+                                    color = colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = "维护 ${s.maintenanceCount} 次 · $batText",
+                                    fontSize = 12.sp,
+                                    color = colorScheme.onSurfaceVariantSummary,
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1215,6 +1436,12 @@ internal fun MethodologyDialog(
             )
             Text(
                 text = "• 冻结时间：这是系统记账时间，多个应用加在一起，可能超过开机时长。想看应用现在是否冻结，请看「进程列表」，不要只看次数。",
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                color = colorScheme.onSurfaceVariantSummary,
+            )
+            Text(
+                text = "• Doze 待机归因：仅在进入深睡（IDLE/MAINTENANCE）连续满 30 秒且退出后汇总一次，过滤 <100ms 微小波动；充电会话不计入掉电率。",
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,

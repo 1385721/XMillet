@@ -1,4 +1,6 @@
 package io.github.univers629.millet.ui.screen
+import top.yukonga.miuix.kmp.basic.InputField
+import io.github.univers629.millet.ui.util.MilletRefreshTexts
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
@@ -47,9 +49,6 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Cloud
-import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
@@ -103,10 +102,13 @@ import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Back
+import top.yukonga.miuix.kmp.icon.glass.Cloud
+import top.yukonga.miuix.kmp.icon.glass.Layers
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.basic.Search
 import top.yukonga.miuix.kmp.icon.basic.SearchCleanup
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -191,6 +193,7 @@ fun AppsRoute(
     onOpenAppProfile: (InstalledAppUiModel) -> Unit,
     onOpenTemplates: () -> Unit,
     onOpenCloudWhitelist: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val container = remember(context) { context.appUiContainer }
@@ -211,6 +214,7 @@ fun AppsRoute(
         onResetFilters = vm::resetFilters,
         onRefresh = vm::refresh,
         onOpenAppProfile = onOpenAppProfile,
+        onBack = onBack,
         onOpenTemplates = onOpenTemplates,
         onOpenCloudWhitelist = onOpenCloudWhitelist,
     )
@@ -229,6 +233,7 @@ fun AppsContent(
     onOpenAppProfile: (InstalledAppUiModel) -> Unit,
     onOpenTemplates: () -> Unit = {},
     onOpenCloudWhitelist: () -> Unit = {},
+    onBack: (() -> Unit)? = null,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
@@ -251,18 +256,23 @@ fun AppsContent(
                 MilletTopAppBar(
                     color = barColor,
                     title = "应用策略 (${filteredApps.size})",
+                    navigationIcon = {
+                        if (onBack != null) {
+                            BarIconButton(
+                                icon = MiuixIcons.Glass.Back,
+                                contentDescription = "返回",
+                                onClick = onBack,
+                            )
+                        }
+                    },
                     actions = {
                         val showTopPopup = remember { mutableStateOf(false) }
                         BarIconButton(
+                            icon = MiuixIcons.Glass.MoreCircle,
+                            contentDescription = "更多选项",
                             onClick = { showTopPopup.value = true },
-                            holdDownState = showTopPopup.value
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.MoreCircle,
-                                tint = colorScheme.onSurface,
-                                contentDescription = "更多选项"
-                            )
-                        }
+                            holdDownState = showTopPopup.value,
+                        )
                         GlassOverlayListPopup(
                             show = showTopPopup.value,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -297,6 +307,7 @@ fun AppsContent(
                 isRefreshing = isRefreshing,
                 pullToRefreshState = pullToRefreshState,
                 onRefresh = onRefresh,
+                refreshTexts = MilletRefreshTexts,
                 contentPadding = PaddingValues(
                     top = innerPadding.calculateTopPadding() + 6.dp
                 ),
@@ -391,79 +402,20 @@ internal fun MiuixCapsuleSearchBar(
     topPadding: Dp = 8.dp,
     bottomPadding: Dp = 4.dp,
 ) {
-    // TextFieldState 是输入框自身的真相来源，外部 query 只负责初始值与程序化重置
-    val state = rememberTextFieldState(query)
-    LaunchedEffect(query) {
-        if (state.text.toString() != query) state.setTextAndPlaceCursorAtEnd(query)
-    }
-    // 每次改动单向回传给调用方，调用方仍用 String 持有查询条件
-    LaunchedEffect(state) {
-        snapshotFlow { state.text.toString() }.collect { onQueryChange(it) }
-    }
-    BasicTextField(
-        state = state,
-        lineLimits = TextFieldLineLimits.SingleLine,
-        textStyle = TextStyle(
-            fontWeight = FontWeight.Medium,
-            fontSize = 16.sp,
-            color = colorScheme.onSurface
-        ),
-        cursorBrush = SolidColor(colorScheme.primary),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+    // Miuix InputField：expanded 只在获得焦点后置为 true 且不再回落，
+    // 避免组件在 expanded=false 时自动清空查询词（列表页搜索需要保留结果）。
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    InputField(
+        query = query,
+        onQueryChange = onQueryChange,
+        onSearch = { },
+        expanded = expanded,
+        onExpandedChange = { if (it) expanded = true },
+        label = placeholder.removeSuffix("...").removeSuffix("…"),
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = horizontalPadding)
-            .padding(top = topPadding, bottom = bottomPadding)
-            .heightIn(min = 45.dp)
-            .background(colorScheme.surfaceContainerHigh, CircleShape),
-        decorator = TextFieldDecorator { innerTextField ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.Basic.Search,
-                    contentDescription = "Search",
-                    modifier = Modifier
-                        .size(44.dp)
-                        .padding(start = 16.dp, end = 8.dp),
-                    tint = colorScheme.onSurfaceContainerHigh,
-                )
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (state.text.isEmpty()) {
-                        Text(
-                            text = placeholder,
-                            fontSize = 15.sp,
-                            color = colorScheme.onSurfaceVariantSummary
-                        )
-                    }
-                    innerTextField()
-                }
-                AnimatedVisibility(
-                    visible = state.text.isNotEmpty(),
-                    enter = fadeIn() + scaleIn(),
-                    exit = fadeOut() + scaleOut(),
-                ) {
-                    Icon(
-                        imageVector = MiuixIcons.Basic.SearchCleanup,
-                        tint = colorScheme.onSurface,
-                        contentDescription = "Clear",
-                        modifier = Modifier
-                            .size(44.dp)
-                            .padding(start = 8.dp, end = 16.dp)
-                            .clickable(
-                                interactionSource = null,
-                                indication = null
-                            ) {
-                                state.clearText()
-                            },
-                    )
-                }
-            }
-        }
+            .padding(top = topPadding, bottom = bottomPadding),
     )
 }
 
@@ -664,7 +616,7 @@ private fun PolicyHubCards(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         PolicyEntryCard(
-            icon = Icons.Rounded.Layers,
+            icon = MiuixIcons.Glass.Layers,
             title = "策略模板",
             subtitle = templateSubtitle,
             onClick = onOpenTemplates,
@@ -673,7 +625,7 @@ private fun PolicyHubCards(
                 .fillMaxHeight(),
         )
         PolicyEntryCard(
-            icon = Icons.Rounded.Cloud,
+            icon = MiuixIcons.Glass.Cloud,
             title = "官方云白名单",
             subtitle = cloudSubtitle,
             onClick = onOpenCloudWhitelist,

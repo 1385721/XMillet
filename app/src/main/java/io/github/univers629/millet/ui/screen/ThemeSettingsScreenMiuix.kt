@@ -1,9 +1,12 @@
 package io.github.univers629.millet.ui.screen
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.pm.PackageManager
 import android.app.Application
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
@@ -42,19 +45,13 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.BackHand
-import androidx.compose.material.icons.rounded.BlurOn
-import androidx.compose.material.icons.rounded.ColorLens
-import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.SpaceDashboard
-import androidx.compose.material.icons.rounded.Style
-import androidx.compose.material.icons.rounded.Swipe
-import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,6 +69,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import io.github.univers629.millet.core.PredictiveBackController
+import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
+import io.github.univers629.millet.ui.component.FoldablePreferenceSection
+import io.github.univers629.millet.ui.model.TombSection
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.theme.keyColorOptions
@@ -85,8 +85,23 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.ListView
+import top.yukonga.miuix.kmp.icon.glass.HomeButton
+import top.yukonga.miuix.kmp.icon.glass.Hd
+import top.yukonga.miuix.kmp.icon.glass.CinematicEffect
+import top.yukonga.miuix.kmp.icon.glass.ChevronBackward
+import top.yukonga.miuix.kmp.icon.glass.BottomSplitScreenOutline
+import top.yukonga.miuix.kmp.icon.glass.Album
+import top.yukonga.miuix.kmp.icon.glass.Tune
+import top.yukonga.miuix.kmp.icon.glass.DigitalStatistics
+import top.yukonga.miuix.kmp.icon.glass.GesturePassword
+import top.yukonga.miuix.kmp.icon.glass.HomeOutline
+import top.yukonga.miuix.kmp.icon.glass.Theme
+import top.yukonga.miuix.kmp.icon.glass.Wallpaper
 import top.yukonga.miuix.kmp.icon.basic.Check
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Back
+import top.yukonga.miuix.kmp.icon.extended.Show
+import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.ThemeColorSpec
@@ -110,6 +125,14 @@ fun ThemeSettingsScreenMiuix(
         1 -> false
         2 -> true
         else -> isSystemInDarkTheme()
+    }
+
+    val launcherAlias = remember {
+        ComponentName(context.packageName, "${context.packageName}.ui.MainActivityAlias")
+    }
+    var showLauncherIcon by remember {
+        val componentState = context.packageManager.getComponentEnabledSetting(launcherAlias)
+        mutableStateOf(componentState != PackageManager.COMPONENT_ENABLED_STATE_DISABLED)
     }
 
     val paletteStyles = ThemePaletteStyle.entries
@@ -142,10 +165,12 @@ fun ThemeSettingsScreenMiuix(
                         BarIconButton(onClick = onBack) {
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
-                                modifier = Modifier.graphicsLayer {
-                                    if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                },
-                                imageVector = MiuixIcons.Back,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                imageVector = MiuixIcons.Glass.Back,
                                 contentDescription = "返回",
                                 tint = colorScheme.onBackground
                             )
@@ -177,10 +202,10 @@ fun ThemeSettingsScreenMiuix(
                             .padding(horizontal = 12.dp)
                             .padding(bottom = 12.dp)
                     ) {
-                        SwitchPreference(
+                        GlassDropdownPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.SpaceDashboard,
+                                    imageVector = MiuixIcons.Glass.BottomSplitScreenOutline,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -188,16 +213,18 @@ fun ThemeSettingsScreenMiuix(
                                     tint = colorScheme.onBackground
                                 )
                             },
-                            title = "启用悬浮底栏",
-                            summary = "使用胶囊式悬浮底栏（支持拖拽阻尼弹簧动画）",
-                            checked = themeState.enableFloatingBottomBar,
-                            onCheckedChange = { themeState.updateEnableFloatingBottomBar(it) }
+                            title = "悬浮底栏样式",
+                            summary = "Miuix 玻璃为组件库 Glass 液态玻璃底栏；iOS 液态玻璃带透镜折射与高光",
+                            items = listOf("关闭", "Miuix 玻璃", "iOS 液态玻璃"),
+                            selectedIndex = themeState.floatingBottomBarStyle,
+                            onSelectedIndexChange = { themeState.updateFloatingBottomBarStyle(it) },
+                            backdrop = backdrop,
                         )
 
                         GlassDropdownPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.BlurOn,
+                                    imageVector = MiuixIcons.Glass.Wallpaper,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -205,8 +232,8 @@ fun ThemeSettingsScreenMiuix(
                                     tint = colorScheme.onBackground
                                 )
                             },
-                            title = "顶栏与底栏背景模糊",
-                            summary = "高斯模糊为整块毛玻璃；渐进式模糊为顶栏 HyperOS 4 风格边缘渐隐（经典底栏保持毛玻璃）",
+                            title = "背景模糊",
+                            summary = "高斯模糊为整块毛玻璃；渐进式模糊为顶栏边缘渐隐；关闭后顶栏为纯白",
                             items = listOf("关闭", "高斯模糊", "渐进式模糊"),
                             selectedIndex = when {
                                 !themeState.enableBlur -> 0
@@ -220,28 +247,63 @@ fun ThemeSettingsScreenMiuix(
                             backdrop = backdrop,
                         )
 
-                        AnimatedVisibility(
-                            visible = themeState.enableFloatingBottomBar,
-                            enter = fadeIn() + expandVertically(),
-                            exit = fadeOut() + shrinkVertically()
-                        ) {
-                            SwitchPreference(
-                                startAction = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.WaterDrop,
-                                        contentDescription = null,
-                                        modifier = Modifier
+                        SwitchPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = MiuixIcons.Glass.DigitalStatistics,
+                                    contentDescription = null,
+                                    modifier = Modifier
                                         .padding(end = 8.dp)
                                         .size(24.dp),
-                                        tint = colorScheme.onBackground
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "墓碑统计",
+                            summary = "在底栏显示墓碑统计页：冻结、唤醒与拦截次数",
+                            checked = themeState.showTombStatsTab,
+                            onCheckedChange = { themeState.updateShowTombStatsTab(it) }
+                        )
+
+                        if (themeState.showTombStatsTab) {
+                            FoldablePreferenceSection(
+                                title = "墓碑统计显示板块",
+                                summary = "已显示 ${themeState.tombSections.size}/${TombSection.entries.size} 个板块",
+                                icon = MiuixIcons.Glass.ListView,
+                            ) {
+                                TombSection.entries.forEach { section ->
+                                    SwitchPreference(
+                                        title = section.label,
+                                        checked = section.id in themeState.tombSections,
+                                        onCheckedChange = { themeState.updateTombSection(section.id, it) },
                                     )
-                                },
-                                title = "启用悬浮底栏液态玻璃效果",
-                                summary = "开启边缘透镜折射、色散与重力倾角流光高光",
-                                checked = themeState.enableFloatingBottomBarBlur,
-                                onCheckedChange = { themeState.updateEnableFloatingBottomBarBlur(it) }
-                            )
+                                }
+                            }
                         }
+
+                        SwitchPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = MiuixIcons.Show,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "显示桌面启动图标",
+                            summary = "关闭后可从 LSPosed 管理器的模块设置中打开 XMillet",
+                            checked = showLauncherIcon,
+                            onCheckedChange = { visible ->
+                                showLauncherIcon = visible
+                                context.packageManager.setComponentEnabledSetting(
+                                    launcherAlias,
+                                    if (visible) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                                    else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                    PackageManager.DONT_KILL_APP
+                                )
+                            }
+                        )
                     }
 
                     SmallTitle(
@@ -258,7 +320,7 @@ fun ThemeSettingsScreenMiuix(
                             SwitchPreference(
                                 startAction = {
                                     Icon(
-                                        imageVector = Icons.Rounded.BackHand,
+                                        imageVector = MiuixIcons.Glass.ChevronBackward,
                                         contentDescription = null,
                                         modifier = Modifier
                                             .padding(end = 8.dp)
@@ -283,7 +345,7 @@ fun ThemeSettingsScreenMiuix(
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Swipe,
+                                    imageVector = MiuixIcons.Glass.GesturePassword,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -310,7 +372,7 @@ fun ThemeSettingsScreenMiuix(
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.ColorLens,
+                                    imageVector = MiuixIcons.Glass.Album,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -334,7 +396,7 @@ fun ThemeSettingsScreenMiuix(
                                     title = "调色板风格 (PaletteStyle)",
                                     startAction = {
                                         Icon(
-                                            imageVector = Icons.Rounded.Palette,
+                                            imageVector = MiuixIcons.Glass.Hd,
                                             contentDescription = null,
                                             modifier = Modifier
                                         .padding(end = 8.dp)
@@ -353,7 +415,7 @@ fun ThemeSettingsScreenMiuix(
                                     title = "色彩规范版本 (ColorSpec)",
                                     startAction = {
                                         Icon(
-                                            imageVector = Icons.Rounded.Style,
+                                            imageVector = MiuixIcons.Glass.Theme,
                                             contentDescription = null,
                                             modifier = Modifier
                                         .padding(end = 8.dp)

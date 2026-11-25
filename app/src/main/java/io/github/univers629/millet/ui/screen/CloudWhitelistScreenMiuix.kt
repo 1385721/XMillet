@@ -1,5 +1,6 @@
 package io.github.univers629.millet.ui.screen
 
+import io.github.univers629.millet.ui.util.BarIconButton
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -43,16 +44,15 @@ import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.TabRowDefaults
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
-import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.icon.glass.Refresh
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
+import top.yukonga.miuix.kmp.glass.GlassSegmentedTabRow
 
 /** PowerKeeper 云端配置库的三条白名单分类。 */
 private enum class CloudWhitelistTab(
@@ -213,17 +213,30 @@ private fun CloudWhitelistContent(
     PolicySubPageScaffold(
         title = "官方云白名单",
         onBack = onBack,
-        actions = {
-            IconButton(
-                onClick = onRefresh,
-                enabled = !isRefreshing
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.Refresh,
-                    contentDescription = "刷新云端名单",
-                    tint = colorScheme.onSurface
+        bottomContent = if (effectiveLists != null) {
+            { tabBackdrop, underBar ->
+                GlassSegmentedTabRow(
+                    tabs = CloudWhitelistTab.entries.map { it.title },
+                    selectedIndex = selectedTabIndex,
+                    onSelect = { selectedTabIndex = it },
+                    backdrop = tabBackdrop,
+                    surfaceAlpha = if (underBar) 1f else 0f,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(top = 6.dp, bottom = 12.dp),
                 )
             }
+        } else {
+            null
+        },
+        actions = {
+            BarIconButton(
+                icon = MiuixIcons.Glass.Refresh,
+                contentDescription = "刷新云端名单",
+                onClick = onRefresh,
+                enabled = !isRefreshing,
+            )
         }
     ) {
         if (effectiveLists == null) {
@@ -297,26 +310,7 @@ private fun CloudWhitelistContent(
                 onQueryChange = { searchQuery = it },
                 placeholder = "搜索应用名称或包名..."
             )
-            Spacer(Modifier.height(8.dp))
-            TabRowWithContour(
-                tabs = CloudWhitelistTab.entries.map { it.title },
-                selectedTabIndex = selectedTabIndex,
-                onTabSelected = { selectedTabIndex = it },
-                colors = TabRowDefaults.tabRowColors(
-                    backgroundColor = colorScheme.surfaceContainer,
-                    contentColor = colorScheme.onSurfaceVariantSummary,
-                    selectedBackgroundColor = colorScheme.secondaryContainer,
-                    selectedContentColor = if (isDynamicColor) {
-                        colorScheme.onSecondaryContainer
-                    } else {
-                        colorScheme.onSurface
-                    },
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-            )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
         }
 
         // 2. 当前名单摘要、总开关与未安装切换

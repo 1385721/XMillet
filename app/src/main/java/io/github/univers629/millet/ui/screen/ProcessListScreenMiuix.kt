@@ -1,5 +1,8 @@
 package io.github.univers629.millet.ui.screen
+import io.github.univers629.millet.ui.util.MilletRefreshTexts
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
 import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
@@ -75,8 +78,8 @@ import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
-import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
+import top.yukonga.miuix.kmp.icon.glass.Refresh
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -90,6 +93,7 @@ fun ProcessListRoute(
     isCurrentPage: Boolean,
     bottomInnerPadding: Dp,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+    onOpenApps: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val runtimeRepo = remember(context) { context.appUiContainer.runtimeAndAppsRepository }
@@ -105,6 +109,7 @@ fun ProcessListRoute(
         onRefresh = vm::refresh,
         onThawAll = vm::thawAll,
         onOpenAppProfile = onOpenAppProfile,
+        onOpenApps = onOpenApps,
     )
 }
 
@@ -118,6 +123,7 @@ fun ProcessListContent(
     onRefresh: () -> Unit,
     onThawAll: () -> Unit,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+    onOpenApps: () -> Unit = {},
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
@@ -146,25 +152,16 @@ fun ProcessListContent(
                     title = "进程列表 (${filteredProcesses.size})",
                     actions = {
                         BarIconButton(
-                            modifier = Modifier.padding(end = 4.dp),
-                            onClick = onRefresh
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.Refresh,
-                                contentDescription = "刷新进程列表",
-                                tint = colorScheme.onSurface
-                            )
-                        }
+                            icon = MiuixIcons.Glass.Refresh,
+                            contentDescription = "刷新进程列表",
+                            onClick = onRefresh,
+                        )
                         BarIconButton(
+                            icon = MiuixIcons.Glass.MoreCircle,
+                            contentDescription = "更多操作",
                             onClick = { showTopPopup = true },
-                            holdDownState = showTopPopup
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.MoreCircle,
-                                tint = colorScheme.onSurface,
-                                contentDescription = "更多操作"
-                            )
-                        }
+                            holdDownState = showTopPopup,
+                        )
                         GlassOverlayListPopup(
                             show = showTopPopup,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -203,6 +200,7 @@ fun ProcessListContent(
                 isRefreshing = isRefreshing,
                 pullToRefreshState = pullToRefreshState,
                 onRefresh = onRefresh,
+                refreshTexts = MilletRefreshTexts,
                 contentPadding = PaddingValues(
                     top = innerPadding.calculateTopPadding() + 6.dp
                 ),
@@ -239,7 +237,28 @@ fun ProcessListContent(
                         )
                     }
 
-                    // 2. 状态筛选（下拉，避免与切页手势冲突）
+                    // 2. 应用策略入口卡片（从底栏移到筛选上方）
+                    item(key = "apps_entry") {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            ArrowPreference(
+                                title = "应用策略",
+                                summary = "为单个应用配置冻结、唤醒与保护策略",
+                                startAction = {
+                                    Icon(
+                                        imageVector = MiuixIcons.Glass.SecurityStatus,
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .padding(end = 8.dp)
+                                            .size(24.dp),
+                                        tint = colorScheme.onBackground
+                                    )
+                                },
+                                onClick = onOpenApps,
+                            )
+                        }
+                    }
+
+                    // 3. 状态筛选（下拉，避免与切页手势冲突）
                     if (snapshotUnavailable) {
                         item {
                             BasicComponent(title = "进程快照不可用", summary = "显示上次结果；请检查模块连接后刷新，旧结果不代表当前状态。")

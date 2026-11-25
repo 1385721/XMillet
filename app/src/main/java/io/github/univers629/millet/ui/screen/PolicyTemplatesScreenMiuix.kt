@@ -1,6 +1,6 @@
 package io.github.univers629.millet.ui.screen
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
-import top.yukonga.miuix.kmp.glass.GlassDialog
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import io.github.univers629.millet.ui.util.MilletTopAppBar
@@ -49,10 +49,6 @@ import androidx.compose.foundation.text.input.maxLengthTrim
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -117,10 +113,13 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Layers
+import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.icon.basic.Check
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.icon.extended.Close
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
@@ -129,6 +128,10 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.derivedStateOf
+import top.yukonga.miuix.kmp.blur.Backdrop
+import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 
 // ============================================================================================
 // 通用二级页骨架
@@ -144,9 +147,15 @@ internal fun PolicySubPageScaffold(
     title: String,
     onBack: () -> Unit,
     actions: @Composable RowScope.() -> Unit = {},
+    bottomContent: (@Composable (backdrop: Backdrop, contentUnderTopBar: Boolean) -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
+    val subPageListState = rememberLazyListState()
+    val fallbackTabBackdrop = rememberLayerBackdrop()
+    val contentUnderTopBar by remember(subPageListState) {
+        derivedStateOf { subPageListState.canScrollBackward }
+    }
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
@@ -162,17 +171,22 @@ internal fun PolicySubPageScaffold(
                         BarIconButton(onClick = onBack) {
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
-                                modifier = Modifier.graphicsLayer {
-                                    if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                },
-                                imageVector = MiuixIcons.Back,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                imageVector = MiuixIcons.Glass.Back,
                                 contentDescription = "返回",
                                 tint = colorScheme.onBackground
                             )
                         }
                     },
                     actions = actions,
-                    scrollBehavior = scrollBehavior
+                    scrollBehavior = scrollBehavior,
+                    bottomContent = {
+                        bottomContent?.invoke(backdrop ?: fallbackTabBackdrop, blurActive && contentUnderTopBar)
+                    },
                 )
             }
         },
@@ -180,6 +194,7 @@ internal fun PolicySubPageScaffold(
     ) { innerPadding ->
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             LazyColumn(
+                state = subPageListState,
                 modifier = Modifier
                     .fillMaxHeight()
                     .padding(top = 12.dp)
@@ -346,15 +361,11 @@ fun PolicyTemplatesContent(
         title = "策略模板",
         onBack = onBack,
         actions = {
-            IconButton(
-                onClick = { showEditor = true }
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = "新建自定义模板",
-                    tint = colorScheme.onSurface
-                )
-            }
+            BarIconButton(
+                icon = MiuixIcons.Glass.Add,
+                contentDescription = "新建自定义模板",
+                onClick = { showEditor = true },
+            )
         }
     ) {
         item(key = "intro") {
@@ -404,7 +415,7 @@ fun PolicyTemplatesContent(
                 ArrowPreference(
                     startAction = {
                         Icon(
-                            imageVector = Icons.Rounded.Add,
+                            imageVector = MiuixIcons.Glass.Add,
                             contentDescription = null,
                             modifier = Modifier
                                 .padding(end = 8.dp)
@@ -441,7 +452,7 @@ private fun TemplateArrowRow(
     ArrowPreference(
         startAction = {
             Icon(
-                imageVector = if (template.builtIn) Icons.Rounded.Layers else Icons.Rounded.Tune,
+                imageVector = if (template.builtIn) MiuixIcons.Glass.Layers else MiuixIcons.Glass.Tune,
                 contentDescription = null,
                 modifier = Modifier
                     .padding(end = 8.dp)
@@ -559,15 +570,11 @@ private fun PolicyTemplateDetailContent(
             if (!template.builtIn) {
                 val showTopPopup = remember { mutableStateOf(false) }
                 BarIconButton(
+                    icon = MiuixIcons.Glass.MoreCircle,
+                    contentDescription = "模板操作",
                     onClick = { showTopPopup.value = true },
-                    holdDownState = showTopPopup.value
-                ) {
-                    Icon(
-                        imageVector = MiuixIcons.MoreCircle,
-                        tint = colorScheme.onSurface,
-                        contentDescription = "模板操作"
-                    )
-                }
+                    holdDownState = showTopPopup.value,
+                )
                 GlassOverlayListPopup(
                     show = showTopPopup.value,
                     popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -614,7 +621,7 @@ private fun PolicyTemplateDetailContent(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = if (template.builtIn) Icons.Rounded.Layers else Icons.Rounded.Tune,
+                            imageVector = if (template.builtIn) MiuixIcons.Glass.Layers else MiuixIcons.Glass.Tune,
                             contentDescription = null,
                             tint = colorScheme.onSecondaryContainer,
                             modifier = Modifier.size(26.dp)

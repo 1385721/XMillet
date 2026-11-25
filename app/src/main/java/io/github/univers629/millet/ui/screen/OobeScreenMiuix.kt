@@ -1,7 +1,7 @@
 package io.github.univers629.millet.ui.screen
+import top.yukonga.miuix.kmp.glass.GlassIconButton
 import io.github.univers629.millet.ui.util.MilletTopAppBar
 import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
-import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.content.Context
 import android.content.Intent
@@ -48,10 +48,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Apps
-import androidx.compose.material.icons.rounded.Widgets
-import io.github.univers629.millet.ui.component.XMilletIcons
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -134,8 +130,11 @@ import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.icon.glass.GridView
+import top.yukonga.miuix.kmp.icon.glass.Widget
 import top.yukonga.miuix.kmp.icon.basic.Check
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
@@ -362,21 +361,20 @@ fun OobeScreenMiuix(
                 ) {
                     Scaffold(
                         topBar = {
+                            // 权限向导顶栏：普通 Miuix IconButton，不使用圆形液态玻璃底
                             MilletSmallTopAppBar(
                                 title = "",
                                 color = Color.Transparent,
                                 titleColor = colorScheme.onSurface,
                                 navigationIcon = {
-                                    BarIconButton(
-                                        onClick = {
-                                            currentStep = OobeStep.Startup
-                                        },
-                                        modifier = Modifier.padding(start = 12.dp)
+                                    IconButton(
+                                        onClick = { currentStep = OobeStep.Startup },
                                     ) {
                                         Icon(
-                                            imageVector = MiuixIcons.Back,
+                                            imageVector = MiuixIcons.Glass.Back,
                                             contentDescription = "返回欢迎页",
-                                            tint = colorScheme.onSurface
+                                            tint = colorScheme.onSurface,
+                                            modifier = Modifier.size(28.dp),
                                         )
                                     }
                                 },
@@ -424,7 +422,7 @@ fun OobeScreenMiuix(
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
                                             Icon(
-                                                imageVector = XMilletIcons.AppPolicy,
+                                                imageVector = MiuixIcons.Glass.SecurityStatus,
                                                 contentDescription = null,
                                                 modifier = Modifier.size(72.dp),
                                                 tint = colorScheme.primary
@@ -469,7 +467,7 @@ fun OobeScreenMiuix(
                                             BasicComponent(
                                                 startAction = {
                                                     Icon(
-                                                        imageVector = Icons.Rounded.Widgets,
+                                                        imageVector = MiuixIcons.Glass.Widget,
                                                         contentDescription = null,
                                                         modifier = Modifier
                                                             .padding(end = 8.dp)
@@ -507,7 +505,7 @@ fun OobeScreenMiuix(
                                             BasicComponent(
                                                 startAction = {
                                                     Icon(
-                                                        imageVector = Icons.Rounded.Apps,
+                                                        imageVector = MiuixIcons.Glass.GridView,
                                                         contentDescription = null,
                                                         modifier = Modifier
                                                             .padding(end = 8.dp)
@@ -675,17 +673,19 @@ private fun OobeStartupContent(
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (isPreview) {
-                IconButton(
+                GlassIconButton(
                     onClick = onBack,
+                    backdrop = backdrop,
                     modifier = Modifier
                         .statusBarsPadding()
                         .padding(start = 12.dp, top = 8.dp)
                         .align(Alignment.TopStart)
                 ) {
                     Icon(
-                        imageVector = MiuixIcons.Back,
+                        imageVector = MiuixIcons.Glass.Back,
                         contentDescription = "返回",
-                        tint = Color.White
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
             }

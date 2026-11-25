@@ -73,6 +73,7 @@ import io.github.univers629.millet.ui.screen.ProcessListRoute
 import io.github.univers629.millet.ui.screen.SettingsRoute
 import io.github.univers629.millet.ui.screen.ThemeSettingsScreenMiuix
 import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
+import io.github.univers629.millet.ui.theme.LocalFloatingBottomBarStyle
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBar
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBarBlur
@@ -123,6 +124,9 @@ class MainActivity : ComponentActivity() {
 
         @Serializable
         data object CloudWhitelist : Route
+
+        @Serializable
+        data object Apps : Route
 
         @Serializable
         data object Appearance : Route
@@ -344,14 +348,13 @@ class MainActivity : ComponentActivity() {
         }
 
         val enableBlur = LocalEnableBlur.current
-        val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
-        val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
+        val floatingBottomBarStyle = LocalFloatingBottomBarStyle.current
         val surfaceColor = MiuixTheme.colorScheme.surface
 
         val bottomNavPadding =
             WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
                 WindowInsets.captionBar.asPaddingValues().calculateBottomPadding() +
-                if (enableFloatingBottomBar) 96.dp else 72.dp
+                if (floatingBottomBarStyle != 0) 96.dp else 72.dp
 
         val blurBackdrop = rememberBlurBackdrop(enableBlur)
         val backdrop = rememberLayerBackdrop {
@@ -468,7 +471,7 @@ class MainActivity : ComponentActivity() {
                                                 else Modifier
                                             )
                                             .then(
-                                                if (enableFloatingBottomBar && enableFloatingBottomBarBlur) {
+                                                if (floatingBottomBarStyle != 0) {
                                                     Modifier.layerBackdrop(backdrop)
                                                 } else {
                                                     Modifier
@@ -492,31 +495,24 @@ class MainActivity : ComponentActivity() {
                                                 },
                                                 onOpenAbout = { navigator.push(Route.About) },
                                                 onOpenAppProfile = openProfileByTarget,
+                                                onOpenApps = { navigator.push(Route.Apps) },
                                             )
 
                                             BottomBarDestination.Processes -> ProcessListRoute(
                                                 isCurrentPage = isCurrentPage,
                                                 bottomInnerPadding = bottomNavPadding,
                                                 onOpenAppProfile = openProfileByTarget,
+                                                onOpenApps = { navigator.push(Route.Apps) },
                                             )
 
                                             BottomBarDestination.TombStats -> TombStatsScreenMiuix(
                                                 isActive = isCurrentPage && isForegroundStarted && currentRoute == Route.Main,
                                                 serviceAlive = serviceAlive,
                                                 statsEnabled = themeState.showTombStatsTab,
+                                                visibleSections = themeState.tombSections,
                                                 bottomInnerPadding = bottomNavPadding,
                                                 onEnableStats = { themeState.updateShowTombStatsTab(true) },
                                                 onOpenAppProfile = openProfileByTarget,
-                                            )
-
-                                            BottomBarDestination.Apps -> AppsRoute(
-                                                isCurrentPage = isCurrentPage,
-                                                bottomInnerPadding = bottomNavPadding,
-                                                onOpenAppProfile = { app ->
-                                                    navigator.push(Route.AppProfile(app.packageName, app.uid))
-                                                },
-                                                onOpenTemplates = { navigator.push(Route.PolicyTemplates) },
-                                                onOpenCloudWhitelist = { navigator.push(Route.CloudWhitelist) },
                                             )
 
                                             BottomBarDestination.Settings -> SettingsRoute(
@@ -539,6 +535,19 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.align(Alignment.BottomCenter)
                                     )
                                 }
+                            }
+
+                            entry<Route.Apps>(swipeDismiss = swipeDismiss) {
+                                AppsRoute(
+                                    isCurrentPage = true,
+                                    bottomInnerPadding = 0.dp,
+                                    onOpenAppProfile = { app ->
+                                        navigator.push(Route.AppProfile(app.packageName, app.uid))
+                                    },
+                                    onOpenTemplates = { navigator.push(Route.PolicyTemplates) },
+                                    onOpenCloudWhitelist = { navigator.push(Route.CloudWhitelist) },
+                                    onBack = { navigator.pop() },
+                                )
                             }
 
                             entry<Route.Appearance>(swipeDismiss = swipeDismiss) {

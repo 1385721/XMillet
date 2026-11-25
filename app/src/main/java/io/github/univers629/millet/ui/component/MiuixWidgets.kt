@@ -1,8 +1,8 @@
 package io.github.univers629.millet.ui.component
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassPopupItem
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
-import top.yukonga.miuix.kmp.glass.GlassDialog
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -202,24 +202,20 @@ fun MiuixConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    GlassDialog(backdrop = PopupBackdropHolder.current, 
+    OverlayDialog(
         show = show,
         modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
-        title = title,
         onDismissRequest = onDismiss,
         content = {
             DialogBackHandler { onDismiss() }
             val dismissState = LocalDismissState.current
-            Text(
-                text = message,
-                color = colorScheme.onSurfaceVariantSummary,
-                fontSize = 14.sp
-            )
+            ProgressiveDialogLayout(
+                title = title,
+                footerPadding = PaddingValues(top = 18.dp),
+                footer = {
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 18.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
                 if (dismissText != null) {
                     TextButton(
@@ -240,6 +236,14 @@ fun MiuixConfirmDialog(
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.textButtonColorsPrimary()
+                )
+            }
+                },
+            ) {
+                Text(
+                    text = message,
+                    color = colorScheme.onSurfaceVariantSummary,
+                    fontSize = 14.sp
                 )
             }
         }

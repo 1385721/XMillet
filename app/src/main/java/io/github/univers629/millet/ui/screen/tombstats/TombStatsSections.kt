@@ -1,5 +1,15 @@
 package io.github.univers629.millet.ui.screen.tombstats
 
+import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.basic.InputField
+import kotlinx.coroutines.delay
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -22,6 +32,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.captionBar
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
@@ -30,11 +41,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +56,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -55,6 +66,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -72,13 +85,13 @@ import io.github.univers629.millet.ui.component.StatsAppIcon
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.model.TombSection
 import io.github.univers629.millet.ui.model.AppFreezeStats
 import io.github.univers629.millet.ui.model.DozeSummaryUiModel
 import io.github.univers629.millet.ui.model.FreezeStatsSnapshot
 import io.github.univers629.millet.ui.model.RankMode
 import io.github.univers629.millet.ui.model.StatsRecentEvent
 import io.github.univers629.millet.ui.model.originLabel
-import io.github.univers629.millet.ui.screen.MiuixCapsuleSearchBar
 import io.github.univers629.millet.ui.theme.isInDarkTheme
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import java.text.SimpleDateFormat
@@ -96,13 +109,18 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
-import top.yukonga.miuix.kmp.glass.GlassDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Filter
+import top.yukonga.miuix.kmp.icon.glass.QuietMode
 import top.yukonga.miuix.kmp.icon.basic.Search
 import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.icon.extended.ExpandLess
 import top.yukonga.miuix.kmp.icon.extended.ExpandMore
+import top.yukonga.miuix.kmp.icon.extended.Filter
 import top.yukonga.miuix.kmp.theme.LocalDismissState
+import top.yukonga.miuix.kmp.squircle.squircleBackground
+import top.yukonga.miuix.kmp.squircle.squircleBorder
+import top.yukonga.miuix.kmp.squircle.squircleClip
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
@@ -139,9 +157,9 @@ private fun statsWarningTextColor(): Color = if (isInDarkTheme()) Color(0xFFFF9F
 /** 统计主体：概览 → 息屏 → 原因 → 时段 → 拦截 → 排行 → 最近动态 → 页脚 */
 internal fun LazyListScope.statsContent(
     snap: FreezeStatsSnapshot,
+    visibleSections: Set<String> = TombSection.allIds,
     rankModeIndex: Int,
     onRankModeChange: (Int) -> Unit,
-    onTileRankClick: (Int) -> Unit,
     onOpenDetail: (AppFreezeStats) -> Unit,
 ) {
     item(key = "summary_grid") {
@@ -161,7 +179,6 @@ internal fun LazyListScope.statsContent(
                     value = formatCount(snap.backgroundWakeCount),
                     unit = "次",
                     modifier = Modifier.weight(1f),
-                    onClick = { onTileRankClick(RankMode.WAKE.ordinal) },
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -171,7 +188,6 @@ internal fun LazyListScope.statsContent(
                     unit = "次",
                     modifier = Modifier.weight(1f),
                     accent = true,
-                    onClick = { onTileRankClick(RankMode.INTERCEPT.ordinal) },
                 )
                 val backgroundWakeAppCount = snap.apps.asSequence()
                     .filter { it.backgroundWakeCount > 0 }
@@ -183,13 +199,12 @@ internal fun LazyListScope.statsContent(
                     value = formatCount(backgroundWakeAppCount),
                     unit = "个",
                     modifier = Modifier.weight(1f),
-                    onClick = { onTileRankClick(RankMode.WAKE.ordinal) },
                 )
             }
         }
     }
 
-    item(key = "native_records") {
+    if ("native_records" in visibleSections) item(key = "native_records") {
         Card(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             insideMargin = PaddingValues(16.dp),
@@ -209,7 +224,7 @@ internal fun LazyListScope.statsContent(
         ScreenOffBanner(snap)
     }
 
-    item(key = "wake_reasons") {
+    if ("wake_reasons" in visibleSections) item(key = "wake_reasons") {
         SmallTitle(text = "系统解冻记录 · 原因")
         Card(
             modifier = Modifier
@@ -221,7 +236,7 @@ internal fun LazyListScope.statsContent(
         }
     }
 
-    if (snap.buckets.isNotEmpty()) {
+    if (snap.buckets.isNotEmpty() && "time_distribution" in visibleSections) {
         item(key = "time_distribution") {
             SmallTitle(
                 text = if (snap.window == StatsWindow.TODAY) "系统解冻记录 · 每小时" else "系统解冻记录 · 每天",
@@ -248,8 +263,7 @@ internal fun LazyListScope.statsContent(
         )
     }
 
-    item(key = "interventions") {
-        SmallTitle(text = "XMillet 干预")
+    if ("intervention" in visibleSections) item(key = "interventions") {        SmallTitle(text = "XMillet 干预")
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -260,8 +274,7 @@ internal fun LazyListScope.statsContent(
         }
     }
 
-    item(key = "app_ranking") {
-        SmallTitle(text = "应用排行")
+    if ("rank" in visibleSections) item(key = "app_ranking") {
         AppRankSection(
             apps = snap.apps,
             modeIndex = rankModeIndex,
@@ -270,7 +283,7 @@ internal fun LazyListScope.statsContent(
         )
     }
 
-    if (snap.recent.isNotEmpty()) {
+    if (snap.recent.isNotEmpty() && "recent" in visibleSections) {
         item(key = "recent_events") {
             RecentEventsSection(
                 events = snap.recent,
@@ -292,14 +305,10 @@ private fun StatTile(
     unit: String,
     modifier: Modifier = Modifier,
     accent: Boolean = false,
-    onClick: (() -> Unit)? = null,
 ) {
     Card(
         modifier = modifier.height(IntrinsicSize.Min),
         insideMargin = PaddingValues(16.dp),
-        onClick = onClick,
-        showIndication = onClick != null,
-        pressFeedbackType = if (onClick != null) PressFeedbackType.Tilt else PressFeedbackType.None,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -356,7 +365,7 @@ private fun ScreenOffBanner(snap: FreezeStatsSnapshot) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Bedtime,
+                    imageVector = MiuixIcons.Glass.QuietMode,
                     contentDescription = null,
                     tint = accent,
                     modifier = Modifier.size(20.dp),
@@ -864,6 +873,7 @@ private fun AppRankSection(
     var hideSystemApps by rememberSaveable { mutableStateOf(false) }
     val mode = RankMode.entries.getOrElse(modeIndex) { RankMode.WAKE }
     val hasSystemApps = remember(apps) { apps.any { it.isSystem } }
+    val focusManager = LocalFocusManager.current
 
     val baseSorted = remember(apps, mode) {
         when (mode) {
@@ -878,8 +888,16 @@ private fun AppRankSection(
     val sorted = remember(baseSorted, hideSystemApps) {
         if (hideSystemApps) baseSorted.filter { !it.isSystem } else baseSorted
     }
-    val filtered = remember(sorted, searchQuery) {
-        val q = searchQuery.trim().lowercase()
+    // 收起搜索时立即恢复列表并清空查询词，整个收起过程只发生一次布局变化，
+    // 避免动画结束后的第二次重组造成收尾卡顿。
+    val activeQuery = if (searchVisible) searchQuery else ""
+    LaunchedEffect(searchVisible) {
+        if (!searchVisible && searchQuery.isNotEmpty()) {
+            searchQuery = ""
+        }
+    }
+    val filtered = remember(sorted, activeQuery) {
+        val q = activeQuery.trim().lowercase()
         if (q.isEmpty()) sorted
         else sorted.filter {
             it.label.lowercase().contains(q) ||
@@ -890,109 +908,91 @@ private fun AppRankSection(
     val maxValue = remember(sorted, mode) {
         sorted.maxOfOrNull { rankValue(it, mode) }?.coerceAtLeast(1f) ?: 1f
     }
-    val shown = if (expanded || searchQuery.isNotBlank()) filtered else filtered.take(10)
+    val shown = if (expanded || activeQuery.isNotBlank()) filtered else filtered.take(10)
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp),
+                .padding(start = 28.dp, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RankMode.entries.forEachIndexed { idx, m ->
-                    val sel = idx == modeIndex
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(if (sel) colorScheme.primary else colorScheme.surfaceContainerHigh)
-                            .clickable { onModeIndexChange(idx) }
-                            .padding(horizontal = 14.dp, vertical = 7.dp),
-                    ) {
-                        Text(
-                            text = m.label,
-                            fontSize = 13.sp,
-                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (sel) colorScheme.onPrimary else colorScheme.onSurfaceVariantSummary,
-                        )
-                    }
-                }
-                if (hasSystemApps) {
-                    Box(
-                        modifier = Modifier
-                            .width(1.dp)
-                            .height(16.dp)
-                            .background(colorScheme.dividerLine),
+            Text(
+                text = "应用排行",
+                style = MiuixTheme.textStyles.subtitle,
+                color = colorScheme.onBackgroundVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (hasSystemApps) {
+                IconButton(
+                    onClick = { hideSystemApps = !hideSystemApps },
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = MiuixIcons.Glass.Filter,
+                        contentDescription = if (hideSystemApps) "显示系统应用" else "隐藏系统应用",
+                        tint = if (hideSystemApps) colorScheme.primary else colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.size(20.dp),
                     )
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(
-                                if (hideSystemApps) colorScheme.secondaryContainer else colorScheme.surfaceContainerHigh,
-                            )
-                            .clickable { hideSystemApps = !hideSystemApps }
-                            .padding(horizontal = 12.dp, vertical = 7.dp),
-                    ) {
-                        Text(
-                            text = "隐藏系统应用",
-                            fontSize = 13.sp,
-                            fontWeight = if (hideSystemApps) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (hideSystemApps) {
-                                if (isDynamicColor) colorScheme.onSecondaryContainer else colorScheme.onSurface
-                            } else {
-                                colorScheme.onSurfaceVariantSummary
-                            },
-                        )
-                    }
                 }
             }
             if (baseSorted.isNotEmpty()) {
                 IconButton(
                     onClick = {
-                        if (searchVisible) {
-                            searchVisible = false
-                            searchQuery = ""
-                        } else {
-                            searchVisible = true
-                        }
+                        val next = !searchVisible
+                        searchVisible = next
+                        if (!next) focusManager.clearFocus()
                     },
                     modifier = Modifier.size(36.dp),
                 ) {
-                    Icon(
-                        imageVector = if (searchVisible) MiuixIcons.Close else MiuixIcons.Basic.Search,
-                        contentDescription = if (searchVisible) "收起搜索" else "搜索应用排行",
-                        tint = if (searchVisible || searchQuery.isNotBlank()) colorScheme.primary else colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    Crossfade(targetState = searchVisible, animationSpec = tween(200), label = "rankSearchIcon") { open ->
+                        Icon(
+                            imageVector = if (open) MiuixIcons.Close else MiuixIcons.Basic.Search,
+                            contentDescription = if (open) "收起搜索" else "搜索应用排行",
+                            tint = if (open) colorScheme.primary else colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
         }
 
+        RankModeTabRow(
+            tabs = RankMode.entries.map { it.label },
+            selectedIndex = modeIndex,
+            onSelect = onModeIndexChange,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+
         AnimatedVisibility(
-            visible = searchVisible || searchQuery.isNotBlank(),
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
+            visible = searchVisible,
+            enter = expandVertically(spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow, IntSize.VisibilityThreshold), expandFrom = Alignment.Top),
+            exit = shrinkVertically(spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMedium, IntSize.VisibilityThreshold), shrinkTowards = Alignment.Top),
+            modifier = Modifier.clipToBounds(),
         ) {
-            MiuixCapsuleSearchBar(
+            // expanded 固定为 true：输入框只在展开时组合，收起过程交给上层的裁切动画，
+            // 避免输入框内部的文字淡出/清除与收起动画叠加造成闪现。
+            InputField(
                 query = searchQuery,
                 onQueryChange = { searchQuery = it },
-                placeholder = "搜索应用名、包名或 UID...",
+                onSearch = { },
+                expanded = true,
+                onExpandedChange = { },
+                label = "搜索应用名、包名或 UID",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
             )
         }
 
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 12.dp)
+                .animateContentSize(spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow, IntSize.VisibilityThreshold)),
         ) {
             if (shown.isEmpty()) {
-                if (searchQuery.isNotBlank()) {
+                if (activeQuery.isNotBlank()) {
                     BasicComponent(
                         title = "未找到匹配的应用",
                         summary = "点击清空搜索词",
@@ -1011,7 +1011,7 @@ private fun AppRankSection(
                     onClick = { onOpenDetail(app) },
                 )
             }
-            if (filtered.size > 10 && searchQuery.isBlank()) {
+            if (filtered.size > 10 && activeQuery.isBlank()) {
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 14.dp))
                 Row(
                     modifier = Modifier
@@ -1035,6 +1035,61 @@ private fun AppRankSection(
                         modifier = Modifier.size(16.dp),
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 排行模式的等分标签栏：沿用 Miuix TabRow 的视觉（surface 轨道 + surfaceContainer 选中块 + 1dp 描边），
+ * 但四项等宽、标签不滚动，避免搜索按钮挤压时「系统记录」被截断。
+ */
+@Composable
+private fun RankModeTabRow(
+    tabs: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(42.dp)
+            .squircleBackground(color = colorScheme.surface, cornerRadius = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        tabs.forEachIndexed { index, label ->
+            val selected = index == selectedIndex
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(vertical = 3.dp)
+                    .then(
+                        if (selected) {
+                            Modifier.squircleBackground(color = colorScheme.surfaceContainer, cornerRadius = 10.dp)
+                        } else {
+                            Modifier.squircleBorder(width = 1.dp, color = colorScheme.outline, cornerRadius = 10.dp)
+                        },
+                    )
+                    .squircleClip(cornerRadius = 10.dp)
+                    .selectable(
+                        selected = selected,
+                        role = Role.Tab,
+                        onClick = { onSelect(index) },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    fontSize = 13.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (selected) colorScheme.onBackground else colorScheme.onSurfaceVariantSummary,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
             }
         }
     }
@@ -1414,13 +1469,25 @@ internal fun MethodologyDialog(
     show: Boolean,
     onDismiss: () -> Unit,
 ) {
-    GlassDialog(
-        backdrop = PopupBackdropHolder.current,
+    OverlayDialog(
         show = show,
-        title = "这些数字怎么看",
         onDismissRequest = onDismiss,
     ) {
         val dismissState = LocalDismissState.current
+        ProgressiveDialogLayout(
+            title = "这些数字怎么看",
+            footer = {
+                TextButton(
+                    text = "知道了",
+                    onClick = {
+                        onDismiss()
+                        dismissState?.invoke()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            },
+        ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1455,16 +1522,7 @@ internal fun MethodologyDialog(
                 lineHeight = 19.sp,
                 color = colorScheme.onSurfaceVariantSummary,
             )
-            Spacer(Modifier.height(6.dp))
-            TextButton(
-                text = "知道了",
-                onClick = {
-                    onDismiss()
-                    dismissState?.invoke()
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-            )
+        }
         }
     }
 }

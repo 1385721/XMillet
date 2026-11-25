@@ -1,5 +1,6 @@
 package io.github.univers629.millet.ui.screen
-import top.yukonga.miuix.kmp.glass.GlassDialog
+import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import io.github.univers629.millet.ui.util.MilletTopAppBar
@@ -46,13 +47,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Android
-import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.Policy
-import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -108,7 +102,13 @@ import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Document
+import top.yukonga.miuix.kmp.icon.glass.HtmlViewer
+import top.yukonga.miuix.kmp.icon.glass.MemoryFunction
+import top.yukonga.miuix.kmp.icon.glass.MyDevice
+import top.yukonga.miuix.kmp.icon.glass.Phone
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -224,15 +224,10 @@ fun AboutScreenMiuix(
                 defaultWindowInsetsPadding = false,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -425,7 +420,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Smartphone,
+                                    imageVector = MiuixIcons.Glass.Phone,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -439,7 +434,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Android,
+                                    imageVector = MiuixIcons.Glass.MyDevice,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -453,7 +448,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Memory,
+                                    imageVector = MiuixIcons.Glass.MemoryFunction,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -496,7 +491,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Description,
+                                    imageVector = MiuixIcons.Glass.Document,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -511,7 +506,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Code,
+                                    imageVector = MiuixIcons.Glass.HtmlViewer,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -526,7 +521,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Policy,
+                                    imageVector = MiuixIcons.Glass.SecurityStatus,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -614,15 +609,10 @@ fun AboutKnowledgeScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -710,15 +700,10 @@ fun AboutRepoScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -750,7 +735,7 @@ fun AboutRepoScreenMiuix(
                         summary = repoUrl,
                         startAction = {
                             Icon(
-                                imageVector = Icons.Rounded.Code,
+                                imageVector = MiuixIcons.Glass.HtmlViewer,
                                 contentDescription = null,
                                 modifier = Modifier.padding(end = 8.dp),
                                 tint = colorScheme.onSurface
@@ -825,15 +810,28 @@ fun AboutRepoScreenMiuix(
     }
 
     val activeResId = previewDonateResId
-    GlassDialog(backdrop = PopupBackdropHolder.current, 
+    OverlayDialog(
         show = activeResId != null,
         modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
-        title = "感谢支持",
         onDismissRequest = { previewDonateResId = null },
         content = {
             DialogBackHandler { previewDonateResId = null }
             val dismissState = LocalDismissState.current
-            if (activeResId != null) {
+            if (activeResId != null) ProgressiveDialogLayout(
+                title = "感谢支持",
+                footerPadding = PaddingValues(top = 18.dp),
+                footer = {
+                    TextButton(
+                        text = "关闭",
+                        onClick = {
+                            previewDonateResId = null
+                            dismissState?.invoke()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.textButtonColorsPrimary()
+                    )
+                },
+            ) {
                 Box(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center
@@ -845,17 +843,6 @@ fun AboutRepoScreenMiuix(
                         modifier = Modifier.size(260.dp)
                     )
                 }
-                TextButton(
-                    text = "关闭",
-                    onClick = {
-                        previewDonateResId = null
-                        dismissState?.invoke()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 18.dp),
-                    colors = ButtonDefaults.textButtonColorsPrimary()
-                )
             }
         }
     )
@@ -972,15 +959,10 @@ fun AboutLicensesScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -1006,7 +988,7 @@ fun AboutLicensesScreenMiuix(
                     BasicComponent(
                         startAction = {
                             Icon(
-                                imageVector = Icons.Rounded.Policy,
+                                imageVector = MiuixIcons.Glass.SecurityStatus,
                                 contentDescription = null,
                                 modifier = Modifier.padding(end = 8.dp),
                                 tint = colorScheme.onSurface,

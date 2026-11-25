@@ -1,6 +1,10 @@
 package io.github.univers629.millet.ui.component
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -21,15 +25,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
-import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBar
 import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBarBlur
-import io.github.univers629.millet.ui.util.BlurredBar
+import io.github.univers629.millet.ui.theme.LocalFloatingBottomBarStyle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.job
@@ -40,10 +44,22 @@ import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.NavigationItem
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.Backdrop
+import top.yukonga.miuix.kmp.blur.BlendColorEntry
+import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.textureBlur
+import top.yukonga.miuix.kmp.glass.GlassNavigationBar
+import top.yukonga.miuix.kmp.glass.GlassNavigationItem
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Home
-import top.yukonga.miuix.kmp.icon.extended.Settings
+import top.yukonga.miuix.kmp.icon.glass.HomeFill
+import top.yukonga.miuix.kmp.icon.glass.HomeOutline
+import top.yukonga.miuix.kmp.icon.glass.LockFill
+import top.yukonga.miuix.kmp.icon.glass.LockOutline
+import top.yukonga.miuix.kmp.icon.glass.NotesFill
+import top.yukonga.miuix.kmp.icon.glass.NotesOutline
+import top.yukonga.miuix.kmp.icon.glass.SettingsFill
+import top.yukonga.miuix.kmp.icon.glass.SettingsOutline
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.springAnimateToPage
 
@@ -117,13 +133,15 @@ fun rememberMainPagerState(
 
 enum class BottomBarDestination(
     val label: String,
-    val icon: ImageVector,
+    val iconOutline: ImageVector,
+    val iconFill: ImageVector,
 ) {
-    Home("主页", MiuixIcons.Home),
-    Processes("进程列表", XMilletIcons.ProcessBolt),
-    TombStats("墓碑统计", TombStatsIcon),
-    Apps("应用策略", XMilletIcons.AppPolicy),
-    Settings("设置", MiuixIcons.Settings);
+    Home("主页", MiuixIcons.Glass.HomeOutline, MiuixIcons.Glass.HomeFill),
+    Processes("进程列表", MiuixIcons.Glass.NotesOutline, MiuixIcons.Glass.NotesFill),
+    TombStats("墓碑统计", MiuixIcons.Glass.LockOutline, MiuixIcons.Glass.LockFill),
+    Settings("设置", MiuixIcons.Glass.SettingsOutline, MiuixIcons.Glass.SettingsFill);
+
+    fun icon(selected: Boolean): ImageVector = if (selected) iconFill else iconOutline
 
     companion object {
         /** 当前可见的底栏目的地（顺序即 Pager 页序）。页面下标一律经由此列表换算，禁止硬编码。 */
@@ -141,7 +159,8 @@ enum class BottomBarDestination(
 /**
  * XMillet 底部导航栏（复刻 KernelSU BottomBarMiuix）：
  * - 悬浮模式：iOS 液态玻璃悬浮底栏 (FloatingBottomBar)，宽度随 Tab 数自适应；
- * - 经典模式：全宽 NavigationBar；参照 Miuix 组件库规范不使用渐进式模糊，开启背景模糊时保持整块均匀毛玻璃。
+ * - Miuix 玻璃模式：GlassNavigationBar 液态玻璃悬浮底栏（同 miuix example 的 Glass 样式）；
+ * - 经典模式：全宽 NavigationBar；开启背景模糊时整块 textureBlur(surface 0.8)，与 miuix example 一致。
  */
 @Composable
 fun BoxScope.BottomBarMiuix(
@@ -152,14 +171,14 @@ fun BoxScope.BottomBarMiuix(
     modifier: Modifier = Modifier,
 ) {
     val enableBlur = LocalEnableBlur.current
-    val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
     val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
+    val floatingBottomBarStyle = LocalFloatingBottomBarStyle.current
     val bottomBlurActive = enableBlur && blurBackdrop != null
 
     val items = destinations.map { destination ->
         NavigationItem(
             label = destination.label,
-            icon = destination.icon,
+            icon = destination.icon(false),
         )
     }
     // 5 个 Tab 时收窄：5×60 + 8 + 2×16 = 340dp，紧凑屏 (360dp) 也有余量且不挤压文字；4 个 Tab 保持原尺寸
@@ -168,68 +187,120 @@ fun BoxScope.BottomBarMiuix(
     val sideMargin = if (dense) 16.dp else 28.dp
     val safeSelectedIndex = mainState.selectedPage.coerceIn(0, (items.size - 1).coerceAtLeast(0))
 
-    if (!enableFloatingBottomBar) {
-        BlurredBar(
-            backdrop = blurBackdrop,
-            blurActive = bottomBlurActive,
-            progressiveSupported = false,
-            modifier = modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-        ) {
-            NavigationBar(
-                modifier = Modifier.fillMaxWidth(),
-                color = if (bottomBlurActive) Color.Transparent else colorScheme.surface,
-            ) {
-                items.forEachIndexed { index, item ->
-                    NavigationBarItem(
-                        modifier = Modifier.weight(1f),
-                        icon = item.icon,
-                        label = item.label,
-                        selected = safeSelectedIndex == index,
-                        onClick = { mainState.animateToPage(index) }
+    // 与 miuix example 一致：仅在开启模糊、存在采样源且设备支持 RuntimeShader 时才走毛玻璃，否则回退为不透明底色
+    val blurActive = bottomBlurActive && isRuntimeShaderSupported()
+
+    when (floatingBottomBarStyle) {
+        0 -> {
+            val barColor = if (blurActive) Color.Transparent else colorScheme.surface
+            Box(
+                modifier = modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .then(
+                        if (blurActive && blurBackdrop != null) {
+                            Modifier.textureBlur(
+                                backdrop = blurBackdrop,
+                                shape = RectangleShape,
+                                blurRadius = 25f,
+                                colors = BlurDefaults.blurColors(
+                                    blendColors = listOf(
+                                        BlendColorEntry(color = colorScheme.surface.copy(0.8f)),
+                                    ),
+                                ),
+                            )
+                        } else {
+                            Modifier
+                        },
                     )
+                    .background(barColor)
+                    // 吞掉底栏空白处的点击，避免穿透到下方列表
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    ),
+            ) {
+                NavigationBar(color = barColor) {
+                    destinations.forEachIndexed { index, destination ->
+                        NavigationBarItem(
+                            selected = safeSelectedIndex == index,
+                            onClick = { mainState.animateToPage(index) },
+                            icon = destination.icon(safeSelectedIndex == index),
+                            label = destination.label,
+                        )
+                    }
                 }
             }
         }
-    } else {
-        val bottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
-            WindowInsets.captionBar.asPaddingValues().calculateBottomPadding() +
-            24.dp
 
-        FloatingBottomBar(
-            modifier = modifier
-                .align(Alignment.BottomCenter)
-                .pointerInput(Unit) {
-                    detectTapGestures { }
+        1 -> {
+            // 同 miuix example 的 Glass 悬浮底栏：GlassNavigationBar 自带液态玻璃材质、描边、阴影与底部 insets
+            val glassItems = remember(destinations, safeSelectedIndex) {
+                destinations.mapIndexed { index, destination ->
+                    GlassNavigationItem(
+                        icon = destination.icon(safeSelectedIndex == index),
+                        label = destination.label,
+                    )
                 }
-                .padding(start = sideMargin, end = sideMargin, bottom = bottomPadding),
-            selectedIndex = safeSelectedIndex,
-            onSelected = { mainState.animateToPage(it) },
-            backdrop = backdrop,
-            tabsCount = items.size,
-            isBlurEnabled = enableFloatingBottomBarBlur
-        ) { activateTab ->
-            items.forEachIndexed { index, item ->
-                val destination = destinations[index]
-                FloatingBottomBarItem(
-                    selected = safeSelectedIndex == index,
-                    onClick = { activateTab(index) },
-                    modifier = Modifier.defaultMinSize(minWidth = itemMinWidth)
-                ) {
-                    Icon(
-                        imageVector = destination.icon,
-                        contentDescription = destination.label,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Text(
-                        text = destination.label,
-                        fontSize = 11.sp,
-                        lineHeight = 14.sp,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
+            }
+            Box(
+                modifier = modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(),
+            ) {
+                GlassNavigationBar(
+                    items = glassItems,
+                    selectedIndex = safeSelectedIndex,
+                    onSelect = { mainState.animateToPage(it) },
+                    backdrop = if (isRuntimeShaderSupported()) backdrop else null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                )
+            }
+        }
+
+        else -> {
+            val bottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
+                WindowInsets.captionBar.asPaddingValues().calculateBottomPadding() +
+                24.dp
+
+            FloatingBottomBar(
+                modifier = modifier
+                    .align(Alignment.BottomCenter)
+                    .pointerInput(Unit) {
+                        detectTapGestures { }
+                    }
+                    .padding(start = sideMargin, end = sideMargin, bottom = bottomPadding),
+                selectedIndex = safeSelectedIndex,
+                onSelected = { mainState.animateToPage(it) },
+                backdrop = backdrop,
+                tabsCount = items.size,
+                isBlurEnabled = enableFloatingBottomBarBlur || enableBlur,
+                liquidGlass = enableFloatingBottomBarBlur,
+            ) { activateTab ->
+                items.forEachIndexed { index, item ->
+                    val destination = destinations[index]
+                    FloatingBottomBarItem(
+                        selected = safeSelectedIndex == index,
+                        onClick = { activateTab(index) },
+                        modifier = Modifier.defaultMinSize(minWidth = itemMinWidth)
+                    ) {
+                        Icon(
+                            imageVector = destination.icon(safeSelectedIndex == index),
+                            contentDescription = destination.label,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            text = destination.label,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

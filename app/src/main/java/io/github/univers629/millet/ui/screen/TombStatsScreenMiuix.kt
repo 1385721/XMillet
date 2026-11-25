@@ -20,7 +20,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +35,7 @@ import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.di.appUiContainer
+import io.github.univers629.millet.ui.model.TombSection
 import io.github.univers629.millet.ui.model.AppFreezeStats
 import io.github.univers629.millet.ui.model.StatsLoadState
 import io.github.univers629.millet.ui.screen.tombstats.AppStatsDetailSheet
@@ -47,6 +47,7 @@ import io.github.univers629.millet.ui.screen.tombstats.formatClock
 import io.github.univers629.millet.ui.screen.tombstats.formatDateTime
 import io.github.univers629.millet.ui.screen.tombstats.statsContent
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
+import io.github.univers629.millet.ui.util.MilletRefreshTexts
 import io.github.univers629.millet.ui.util.BarIconButton
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
@@ -57,23 +58,22 @@ import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import io.github.univers629.millet.ui.util.resolveStatsDetail
 import io.github.univers629.millet.ui.vm.TombStatsUiState
 import io.github.univers629.millet.ui.vm.TombStatsViewModel
-import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.TabRowDefaults
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
-import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
+import top.yukonga.miuix.kmp.icon.glass.Refresh
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
-import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+import androidx.compose.runtime.derivedStateOf
+import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
+import top.yukonga.miuix.kmp.glass.GlassSegmentedTabRow
 
 /**
  * 墓碑统计页入口：连接 [TombStatsViewModel] 与纯展示 [TombStatsContent]。
@@ -83,6 +83,7 @@ fun TombStatsScreenMiuix(
     isActive: Boolean,
     serviceAlive: Boolean,
     statsEnabled: Boolean = true,
+    visibleSections: Set<String> = TombSection.allIds,
     bottomInnerPadding: Dp,
     onEnableStats: (() -> Unit)? = null,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
@@ -102,6 +103,7 @@ fun TombStatsScreenMiuix(
 
     TombStatsContent(
         uiState = uiState,
+        visibleSections = visibleSections,
         bottomInnerPadding = bottomInnerPadding,
         onSelectWindow = vm::selectWindow,
         onSelectRankMode = vm::selectRankMode,
@@ -125,6 +127,7 @@ fun TombStatsScreenMiuix(
 @Composable
 fun TombStatsContent(
     uiState: TombStatsUiState,
+    visibleSections: Set<String> = TombSection.allIds,
     bottomInnerPadding: Dp,
     onSelectWindow: (Int) -> Unit,
     onSelectRankMode: (Int) -> Unit,
@@ -135,7 +138,6 @@ fun TombStatsContent(
     onResetStats: () -> Unit,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
@@ -143,6 +145,10 @@ fun TombStatsContent(
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
     val pullToRefreshState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
+    val fallbackTabBackdrop = rememberLayerBackdrop()
+    val contentUnderTopBar by remember(listState) {
+        derivedStateOf { listState.canScrollBackward }
+    }
 
     var showTopPopup by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
@@ -173,25 +179,16 @@ fun TombStatsContent(
                     title = "墓碑统计",
                     actions = {
                         BarIconButton(
-                            modifier = Modifier.padding(end = 4.dp),
+                            icon = MiuixIcons.Glass.Refresh,
+                            contentDescription = "刷新统计",
                             onClick = onManualRefresh,
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.Refresh,
-                                contentDescription = "刷新统计",
-                                tint = colorScheme.onSurface,
-                            )
-                        }
+                        )
                         BarIconButton(
+                            icon = MiuixIcons.Glass.MoreCircle,
+                            contentDescription = "更多操作",
                             onClick = { showTopPopup = true },
                             holdDownState = showTopPopup,
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.MoreCircle,
-                                contentDescription = "更多操作",
-                                tint = colorScheme.onSurface,
-                            )
-                        }
+                        )
                         GlassOverlayListPopup(
                             show = showTopPopup,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -230,6 +227,19 @@ fun TombStatsContent(
                         )
                     },
                     scrollBehavior = scrollBehavior,
+                    bottomContent = {
+                        GlassSegmentedTabRow(
+                            tabs = StatsWindow.entries.map { it.label },
+                            selectedIndex = uiState.windowIndex,
+                            onSelect = onSelectWindow,
+                            backdrop = backdrop ?: fallbackTabBackdrop,
+                            surfaceAlpha = if (blurActive && contentUnderTopBar) 1f else 0f,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .padding(top = 6.dp, bottom = 12.dp),
+                        )
+                    },
                 )
             }
         },
@@ -240,6 +250,7 @@ fun TombStatsContent(
                 isRefreshing = uiState.isRefreshing,
                 pullToRefreshState = pullToRefreshState,
                 onRefresh = onManualRefresh,
+                refreshTexts = MilletRefreshTexts,
                 contentPadding = PaddingValues(top = innerPadding.calculateTopPadding() + 6.dp),
                 topAppBarScrollBehavior = scrollBehavior,
             ) {
@@ -257,27 +268,6 @@ fun TombStatsContent(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     overscrollEffect = null,
                 ) {
-                    item(key = "window_tabs") {
-                        TabRowWithContour(
-                            tabs = StatsWindow.entries.map { it.label },
-                            selectedTabIndex = uiState.windowIndex,
-                            onTabSelected = onSelectWindow,
-                            colors = TabRowDefaults.tabRowColors(
-                                backgroundColor = colorScheme.surfaceContainer,
-                                contentColor = colorScheme.onSurfaceVariantSummary,
-                                selectedBackgroundColor = colorScheme.secondaryContainer,
-                                selectedContentColor = if (isDynamicColor) {
-                                    colorScheme.onSecondaryContainer
-                                } else {
-                                    colorScheme.onSurface
-                                },
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp),
-                        )
-                    }
-
                     when (effectiveState) {
                         StatsLoadState.Loading -> item(key = "state_loading") {
                             LoadingStateCard(active = uiState.isActive)
@@ -345,16 +335,9 @@ fun TombStatsContent(
                             } else {
                                 statsContent(
                                     snap = snap,
+                                    visibleSections = visibleSections,
                                     rankModeIndex = uiState.rankModeIndex,
                                     onRankModeChange = onSelectRankMode,
-                                    onTileRankClick = { idx ->
-                                        onSelectRankMode(idx)
-                                        val rankItemIndex = 5 +
-                                            (if (snap.isSample) 1 else 0) +
-                                            (if (uiState.refreshFailed) 1 else 0) + 2 +
-                                            (if (snap.buckets.isNotEmpty()) 1 else 0)
-                                        scope.launch { listState.animateScrollToItem(rankItemIndex) }
-                                    },
                                     onOpenDetail = { onSelectDetail(it.uid) },
                                 )
                             }

@@ -39,6 +39,7 @@ import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.navigationevent.findViewTreeNavigationEventDispatcherOwner
 import androidx.navigationevent.setViewTreeNavigationEventDispatcherOwner
 import androidx.navigationevent.toNavigationEvent
+import io.github.univers629.millet.ui.model.TombSection
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
@@ -53,6 +54,9 @@ val LocalColorMode = staticCompositionLocalOf { 0 }
 val LocalEnableBlur = compositionLocalOf { true }
 val LocalEnableFloatingBottomBar = compositionLocalOf { true }
 val LocalEnableFloatingBottomBarBlur = compositionLocalOf { true }
+
+/** 0 = 关闭，1 = Miuix 悬浮底栏，2 = iOS 液态玻璃。 */
+val LocalFloatingBottomBarStyle = compositionLocalOf { 1 }
 val LocalEnableProgressiveBlur = compositionLocalOf { true }
 
 @Composable
@@ -84,6 +88,7 @@ class UiThemeState(private val prefs: SharedPreferences) {
         private const val KEY_PREDICTIVE_BACK = "ui_predictive_back"   // 预测性返回（OnBackInvoked 通道），默认关闭
         private const val KEY_SWIPE_BACK = "ui_swipe_back"             // 横移返回手势，默认开启
         private const val KEY_PROGRESSIVE_BLUR = "ui_progressive_blur" // 顶栏/底栏渐进式模糊
+        private const val KEY_TOMB_SECTIONS = "ui_tomb_sections"       // 墓碑统计页显示的板块
     }
 
     /**
@@ -109,6 +114,19 @@ class UiThemeState(private val prefs: SharedPreferences) {
         val synced = PrefReader.readUiBoolean(prefs, PrefsKeys.FREEZE_STATS)
         showTombStatsTab = synced
         prefs.edit().putBoolean(KEY_SHOW_TOMB_STATS, synced).apply()
+    }
+
+    /** 墓碑统计页里允许显示的板块（未设置时全部显示）。 */
+    var tombSections by mutableStateOf(
+        TombSection.parse(prefs.getStringSet(KEY_TOMB_SECTIONS, null)?.toSet())
+    )
+        private set
+
+    fun updateTombSection(id: String, enabled: Boolean) {
+        val next = tombSections.toMutableSet()
+        if (enabled) next.add(id) else next.remove(id)
+        tombSections = next.toSet()
+        prefs.edit().putStringSet(KEY_TOMB_SECTIONS, next).apply()
     }
 
     fun syncFromSnapshot(snapshot: PrefsSnapshot) {
@@ -150,11 +168,21 @@ class UiThemeState(private val prefs: SharedPreferences) {
     var enableBlur by mutableStateOf(prefs.getBoolean(KEY_ENABLE_BLUR, true))
         private set
 
-    var enableFloatingBottomBar by mutableStateOf(prefs.getBoolean(KEY_FLOATING_BAR, true))
+    /** 悬浮底栏样式：0 = 关闭（经典底栏），1 = Miuix 悬浮底栏，2 = iOS 液态玻璃。 */
+    var floatingBottomBarStyle by mutableIntStateOf(
+        when {
+            !prefs.getBoolean(KEY_FLOATING_BAR, true) -> 0
+            prefs.getBoolean(KEY_FLOATING_BAR_BLUR, true) -> 2
+            else -> 1
+        }
+    )
         private set
 
-    var enableFloatingBottomBarBlur by mutableStateOf(prefs.getBoolean(KEY_FLOATING_BAR_BLUR, true))
-        private set
+    val enableFloatingBottomBar: Boolean
+        get() = floatingBottomBarStyle != 0
+
+    val enableFloatingBottomBarBlur: Boolean
+        get() = floatingBottomBarStyle == 2
 
     /** 是否让返回事件走系统的 OnBackInvoked 通道（关闭后退回传统 onBackPressed 通道）。 */
     var enablePredictiveBack by mutableStateOf(prefs.getBoolean(KEY_PREDICTIVE_BACK, false))
@@ -202,14 +230,13 @@ class UiThemeState(private val prefs: SharedPreferences) {
         prefs.edit().putBoolean(KEY_ENABLE_BLUR, enabled).apply()
     }
 
-    fun updateEnableFloatingBottomBar(enabled: Boolean) {
-        enableFloatingBottomBar = enabled
-        prefs.edit().putBoolean(KEY_FLOATING_BAR, enabled).apply()
-    }
-
-    fun updateEnableFloatingBottomBarBlur(enabled: Boolean) {
-        enableFloatingBottomBarBlur = enabled
-        prefs.edit().putBoolean(KEY_FLOATING_BAR_BLUR, enabled).apply()
+    fun updateFloatingBottomBarStyle(style: Int) {
+        val resolved = style.coerceIn(0, 2)
+        floatingBottomBarStyle = resolved
+        prefs.edit()
+            .putBoolean(KEY_FLOATING_BAR, resolved != 0)
+            .putBoolean(KEY_FLOATING_BAR_BLUR, resolved == 2)
+            .apply()
     }
 
     fun updateEnablePredictiveBack(enabled: Boolean) {
@@ -452,6 +479,7 @@ fun XMilletMiuixTheme(
             LocalEnableBlur provides themeState.enableBlur,
             LocalEnableFloatingBottomBar provides themeState.enableFloatingBottomBar,
             LocalEnableFloatingBottomBarBlur provides themeState.enableFloatingBottomBarBlur,
+            LocalFloatingBottomBarStyle provides themeState.floatingBottomBarStyle,
             LocalEnableProgressiveBlur provides themeState.enableProgressiveBlur,
         ) {
             content()

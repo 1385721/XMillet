@@ -31,14 +31,6 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AcUnit
-import androidx.compose.material.icons.rounded.CheckCircleOutline
-import androidx.compose.material.icons.rounded.DeveloperBoard
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.FilterList
-import androidx.compose.material.icons.rounded.Smartphone
-import androidx.compose.material.icons.rounded.Tag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -75,7 +67,6 @@ import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
-import io.github.univers629.millet.ui.component.XMilletIcons
 import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
@@ -102,9 +93,17 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import io.github.univers629.millet.ui.component.XMilletIcons
+import top.yukonga.miuix.kmp.icon.glass.CoolingFan
+import top.yukonga.miuix.kmp.icon.glass.Filter
+import top.yukonga.miuix.kmp.icon.glass.Ok
+import top.yukonga.miuix.kmp.icon.glass.Phone
+import top.yukonga.miuix.kmp.icon.glass.Processor
+import top.yukonga.miuix.kmp.icon.glass.Tags
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
-import top.yukonga.miuix.kmp.icon.extended.Info
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
+import top.yukonga.miuix.kmp.icon.extended.Info as ExtendedInfo
+import top.yukonga.miuix.kmp.icon.glass.Info
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
@@ -141,6 +140,7 @@ fun HomeRoute(
     onNavigateToProcessList: (filterIndex: Int) -> Unit,
     onOpenAbout: () -> Unit,
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit,
+    onOpenApps: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val runtimeRepo = remember(context) { context.appUiContainer.runtimeAndAppsRepository }
@@ -156,6 +156,7 @@ fun HomeRoute(
         onThawAll = vm::thawAll,
         onNavigateToTab = onNavigateToTab,
         onNavigateToProcessList = onNavigateToProcessList,
+        onOpenApps = onOpenApps,
         onOpenAbout = onOpenAbout,
         onOpenAppProfile = onOpenAppProfile,
         snapshotUnavailable = uiState.snapshotUnavailable,
@@ -176,6 +177,7 @@ fun HomeScreenMiuix(
     },
     onOpenAbout: () -> Unit = {},
     onOpenAppProfile: (packageName: String, uid: Int) -> Unit = { _, _ -> },
+    onOpenApps: () -> Unit = {},
     snapshotUnavailable: Boolean = false,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
@@ -221,27 +223,19 @@ fun HomeScreenMiuix(
                     color = barColor,
                     title = "XMillet",
                     actions = {
+                        val allPass = runtimeStatus.binderAlive && runtimeStatus.powerKeeperConnected
                         BarIconButton(
-                            modifier = Modifier.padding(end = 4.dp),
-                            onClick = { showHookCheckDialog = true }
-                        ) {
-                            val allPass = runtimeStatus.binderAlive && runtimeStatus.powerKeeperConnected
-                            Icon(
-                                imageVector = Icons.Rounded.AcUnit,
-                                contentDescription = "运行环境与服务检测",
-                                tint = if (allPass) colorScheme.primary else Color(0xFFFF9500)
-                            )
-                        }
+                            icon = MiuixIcons.Glass.Info,
+                            contentDescription = "运行环境与服务检测",
+                            tint = if (allPass) colorScheme.primary else Color(0xFFFF9500),
+                            onClick = { showHookCheckDialog = true },
+                        )
                         BarIconButton(
+                            icon = MiuixIcons.Glass.MoreCircle,
+                            contentDescription = "更多操作",
                             onClick = { showTopPopup = true },
-                            holdDownState = showTopPopup
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.MoreCircle,
-                                contentDescription = "更多操作",
-                                tint = colorScheme.onBackground
-                            )
-                        }
+                            holdDownState = showTopPopup,
+                        )
                         GlassOverlayListPopup(
                             show = showTopPopup,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -339,7 +333,7 @@ fun HomeScreenMiuix(
                             count = configuredRuleCount,
                             unit = "应用",
                             modifier = Modifier.weight(1f),
-                            onClick = { onNavigateToTab(io.github.univers629.millet.ui.component.BottomBarDestination.Apps) }
+                            onClick = onOpenApps
                         )
                     }
                 }
@@ -379,7 +373,7 @@ fun HomeScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = MiuixIcons.Info,
+                                    imageVector = MiuixIcons.ExtendedInfo,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -482,15 +476,16 @@ private fun StatusCardMiuix(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        // 还原原项目：右下角超出卡片裁切的 110dp 大号状态图标
                         .offset(27.dp, 31.dp),
                     contentAlignment = Alignment.BottomEnd
                 ) {
                     Icon(
                         modifier = Modifier.size(110.dp),
                         imageVector = if (isWorking) {
-                            Icons.Rounded.CheckCircleOutline
+                            XMilletIcons.StatusOkOutline
                         } else {
-                            Icons.Rounded.ErrorOutline
+                            XMilletIcons.StatusErrorOutline
                         },
                         tint = when {
                             isWorking -> if (isDynamicColor) colorScheme.primary.copy(alpha = 0.8f) else Color(0xFF36D167)
@@ -731,17 +726,17 @@ private fun SystemInfoCard(
                 .padding(16.dp)
         ) {
             InfoText(
-                icon = Icons.Rounded.Tag,
+                icon = MiuixIcons.Glass.Tags,
                 title = "Xposed API 版本",
                 content = xposedStatus,
             )
             InfoText(
-                icon = Icons.Rounded.DeveloperBoard,
+                icon = MiuixIcons.Glass.Processor,
                 title = "内核版本",
                 content = kernelVer,
             )
             InfoText(
-                icon = Icons.Rounded.Smartphone,
+                icon = MiuixIcons.Glass.Phone,
                 title = "设备型号",
                 content = deviceDesc,
                 bottomPadding = 0.dp,
@@ -765,17 +760,17 @@ private fun CoreServicesStatusCard(
                 .padding(16.dp)
         ) {
             InfoText(
-                icon = Icons.Rounded.AcUnit,
+                icon = MiuixIcons.Glass.CoolingFan,
                 title = "GreezeManager",
                 content = if (greezeReady) "已就绪" else "未就绪",
             )
             InfoText(
-                icon = Icons.Rounded.FilterList,
+                icon = MiuixIcons.Glass.Filter,
                 title = "Aurogon",
                 content = if (aurogonReady) "已就绪" else "未就绪",
             )
             InfoText(
-                icon = XMilletIcons.ProcessBolt,
+                icon = MiuixIcons.Glass.Processor,
                 title = "PowerKeeper",
                 content = if (pkConnected) "已连接" else "未连接",
                 bottomPadding = 0.dp,

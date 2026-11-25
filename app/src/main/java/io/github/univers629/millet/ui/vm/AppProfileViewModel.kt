@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.BatteryPolicyHelper
+import io.github.univers629.millet.core.PolicyFlag
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RootHelper
@@ -186,123 +187,52 @@ class AppProfileViewModel(
     }
 
     fun setWhiteList(checked: Boolean) {
-        if (checked) {
-            policyRepo.updateAppMemberships(
-                packageName,
-                uid,
-                PrefsKeys.WHITE_APP_SET to true,
-                PrefsKeys.MESSAGE_APP_SET to false,
-                PrefsKeys.FORCE_FREEZE_SET to false,
-                PrefsKeys.BLOCK_THAW_SET to false,
-                PrefsKeys.FORBID_SYNC_BINDER_SET to false,
-                PrefsKeys.IGNORE_NETWORK_WAKE_SET to false,
-                PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false,
-            )
-            if (!isDualApp) {
-                viewModelScope.launch {
-                    val ok = bridge.setIgnoringBatteryOptimization(packageName)
-                    refreshSystemPolicy()
-                    runtimeRepo.refreshBatteryUnrestricted()
-                    if (!ok) {
-                        policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.WHITE_APP_SET to false)
-                        toastChannel.trySend("系统省电策略写入失败：需要模块在线或 Root 授权")
-                    }
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.WHITE, checked)
+        if (!isDualApp) {
+            viewModelScope.launch {
+                val ok = if (checked) {
+                    bridge.setIgnoringBatteryOptimization(packageName)
+                } else {
+                    bridge.restoreBatteryOptimization(packageName)
                 }
-            }
-        } else {
-            policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.WHITE_APP_SET to false)
-            if (!isDualApp) {
-                viewModelScope.launch {
-                    val ok = bridge.restoreBatteryOptimization(packageName)
-                    refreshSystemPolicy()
-                    runtimeRepo.refreshBatteryUnrestricted()
-                    if (!ok) {
-                        policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.WHITE_APP_SET to true)
-                        toastChannel.trySend("恢复系统省电策略失败：需要模块在线或 Root 授权")
-                    }
+                refreshSystemPolicy()
+                runtimeRepo.refreshBatteryUnrestricted()
+                if (!ok) {
+                    policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.WHITE, !checked)
+                    toastChannel.trySend(
+                        if (checked) {
+                            "系统省电策略写入失败：需要模块在线或 Root 授权"
+                        } else {
+                            "恢复系统省电策略失败：需要模块在线或 Root 授权"
+                        }
+                    )
                 }
             }
         }
     }
 
     fun setMessageApp(checked: Boolean) {
-        if (checked) {
-            val prefs = policyRepo.prefsFlow.value
-            val changes = mutableListOf(PrefsKeys.MESSAGE_APP_SET to true)
-            if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, packageName, uid)) {
-                changes.add(PrefsKeys.WHITE_APP_SET to false)
-            }
-            if (AppUidUtils.containsPolicyTarget(prefs.ignoreNetworkWakeSet, packageName, uid)) {
-                changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
-            }
-            policyRepo.updateAppMemberships(packageName, uid, *changes.toTypedArray())
-        } else {
-            policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.MESSAGE_APP_SET to false)
-        }
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.MESSAGE, checked)
     }
 
     fun setNotFreezeWhenHasFgs(checked: Boolean) {
-        if (checked) {
-            val prefs = policyRepo.prefsFlow.value
-            val changes = mutableListOf(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to true)
-            if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, packageName, uid)) {
-                changes.add(PrefsKeys.WHITE_APP_SET to false)
-            }
-            if (AppUidUtils.containsPolicyTarget(prefs.forceFreezeSet, packageName, uid)) {
-                changes.add(PrefsKeys.FORCE_FREEZE_SET to false)
-                changes.add(PrefsKeys.BLOCK_THAW_SET to false)
-                changes.add(PrefsKeys.FORBID_SYNC_BINDER_SET to false)
-                changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
-            }
-            policyRepo.updateAppMemberships(packageName, uid, *changes.toTypedArray())
-        } else {
-            policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false)
-        }
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.NOT_FREEZE_FGS, checked)
     }
 
     fun setForceFreeze(checked: Boolean) {
-        if (checked) {
-            val prefs = policyRepo.prefsFlow.value
-            val changes = mutableListOf(PrefsKeys.FORCE_FREEZE_SET to true)
-            if (AppUidUtils.containsPolicyTarget(prefs.whiteAppSet, packageName, uid)) {
-                changes.add(PrefsKeys.WHITE_APP_SET to false)
-            }
-            if (AppUidUtils.containsPolicyTarget(prefs.notFreezeWhenHasFgsSet, packageName, uid)) {
-                changes.add(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false)
-            }
-            policyRepo.updateAppMemberships(packageName, uid, *changes.toTypedArray())
-        } else {
-            policyRepo.updateAppMemberships(
-                packageName,
-                uid,
-                PrefsKeys.FORCE_FREEZE_SET to false,
-                PrefsKeys.BLOCK_THAW_SET to false,
-                PrefsKeys.FORBID_SYNC_BINDER_SET to false,
-                PrefsKeys.IGNORE_NETWORK_WAKE_SET to false,
-            )
-        }
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.FORCE_FREEZE, checked)
     }
 
     fun setBlockThaw(checked: Boolean) {
-        policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.BLOCK_THAW_SET to checked)
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.BLOCK_THAW, checked)
     }
 
     fun setForbidSyncBinder(checked: Boolean) {
-        policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.FORBID_SYNC_BINDER_SET to checked)
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.FORBID_SYNC, checked)
     }
 
     fun setIgnoreNetworkWake(checked: Boolean) {
-        val prefs = policyRepo.prefsFlow.value
-        if (checked && AppUidUtils.containsPolicyTarget(prefs.messageAppSet, packageName, uid)) {
-            policyRepo.updateAppMemberships(
-                packageName,
-                uid,
-                PrefsKeys.IGNORE_NETWORK_WAKE_SET to true,
-                PrefsKeys.MESSAGE_APP_SET to false,
-            )
-        } else {
-            policyRepo.updateAppMemberships(packageName, uid, PrefsKeys.IGNORE_NETWORK_WAKE_SET to checked)
-        }
+        policyRepo.toggleAppPolicy(packageName, uid, PolicyFlag.IGNORE_NETWORK_WAKE, checked)
     }
 
     private suspend fun scanProcesses() {

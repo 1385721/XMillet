@@ -247,7 +247,7 @@ object PrefReader {
         for (group in PrefGroup.entries) {
             snapshot = mergeGroupIntoSnapshot(snapshot, raw, group)
         }
-        return snapshot
+        return PrefsSchema.sanitizeSnapshot(snapshot).snapshot
     }
 
     private fun mergeGroupIntoSnapshot(
@@ -287,19 +287,21 @@ object PrefReader {
                 disableMotionListener = getBooleanOrDefault(raw, PrefsKeys.DISABLE_MOTION_LISTENER)
             )
 
-            PrefGroup.APP_SETS -> base.copy(
-                whiteAppSet = getStringSetOrDefault(raw, PrefsKeys.WHITE_APP_SET),
-                messageAppSet = getStringSetOrDefault(raw, PrefsKeys.MESSAGE_APP_SET),
-                forceFreezeSet = getStringSetOrDefault(raw, PrefsKeys.FORCE_FREEZE_SET),
-                blockThawSet = getStringSetOrDefault(raw, PrefsKeys.BLOCK_THAW_SET),
-                forbidSyncBinderSet = getStringSetOrDefault(raw, PrefsKeys.FORBID_SYNC_BINDER_SET),
-                notFreezeWhenHasFgsSet = getStringSetOrDefault(raw, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET),
-                ignoreNetworkWakeSet = getStringSetOrDefault(raw, PrefsKeys.IGNORE_NETWORK_WAKE_SET)
-            )
+            PrefGroup.APP_SETS -> PrefsSchema.sanitizeSnapshot(
+                base.copy(
+                    whiteAppSet = getStringSetOrDefault(raw, PrefsKeys.WHITE_APP_SET),
+                    messageAppSet = getStringSetOrDefault(raw, PrefsKeys.MESSAGE_APP_SET),
+                    forceFreezeSet = getStringSetOrDefault(raw, PrefsKeys.FORCE_FREEZE_SET),
+                    blockThawSet = getStringSetOrDefault(raw, PrefsKeys.BLOCK_THAW_SET),
+                    forbidSyncBinderSet = getStringSetOrDefault(raw, PrefsKeys.FORBID_SYNC_BINDER_SET),
+                    notFreezeWhenHasFgsSet = getStringSetOrDefault(raw, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET),
+                    ignoreNetworkWakeSet = getStringSetOrDefault(raw, PrefsKeys.IGNORE_NETWORK_WAKE_SET),
+                )
+            ).snapshot
 
             PrefGroup.LOG_CONFIG -> base.copy(
-                logType = (raw[PrefsKeys.LOG_TYPE] as? String) ?: PrefsDefaults.LOG_TYPE,
-                logLevel = (raw[PrefsKeys.LOG_LEVEL] as? String) ?: PrefsDefaults.LOG_LEVEL
+                logType = PrefsSchema.normalizeLogType(raw[PrefsKeys.LOG_TYPE] as? String),
+                logLevel = PrefsSchema.normalizeLogLevel(raw[PrefsKeys.LOG_LEVEL] as? String),
             )
         }
     }
@@ -324,6 +326,10 @@ object PrefReader {
 
     // ==================== UI 侧读写与热更新封装 ====================
 
+    private val migratedUiPrefs = java.util.Collections.newSetFromMap(
+        java.util.IdentityHashMap<SharedPreferences, Boolean>()
+    )
+
     /**
      * 打开 Device-Protected Storage 下的 Settings.xml（供 App UI 进程调用）。
      * Direct Boot 阶段即可访问；跨进程配置由 [XposedPrefsBridge] 同步到 LibXposed RemotePreferences，
@@ -335,7 +341,34 @@ object PrefReader {
         } catch (_: Throwable) {
             context
         }
-        return deContext.getSharedPreferences(PrefsKeys.PREFS_FILE_NAME, Context.MODE_PRIVATE)
+        val prefs = deContext.getSharedPreferences(PrefsKeys.PREFS_FILE_NAME, Context.MODE_PRIVATE)
+        ensureUiPrefsSchema(prefs)
+        return prefs
+    }
+
+    internal fun ensureUiPrefsSchema(prefs: SharedPreferences) {
+        synchronized(migratedUiPrefs) {
+            if (!migratedUiPrefs.add(prefs)) return
+        }
+        val version = runCatching { prefs.getInt(PrefsSchema.KEY_SCHEMA_VERSION, 0) }.getOrDefault(0)
+        if (version >= PrefsSchema.CURRENT_VERSION) return
+        val raw = readRawUiSnapshot(prefs)
+        val result = PrefsSchema.sanitizeSnapshot(raw)
+        applyPrefsSuppressed(prefs, clearFirst = false) {
+            putInt(PrefsSchema.KEY_SCHEMA_VERSION, PrefsSchema.CURRENT_VERSION)
+            if (result.modified) {
+                val cleaned = result.snapshot
+                putStringSet(PrefsKeys.WHITE_APP_SET, cleaned.whiteAppSet)
+                putStringSet(PrefsKeys.MESSAGE_APP_SET, cleaned.messageAppSet)
+                putStringSet(PrefsKeys.FORCE_FREEZE_SET, cleaned.forceFreezeSet)
+                putStringSet(PrefsKeys.BLOCK_THAW_SET, cleaned.blockThawSet)
+                putStringSet(PrefsKeys.FORBID_SYNC_BINDER_SET, cleaned.forbidSyncBinderSet)
+                putStringSet(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET, cleaned.notFreezeWhenHasFgsSet)
+                putStringSet(PrefsKeys.IGNORE_NETWORK_WAKE_SET, cleaned.ignoreNetworkWakeSet)
+                putString(PrefsKeys.LOG_TYPE, cleaned.logType)
+                putString(PrefsKeys.LOG_LEVEL, cleaned.logLevel)
+            }
+        }
     }
 
     /**
@@ -377,9 +410,12 @@ object PrefReader {
     var onUiPrefsMutated: ((SharedPreferences) -> Unit)? = null
 
     /**
-     * 读取 UI 侧完整配置快照（与 Hook 侧 [buildFullSnapshot] 共享同一默认值表）。
+     * 读取 UI 侧完整配置快照（与 Hook 侧 [buildFullSnapshot] 共享同一默认值表与 Schema 净化）。
      */
-    fun readUiSnapshot(prefs: SharedPreferences): PrefsSnapshot = PrefsSnapshot(
+    fun readUiSnapshot(prefs: SharedPreferences): PrefsSnapshot =
+        PrefsSchema.sanitizeSnapshot(readRawUiSnapshot(prefs)).snapshot
+
+    private fun readRawUiSnapshot(prefs: SharedPreferences): PrefsSnapshot = PrefsSnapshot(
         isLog = readUiBoolean(prefs, PrefsKeys.IS_LOG),
         simplifyLog = readUiBoolean(prefs, PrefsKeys.SIMPLIFY_LOG),
         disableKill = readUiBoolean(prefs, PrefsKeys.DISABLE_KILL),

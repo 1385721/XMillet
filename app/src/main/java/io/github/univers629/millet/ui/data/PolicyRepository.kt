@@ -3,6 +3,7 @@ package io.github.univers629.millet.ui.data
 import android.content.SharedPreferences
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.PolicyFlag
+import io.github.univers629.millet.core.PolicyRules
 import io.github.univers629.millet.core.PolicyTemplate
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
@@ -117,6 +118,54 @@ class PolicyRepository(
             updates[key] = currentSet
         }
         writer.putStringSets(updates, changes.first().first)
+        _prefsFlow.value = PrefReader.readUiSnapshot(prefs)
+    }
+
+    /**
+     * 通过 [PolicyRules.toggle] 统一计算互斥/依附关系，仅把发生变化的集合一次性落盘并热重载。
+     */
+    fun toggleAppPolicy(
+        packageName: String,
+        uid: Int,
+        flag: PolicyFlag,
+        enabled: Boolean,
+    ) {
+        val policyTarget = AppUidUtils.encodeQueryTarget(packageName, uid)
+        val snapshot = _prefsFlow.value
+        val currentByFlag = mapOf(
+            PolicyFlag.WHITE to snapshot.whiteAppSet,
+            PolicyFlag.MESSAGE to snapshot.messageAppSet,
+            PolicyFlag.NOT_FREEZE_FGS to snapshot.notFreezeWhenHasFgsSet,
+            PolicyFlag.FORCE_FREEZE to snapshot.forceFreezeSet,
+            PolicyFlag.BLOCK_THAW to snapshot.blockThawSet,
+            PolicyFlag.FORBID_SYNC to snapshot.forbidSyncBinderSet,
+            PolicyFlag.IGNORE_NETWORK_WAKE to snapshot.ignoreNetworkWakeSet,
+        )
+        val currentFlags = java.util.EnumSet.noneOf(PolicyFlag::class.java)
+        for (entry in PolicyFlag.entries) {
+            if (policyTarget in currentByFlag[entry].orEmpty()) {
+                currentFlags.add(entry)
+            }
+        }
+        val nextFlags = PolicyRules.toggle(currentFlags, flag, enabled)
+        val updates = LinkedHashMap<String, Set<String>>()
+        val orderedFlags = buildList {
+            add(flag)
+            for (item in PolicyFlag.entries) {
+                if (item != flag) add(item)
+            }
+        }
+        for (item in orderedFlags) {
+            val wasIn = item in currentFlags
+            val shouldBeIn = item in nextFlags
+            if (wasIn != shouldBeIn) {
+                val setCopy = PrefReader.readUiStringSet(prefs, item.key)
+                if (shouldBeIn) setCopy.add(policyTarget) else setCopy.remove(policyTarget)
+                updates[item.key] = setCopy
+            }
+        }
+        if (updates.isEmpty()) return
+        writer.putStringSets(updates, flag.key)
         _prefsFlow.value = PrefReader.readUiSnapshot(prefs)
     }
 

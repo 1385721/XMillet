@@ -3,7 +3,6 @@ package io.github.univers629.millet.core
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 
 /**
@@ -19,15 +18,8 @@ object LsposedHelper {
 
     private const val ACTION_SECRET_CODE_TELEPHONY = "android.telephony.action.SECRET_CODE"
 
-    private const val ACTION_SECRET_CODE_LEGACY = "android.provider.Telephony.SECRET_CODE"
-
-
     private val secretCodeAction: String
-        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ACTION_SECRET_CODE_TELEPHONY
-        } else {
-            ACTION_SECRET_CODE_LEGACY
-        }
+        get() = ACTION_SECRET_CODE_TELEPHONY
 
     /**
      * 模块是否已真正生效。

@@ -34,7 +34,6 @@ import top.yukonga.miuix.kmp.icon.glass.Error
 import top.yukonga.miuix.kmp.icon.glass.Ok
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
  * Hook 点位与系统环境状态等级。

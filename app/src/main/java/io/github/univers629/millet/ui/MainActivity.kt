@@ -75,8 +75,6 @@ import io.github.univers629.millet.ui.screen.ThemeSettingsScreenMiuix
 import io.github.univers629.millet.ui.screen.TombStatsScreenMiuix
 import io.github.univers629.millet.ui.theme.LocalFloatingBottomBarStyle
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
-import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBar
-import io.github.univers629.millet.ui.theme.LocalEnableFloatingBottomBarBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
 import io.github.univers629.millet.ui.theme.XMilletMiuixTheme
 import io.github.univers629.millet.ui.util.AppUpdateController

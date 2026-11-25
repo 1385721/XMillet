@@ -33,8 +33,6 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.abs
@@ -320,11 +318,11 @@ class FreezeStatsEngine(
             ensureCurrentDayLocked(now)
             val prev = isScreenOn
             if (prev == screenOn) return
-            if (!prev && screenOn) {
+            if (screenOn) {
                 flushScreenOffLocked(now)
                 screenOffSinceMillis = 0L
                 isScreenOn = true
-            } else if (prev && !screenOn) {
+            } else {
                 isScreenOn = false
                 screenOffSinceMillis = if (enabledProvider()) now else 0L
                 shouldSaveOnScreenOff = dirty

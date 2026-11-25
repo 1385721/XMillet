@@ -58,7 +58,6 @@ import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import io.github.univers629.millet.ui.util.resolveStatsDetail
 import io.github.univers629.millet.ui.vm.TombStatsUiState
 import io.github.univers629.millet.ui.vm.TombStatsViewModel
-import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh

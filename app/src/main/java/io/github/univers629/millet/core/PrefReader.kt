@@ -91,7 +91,7 @@ object PrefReader {
 
         if (group == null || group == PrefGroup.MILLET_FLAGS) {
             if (!updated.simplifyLog &&
-                (changedKey == PrefsKeys.SIMPLIFY_LOG || prev.simplifyLog != updated.simplifyLog)
+                (changedKey == PrefsKeys.SIMPLIFY_LOG || prev.simplifyLog)
             ) {
                 dispatchSystemReloadCallback(PrefsKeys.SIMPLIFY_LOG, PrefGroup.MILLET_FLAGS, updated)
             }

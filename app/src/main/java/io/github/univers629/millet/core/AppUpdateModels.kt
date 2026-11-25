@@ -331,7 +331,7 @@ internal object SimpleJsonParser {
                 if (!peek('"')) error("Expected object key at $pos")
                 val key = readString()
                 skipWhitespace()
-                expect(':')
+                expectColon()
                 val value = readValue()
                 map[key] = value
                 skipWhitespace()
@@ -429,8 +429,8 @@ internal object SimpleJsonParser {
 
         private fun peek(c: Char): Boolean = pos < src.length && src[pos] == c
 
-        private fun expect(c: Char) {
-            if (!peek(c)) error("Expected '$c' at $pos")
+        private fun expectColon() {
+            if (!peek(':')) error("Expected ':' at $pos")
             pos++
         }
     }

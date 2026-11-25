@@ -1,10 +1,8 @@
 package io.github.univers629.millet.ui.screen
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.widget.Toast
@@ -52,7 +50,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -78,7 +75,6 @@ import io.github.univers629.millet.core.PolicyFlag
 import io.github.univers629.millet.core.PolicyRules
 import io.github.univers629.millet.core.PolicyTemplate
 import io.github.univers629.millet.core.PolicyTemplateCodec
-import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
@@ -91,7 +87,6 @@ import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
 import io.github.univers629.millet.ui.util.PolicyTemplateApplier
-import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import io.github.univers629.millet.ui.vm.PolicyTemplateDetailViewModel
 import io.github.univers629.millet.ui.vm.PolicyTemplatesViewModel
@@ -110,7 +105,6 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.glass.Add
@@ -120,7 +114,6 @@ import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.icon.glass.MoreCircle
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.LocalDismissState
@@ -920,8 +913,9 @@ internal fun PolicyTemplateEditorSheet(
         show = show,
         title = if (initial == null) "新建自定义模板" else "编辑模板",
         insideMargin = DpSize(16.dp, 0.dp),
+        progressiveBlur = false,
         onDismissRequest = onDismiss,
-    ) {
+    ) { innerPadding ->
         val dismissState = LocalDismissState.current
         Column(
             modifier = Modifier
@@ -933,6 +927,7 @@ internal fun PolicyTemplateEditorSheet(
                     .fillMaxWidth()
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState())
+                    .padding(innerPadding)
             ) {
                 TemplateNameField(
                     value = name,
@@ -1119,12 +1114,14 @@ private fun PolicyAppPickerSheet(
         show = show,
         title = "套用「${template.name}」",
         insideMargin = DpSize(16.dp, 0.dp),
+        progressiveBlur = false,
         onDismissRequest = onDismiss,
-    ) {
+    ) { innerPadding ->
         val dismissState = LocalDismissState.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(innerPadding)
                 .padding(bottom = navBottomPadding + 16.dp)
         ) {
             MiuixCapsuleSearchBar(

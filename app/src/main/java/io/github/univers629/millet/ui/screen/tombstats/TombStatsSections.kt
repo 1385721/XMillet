@@ -3,7 +3,6 @@ package io.github.univers629.millet.ui.screen.tombstats
 import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.basic.InputField
-import kotlinx.coroutines.delay
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.animation.core.spring
@@ -14,14 +13,11 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -76,7 +72,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.univers629.millet.core.FreezeReasonClassifier
 import io.github.univers629.millet.core.StatsEventKind
 import io.github.univers629.millet.core.StatsTimeBucket
 import io.github.univers629.millet.core.StatsWindow
@@ -123,8 +118,6 @@ import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleClip
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
-import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
-import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 @Composable
 private fun WakeCategory.displayColor(): Color {
@@ -1546,6 +1539,7 @@ internal fun AppStatsDetailSheet(
         backdrop = PopupBackdropHolder.current,
         show = app != null,
         insideMargin = DpSize(16.dp, 0.dp),
+        progressiveBlur = false,
         endAction = {
             val dismissState = LocalDismissState.current
             Row(
@@ -1579,7 +1573,7 @@ internal fun AppStatsDetailSheet(
             }
         },
         onDismissRequest = onDismiss,
-    ) {
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1589,7 +1583,8 @@ internal fun AppStatsDetailSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .padding(innerPadding),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

@@ -1,5 +1,3 @@
-@file:androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.TIRAMISU)
-
 package io.github.univers629.millet.ui.component.effect
 
 import androidx.compose.runtime.withFrameNanos

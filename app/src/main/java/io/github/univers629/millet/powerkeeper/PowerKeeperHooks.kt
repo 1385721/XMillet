@@ -10,7 +10,6 @@ import io.github.univers629.millet.core.AppGateContext
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.GateDecision
 import io.github.univers629.millet.core.ModernHookInstaller
-import io.github.univers629.millet.core.ServiceRoleProtection
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.HookInstallRegistry
 import io.github.univers629.millet.core.HookDecisions
@@ -1116,7 +1115,7 @@ object PowerKeeperHooks {
         targetClass = CLASS_BRIGHT_CONTROLLER,
         methodName = "frozenThaw",
         paramTypes = listOf(
-            java.util.List::class.java,
+            List::class.java,
             Boolean::class.javaPrimitiveType!!,
             Int::class.javaPrimitiveType!!,
             Int::class.javaPrimitiveType!!,

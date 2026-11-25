@@ -1,8 +1,6 @@
 package io.github.univers629.millet.ui.component
 import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
-import top.yukonga.miuix.kmp.glass.GlassBottomSheet
-import io.github.univers629.millet.ui.util.PopupBackdropHolder
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -202,56 +200,55 @@ private fun UpdateDialogFooter(
     onIgnoreVersion: () -> Unit,
     onOpenReleasePage: () -> Unit,
 ) {
-    val downloading: Any? = if (isDownloading) Unit else null
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    TextButton(
-                        text = if (downloading != null) "取消" else "稍后再说",
-                        onClick = {
-                            if (downloading != null) onCancelDownload() else onDismiss()
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    TextButton(
-                        text = primaryLabel,
-                        enabled = downloading == null,
-                        onClick = onPrimaryAction,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.textButtonColorsPrimary(),
-                    )
-                }
+    Row(
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        TextButton(
+            text = if (isDownloading) "取消" else "稍后再说",
+            onClick = {
+                if (isDownloading) onCancelDownload() else onDismiss()
+            },
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(12.dp))
+        TextButton(
+            text = primaryLabel,
+            enabled = !isDownloading,
+            onClick = onPrimaryAction,
+            modifier = Modifier.weight(1f),
+            colors = ButtonDefaults.textButtonColorsPrimary(),
+        )
+    }
 
-                if (downloading == null) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "忽略此版本",
-                            fontSize = 12.5.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(onClick = onIgnoreVersion)
-                                .padding(horizontal = 4.dp, vertical = 4.dp),
-                        )
-                        Text(
-                            text = "前往发布页",
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = colorScheme.primary,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(onClick = onOpenReleasePage)
-                                .padding(horizontal = 4.dp, vertical = 4.dp),
-                        )
-                    }
-                }
+    if (!isDownloading) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "忽略此版本",
+                fontSize = 12.5.sp,
+                color = colorScheme.onSurfaceVariantSummary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onIgnoreVersion)
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+            )
+            Text(
+                text = "前往发布页",
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onOpenReleasePage)
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+            )
+        }
+    }
 }
 

@@ -2,12 +2,8 @@ package io.github.univers629.millet.ui.screen
 import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
 import io.github.univers629.millet.ui.component.FoldablePreferenceCard
 import io.github.univers629.millet.ui.component.FoldablePreferenceSection
-import top.yukonga.miuix.kmp.glass.GlassBottomSheet
-import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
-import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.content.ContentValues
 import android.content.Context
@@ -48,7 +44,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -56,10 +51,7 @@ import androidx.core.content.FileProvider
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
-import io.github.univers629.millet.core.PrefReader
-import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
-import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.ui.BackupRestoreHelper
 import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
@@ -79,7 +71,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
@@ -87,7 +78,6 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.glass.Widget
@@ -102,15 +92,8 @@ import top.yukonga.miuix.kmp.icon.glass.LockOutline
 import top.yukonga.miuix.kmp.icon.glass.JumpNext
 import top.yukonga.miuix.kmp.icon.glass.HapticIntensity
 import top.yukonga.miuix.kmp.icon.glass.AccessControl
-import top.yukonga.miuix.kmp.icon.glass.Tune
-import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
 import top.yukonga.miuix.kmp.icon.glass.Battery100
-import top.yukonga.miuix.kmp.icon.glass.Copy
-import top.yukonga.miuix.kmp.icon.glass.DecorationMaintenance
 import top.yukonga.miuix.kmp.icon.glass.DisplayBrightness
-import top.yukonga.miuix.kmp.icon.glass.FeedbackOutline
-import top.yukonga.miuix.kmp.icon.glass.GesturePassword
-import top.yukonga.miuix.kmp.icon.glass.PlaybackSpeed
 import top.yukonga.miuix.kmp.icon.glass.QuietMode
 import top.yukonga.miuix.kmp.icon.glass.Save
 import top.yukonga.miuix.kmp.icon.glass.Share
@@ -125,17 +108,12 @@ import top.yukonga.miuix.kmp.icon.glass.Import
 import top.yukonga.miuix.kmp.icon.glass.Log
 import top.yukonga.miuix.kmp.icon.glass.Reset
 import top.yukonga.miuix.kmp.icon.extended.Reset
-import top.yukonga.miuix.kmp.icon.extended.Tasks
-import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
-import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
-import top.yukonga.miuix.kmp.window.WindowDialog
 
 /**
  * 设置页入口：连接 [SettingsViewModel] 与纯展示 [SettingsContent]。

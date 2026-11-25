@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import io.github.univers629.millet.core.AppUidUtils
 import io.github.univers629.millet.core.BatteryPolicyHelper
 import io.github.univers629.millet.core.PolicyFlag
-import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.RootHelper
 import io.github.univers629.millet.core.SystemBatteryOptimizationHelper

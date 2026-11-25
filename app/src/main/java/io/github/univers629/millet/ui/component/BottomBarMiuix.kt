@@ -197,7 +197,7 @@ fun BoxScope.BottomBarMiuix(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .then(
-                        if (blurActive && blurBackdrop != null) {
+                        if (blurActive) {
                             Modifier.textureBlur(
                                 backdrop = blurBackdrop,
                                 shape = RectangleShape,

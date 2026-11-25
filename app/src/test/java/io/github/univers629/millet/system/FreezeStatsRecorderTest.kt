@@ -7,7 +7,6 @@ import io.github.univers629.millet.core.StatsWindow
 import io.github.univers629.millet.core.WakeCategory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -196,13 +195,13 @@ class FreezeStatsRecorderTest {
         assertEquals("r44", snap.recent.last().rawReason)
 
         // 单应用写入 25 种不同理由（其中 2 种高频，23 种低频），最终仅返回 Top 5
-        for (k in 1..20) {
+        repeat(20) {
             nowMs += 1_000L
             engine.recordFreeze(10100, "warm")
             nowMs += 11_000L
             engine.recordThaw(10100, "PACKET")
         }
-        for (k in 1..10) {
+        repeat(10) {
             nowMs += 1_000L
             engine.recordFreeze(10100, "warm")
             nowMs += 11_000L

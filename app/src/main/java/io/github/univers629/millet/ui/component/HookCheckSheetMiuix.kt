@@ -1,5 +1,4 @@
 package io.github.univers629.millet.ui.component
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 
@@ -235,6 +234,8 @@ fun HookCheckSheetMiuix(
         show = show,
         title = "运行环境与服务检测",
         insideMargin = DpSize(16.dp, 8.dp),
+        // miuix 6aa8324 起 progressiveBlur 默认改为 false：顶栏改为栈式排布，不再以浅色带覆盖正文
+        progressiveBlur = false,
         startAction = {
             IconButton(
                 onClick = {
@@ -273,7 +274,7 @@ fun HookCheckSheetMiuix(
             onDismiss()
             dismissState?.invoke()
         },
-    ) {
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -284,7 +285,8 @@ fun HookCheckSheetMiuix(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = bodyMaxHeight)
-                    .verticalScroll(outerScroll),
+                    .verticalScroll(outerScroll)
+                    .padding(innerPadding),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 HookCheckStreamHeader(

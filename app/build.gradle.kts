@@ -7,15 +7,15 @@ plugins {
 android {
     namespace = "io.github.univers629.millet"
     compileSdk = 37
-    // miuix 0.9.5-beta04 的 AAR 元数据要求 minCompileSdk=37 + minCompileMinorSdk=2，AGP 9.4 起会校验次版本
+    // miuix 0.9.5-rc01 的 AAR 元数据要求 minCompileSdk=37 + minCompileMinorSdk=2，AGP 9.4 起会校验次版本
     compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "io.github.univers629.millet"
         minSdk = 33
         targetSdk = 37
-        versionCode = 1300
-        versionName = "1.3.0"
+        versionCode = 1400
+        versionName = "1.4.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -89,32 +89,32 @@ dependencies {
     implementation("io.github.libxposed:service:102.0.0")
 
     // Jetpack Compose & Activity & Lifecycle
-    implementation("androidx.activity:activity-compose:1.10.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
-    implementation("androidx.compose.material3:material3:1.4.0")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.1")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.1")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.1")
+    implementation("androidx.compose.material3:material3:1.5.0")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.navigationevent:navigationevent:1.2.0")
     implementation("androidx.navigationevent:navigationevent-compose:1.2.0")
 
-    // Miuix KMP UI 组件库、图标、导航、设置项与毛玻璃特效 (0.9.5-beta04)
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-glass-icons-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-nav-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-material-android:0.9.5-beta04")
-    implementation("top.yukonga.miuix.kmp:miuix-glass-android:0.9.5-beta04")
+    // Miuix KMP UI 组件库、图标、导航、设置项与毛玻璃特效 (0.9.5-rc01)
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-glass-icons-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-nav-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-material-android:0.9.5-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-glass-android:0.9.5-rc01")
 
     // 返回栈持久化（rememberNavBackStack 的 JSON 编解码）使用
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0")
 
     // 预测性返回开关需要反射 ApplicationInfo 的隐藏 API
-    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.2")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }
 

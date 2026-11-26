@@ -7,7 +7,6 @@ import io.github.univers629.millet.core.StatsWindow
 import io.github.univers629.millet.core.WakeCategory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -196,13 +195,13 @@ class FreezeStatsRecorderTest {
         assertEquals("r44", snap.recent.last().rawReason)
 
         // 单应用写入 25 种不同理由（其中 2 种高频，23 种低频），最终仅返回 Top 5
-        for (k in 1..20) {
+        repeat(20) {
             nowMs += 1_000L
             engine.recordFreeze(10100, "warm")
             nowMs += 11_000L
             engine.recordThaw(10100, "PACKET")
         }
-        for (k in 1..10) {
+        repeat(10) {
             nowMs += 1_000L
             engine.recordFreeze(10100, "warm")
             nowMs += 11_000L
@@ -774,7 +773,7 @@ class FreezeStatsRecorderTest {
         assertEquals(3_000L, snapshot.screenOffMillis)
         assertEquals(now - 3_000L, snapshot.recent.first { it.kind == StatsEventKind.FREEZE }.timeMillis)
         assertTrue(engine.saveSync())
-        assertTrue(storage.readText().startsWith("v2"))
+        assertTrue(storage.readText().startsWith("v3"))
     }
 
     @Test
@@ -851,4 +850,124 @@ class FreezeStatsRecorderTest {
         val after = engine.buildSnapshot(StatsWindow.TODAY)
         assertEquals(1, after.freezeCount)
         assertEquals(60_000L, after.apps.single { it.uid == 10296 }.frozenMillis)
-    }}
+    }
+
+    @Test
+    fun `doze session records cpu deltas battery drop and idempotent deep entry`() {
+        var nowMs = millisAt(2026, 11, 25, 2, 0)
+        var elapsedMs = 100_000L
+        var cpuMap = mapOf(10101 to 1_000L, 10102 to 500L)
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            elapsedClock = { elapsedMs },
+            enabledProvider = { true },
+            packageResolver = { uid -> if (uid == 10101) "com.chat.app" else "com.news.app" },
+        )
+
+        // 进入深睡 IDLE(5)，随后重复上报 IDLE(5)（如 stepIdleStateLocked + runDeepDozeAlarm 同时触发）
+        engine.onDozeStateObserved(
+            state = 5,
+            wallMs = nowMs,
+            elapsedMs = elapsedMs,
+            batteryPct = 90,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.PROC_UID_STAT to cpuMap },
+        )
+        nowMs += 5_000L
+        elapsedMs += 5_000L
+        engine.onDozeStateObserved(
+            state = 5,
+            wallMs = nowMs,
+            elapsedMs = elapsedMs,
+            batteryPct = 90,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.PROC_UID_STAT to cpuMap },
+        )
+
+        // 进入维护窗口 IDLE_MAINTENANCE(6)
+        nowMs += 600_000L
+        elapsedMs += 600_000L
+        engine.onDozeStateObserved(
+            state = 6,
+            wallMs = nowMs,
+            elapsedMs = elapsedMs,
+            batteryPct = 89,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.PROC_UID_STAT to cpuMap },
+        )
+
+        // 退出深睡 -> ACTIVE(0)
+        nowMs += 600_000L
+        elapsedMs += 600_000L
+        cpuMap = mapOf(10101 to 2_500L, 10102 to 540L) // 10102 增量 40ms (<100ms 噪声阈值) 被过滤
+        engine.onDozeStateObserved(
+            state = 0,
+            wallMs = nowMs,
+            elapsedMs = elapsedMs,
+            batteryPct = 88,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.PROC_UID_STAT to cpuMap },
+        )
+
+        val snap = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(1, snap.dozeSummary.sessionCount)
+        assertEquals(1_205_000L, snap.dozeSummary.totalDurationMillis)
+        assertEquals(1, snap.dozeSummary.maintenanceCount)
+        assertEquals(2, snap.dozeSummary.netBatteryDropPct)
+        assertEquals(io.github.univers629.millet.core.CpuStatSource.PROC_UID_STAT, snap.dozeSummary.cpuSource)
+        assertEquals(1, snap.dozeSummary.apps.size)
+        assertEquals(10101, snap.dozeSummary.apps.single().uid)
+        assertEquals(1_500L, snap.dozeSummary.apps.single().cpuMillis)
+    }
+
+    @Test
+    fun `backfillBootDozeIntervals imports non-overlapping history and respects reset`() {
+        var nowMs = millisAt(2026, 11, 25, 19, 0)
+        var elapsedMs = 2_000_000L
+        val engine = FreezeStatsEngine(
+            zoneId = testZone,
+            clock = { nowMs },
+            elapsedClock = { elapsedMs },
+            enabledProvider = { true },
+        )
+
+        // 已有一次实时记录 [1_000_000, 1_120_000]
+        engine.onDozeStateObserved(
+            state = 5,
+            wallMs = nowMs - 1_000_000L,
+            elapsedMs = 1_000_000L,
+            batteryPct = 80,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.NONE to emptyMap() },
+        )
+        engine.onDozeStateObserved(
+            state = 0,
+            wallMs = nowMs - 880_000L,
+            elapsedMs = 1_120_000L,
+            batteryPct = 80,
+            isPlugged = false,
+            cpuSnapshotProvider = { io.github.univers629.millet.core.CpuStatSource.NONE to emptyMap() },
+        )
+
+        val intervals = listOf(
+            FreezeStatsEngine.BootDozeInterval(400_000L, 628_000L, maintenanceCount = 1), // 历史 228s，应补齐
+            FreezeStatsEngine.BootDozeInterval(1_000_000L, 1_120_000L, maintenanceCount = 0), // 与实时重叠，应跳过
+            FreezeStatsEngine.BootDozeInterval(1_300_000L, 1_310_000L, maintenanceCount = 0), // <30s，应忽略
+        )
+        val added = engine.backfillBootDozeIntervals(intervals, nowWallMs = nowMs, nowElapsedMs = elapsedMs)
+        assertEquals(1, added)
+
+        val snap = engine.buildSnapshot(StatsWindow.TODAY)
+        assertEquals(2, snap.dozeSummary.sessionCount)
+        assertEquals(120_000L + 228_000L, snap.dozeSummary.totalDurationMillis)
+        assertEquals(1, snap.dozeSummary.maintenanceCount)
+
+        // 重置后不应再把重置前的开机历史重新补回来
+        assertTrue(engine.reset())
+        nowMs += 10_000L
+        elapsedMs += 10_000L
+        assertEquals(0, engine.backfillBootDozeIntervals(intervals, nowWallMs = nowMs, nowElapsedMs = elapsedMs))
+        assertEquals(0, engine.buildSnapshot(StatsWindow.TODAY).dozeSummary.sessionCount)
+    }
+}

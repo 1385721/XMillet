@@ -59,9 +59,7 @@ object AboutPhoneUtils {
         if (!isXmsValid && !isRoXmsValid) {
             return osVersionCode
         }
-        if (!isXmsValid || isRoXmsValid) {
-            xmsVersion = if (isXmsValid || !isRoXmsValid) compareValidVersion(xmsVersion, roXmsVersion) else roXmsVersion
-        }
+        xmsVersion = if (isXmsValid) compareValidVersion(xmsVersion, roXmsVersion) else roXmsVersion
         return insertSuffixBeforeBeta(osVersionCode, xmsVersion)
     }
 

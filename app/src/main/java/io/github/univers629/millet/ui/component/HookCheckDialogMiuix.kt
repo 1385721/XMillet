@@ -12,10 +12,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Cancel
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,9 +28,12 @@ import io.github.univers629.millet.core.XposedPrefsBridge
 import io.github.univers629.millet.ipc.HookCoverage
 import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.theme.isInDarkTheme
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Close2
+import top.yukonga.miuix.kmp.icon.glass.Error
+import top.yukonga.miuix.kmp.icon.glass.Ok
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
  * Hook 点位与系统环境状态等级。
@@ -101,6 +100,8 @@ private val HOOK_ID_TARGET_HINTS: Map<String, String> = mapOf(
     "P30_CLOUD_DOZE_READ" to "GlobalFeatureConfigureHelper#getDozeWhiteListApps",
     "P31_USER_POWER_SAVE_CONFIG" to "PowerSaveConfigureManager#setPowerSaveAppConfigure",
     "P32_GET_POWER_SAVE_CONFIG" to "PowerSaveConfigureManager#getPowerSaveAppConfigure",
+    "P35_FAST_SCREEN_OFF_FREEZE" to "AppStateFrozenControl#frozenAppLater",
+    "P36_BRIGHT_FROZEN_THAW" to "BrightController#frozenThaw",
     "S2" to "GreezeManagerService#<init>",
     "S6" to "GreezeManagerService#freezeUids",
     "S7" to "GreezeManagerService#freezeAction",
@@ -109,6 +110,8 @@ private val HOOK_ID_TARGET_HINTS: Map<String, String> = mapOf(
     "S21" to "GreezeManagerService#thawUids",
     "S23" to "GreezeManagerService#freezePids",
     "S32_CLOUD_FROZEN_WL" to "ListAppsManager#dealCloudWhiteList",
+    "S38_DOZE_BECOME_ACTIVE" to "DeviceIdleController#becomeActiveLocked",
+    "S39_DOZE_STEP_IDLE" to "DeviceIdleController#stepIdleStateLocked",
 )
 
 private fun describeHookId(id: String): String {
@@ -255,7 +258,7 @@ fun generateHookDiagnostics(
                     !frameworkState.isServiceConnected ->
                         "未能连接 XposedService：确认 LSPosed 已启用、模块未被停用且未处于安全模式。启用后 system_server 会在下次启动时注入。"
                     else ->
-                        "作用域已包含系统框架，但 system_server 尚未完成注入。点下方「热重载」可立即重装钩子（无需重启）；若仍失败，查看 /data/system/XMillet/log 中的注入错误。"
+                        "作用域已包含系统框架，但 system_server 尚未完成注入。点下方「热重载」可立即重装钩子（无需重启）；若仍失败，查看 Xposed / Logcat（XMillet）中的注入错误。"
                 }
             },
             suggestion = if (sysLevel == HookDiagnosticLevel.FAILED) {
@@ -267,7 +270,7 @@ fun generateHookDiagnostics(
                     frameworkState.staleTargets.isNotEmpty() ->
                         "点下方「热重载」重装 system_server 钩子，无需重启"
                     else ->
-                        "查 /data/system/XMillet/log 中「Hook 安装结果」一行定位失败点位"
+                        "在 Xposed / Logcat（XMillet）中查「Hook 安装结果」一行定位失败点位"
                 }
             } else null,
             consoleLines = buildList {
@@ -721,9 +724,9 @@ internal fun OverallStatusHeader(
         ) {
             Icon(
                 imageVector = when (level) {
-                    HookDiagnosticLevel.PASSED -> Icons.Rounded.CheckCircle
-                    HookDiagnosticLevel.WARNING -> Icons.Rounded.Warning
-                    HookDiagnosticLevel.FAILED -> Icons.Rounded.Cancel
+                    HookDiagnosticLevel.PASSED -> MiuixIcons.Glass.Ok
+                    HookDiagnosticLevel.WARNING -> MiuixIcons.Glass.Error
+                    HookDiagnosticLevel.FAILED -> MiuixIcons.Glass.Close2
                 },
                 contentDescription = null,
                 tint = iconColor,

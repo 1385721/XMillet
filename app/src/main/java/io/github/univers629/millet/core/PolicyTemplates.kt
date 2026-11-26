@@ -4,6 +4,18 @@ import java.util.Base64
 import java.util.EnumSet
 
 /**
+ * 策略集合角色分类：将应用级七项策略收敛为四类角色，统一指导 UI、模板、导入校验与配置净化。
+ *
+ * @property isExemption 是否属于保护/豁免类角色（脏数据收敛时安全优先于强冻限制）
+ */
+enum class PolicyRole(val isExemption: Boolean) {
+    EXCLUSIVE_EXEMPTION(true),
+    SOFT_EXEMPTION(true),
+    FORCE_ROOT(false),
+    FORCE_DEPENDENT(false),
+}
+
+/**
  * 应用级七项策略的统一描述。
  *
  * 每一项直接对应 [PrefsKeys] 里的一个集合键；模板与批量套用都只读写这七个集合，
@@ -13,41 +25,49 @@ enum class PolicyFlag(
     val key: String,
     val label: String,
     val summary: String,
+    val role: PolicyRole,
 ) {
     WHITE(
         PrefsKeys.WHITE_APP_SET,
         "免冻白名单",
         "永不冻结；主用户应用会同步把系统省电策略设为无限制",
+        PolicyRole.EXCLUSIVE_EXEMPTION,
     ),
     MESSAGE(
         PrefsKeys.MESSAGE_APP_SET,
         "消息应用",
         "收到网络推送包后短暂解冻处理消息",
+        PolicyRole.SOFT_EXEMPTION,
     ),
     NOT_FREEZE_FGS(
         PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET,
         "前台服务时不冻结",
         "检测到活跃前台服务（播放、导航、下载）时阻止冻结",
+        PolicyRole.SOFT_EXEMPTION,
     ),
     FORCE_FREEZE(
         PrefsKeys.FORCE_FREEZE_SET,
         "强制冻结",
         "向官方链路请求冻结并限制已适配的后台豁免",
+        PolicyRole.FORCE_ROOT,
     ),
     BLOCK_THAW(
         PrefsKeys.BLOCK_THAW_SET,
         "禁止后台解冻",
         "仅放行 Activity 启动与切换前台解冻（依附强制冻结）",
+        PolicyRole.FORCE_DEPENDENT,
     ),
     FORBID_SYNC(
         PrefsKeys.FORBID_SYNC_BINDER_SET,
         "阻止同步 Binder 唤醒",
         "拦截 Sync / Check Binder 与 MilletHandler 唤醒（依附强制冻结）",
+        PolicyRole.FORCE_DEPENDENT,
     ),
     IGNORE_NETWORK_WAKE(
         PrefsKeys.IGNORE_NETWORK_WAKE_SET,
         "忽略网络唤醒",
         "推送与网络变化不再唤醒，消息会延迟到手动打开（依附强制冻结）",
+        PolicyRole.FORCE_DEPENDENT,
     );
 
     val bit: Int
@@ -55,7 +75,7 @@ enum class PolicyFlag(
 
     /** 是否只能在强制冻结开启时出现；与配置页「强力冻结」卡片内的折叠区一致。 */
     val dependsOnForceFreeze: Boolean
-        get() = this == BLOCK_THAW || this == FORBID_SYNC || this == IGNORE_NETWORK_WAKE
+        get() = role == PolicyRole.FORCE_DEPENDENT
 
     companion object {
         fun fromMask(mask: Int): Set<PolicyFlag> =
@@ -159,6 +179,86 @@ object PolicyRules {
         if (PolicyFlag.FORCE_FREEZE in flags && PolicyFlag.NOT_FREEZE_FGS in flags) return false
         if (PolicyFlag.MESSAGE in flags && PolicyFlag.IGNORE_NETWORK_WAKE in flags) return false
         return true
+    }
+
+    /**
+     * 安全优先收敛：当持久化配置中出现非法组合时（例如手工改 XML 或历史脏数据），
+     * 按「独占豁免 > 软豁免 > 强冻约束」收敛成合法且幂等的 [PolicyFlag] 集合。
+     */
+    fun sanitizeFlags(flags: Set<PolicyFlag>): Set<PolicyFlag> {
+        if (PolicyFlag.WHITE in flags) return EnumSet.of(PolicyFlag.WHITE)
+        val next = EnumSet.noneOf(PolicyFlag::class.java).apply { addAll(flags) }
+        if (PolicyFlag.NOT_FREEZE_FGS in next && PolicyFlag.FORCE_FREEZE in next) {
+            next.remove(PolicyFlag.FORCE_FREEZE)
+        }
+        if (PolicyFlag.FORCE_FREEZE !in next) {
+            next.removeIf { it.role == PolicyRole.FORCE_DEPENDENT }
+        }
+        if (PolicyFlag.MESSAGE in next && PolicyFlag.IGNORE_NETWORK_WAKE in next) {
+            next.remove(PolicyFlag.IGNORE_NETWORK_WAKE)
+        }
+        return next
+    }
+
+    /**
+     * 对 7 个策略集合做全量清洗与互斥收敛，返回规范化后的集合映射与是否发生修改。
+     */
+    fun sanitizePolicySets(setsByKey: Map<String, Set<String>>): Pair<Map<String, LinkedHashSet<String>>, Boolean> {
+        var modified = false
+        val allTargets = LinkedHashSet<String>()
+        val validRawSets = LinkedHashMap<PolicyFlag, LinkedHashSet<String>>(PolicyFlag.entries.size)
+        for (flag in PolicyFlag.entries) {
+            val raw = setsByKey[flag.key].orEmpty()
+            val cleaned = LinkedHashSet<String>(raw.size)
+            for (target in raw) {
+                if (AppUidUtils.validPolicyTarget(target)) {
+                    cleaned.add(target)
+                    allTargets.add(target)
+                } else {
+                    modified = true
+                }
+            }
+            validRawSets[flag] = cleaned
+        }
+
+        val sanitizedSets = LinkedHashMap<String, LinkedHashSet<String>>(PolicyFlag.entries.size)
+        for (flag in PolicyFlag.entries) {
+            sanitizedSets[flag.key] = LinkedHashSet()
+        }
+
+        for (target in allTargets) {
+            val current = EnumSet.noneOf(PolicyFlag::class.java)
+            for (flag in PolicyFlag.entries) {
+                if (target in validRawSets[flag].orEmpty()) current.add(flag)
+            }
+            val cleanFlags = sanitizeFlags(current)
+            if (cleanFlags != current) modified = true
+            for (flag in cleanFlags) {
+                sanitizedSets.getValue(flag.key).add(target)
+            }
+        }
+        return sanitizedSets to modified
+    }
+
+    /**
+     * 找出跨 7 个策略集合中存在非法组合的策略目标（用于 JSON 备份导入的严格校验）。
+     */
+    fun findInvalidTargets(setsByKey: Map<String, Set<String>>): Map<String, Set<PolicyFlag>> {
+        val allTargets = LinkedHashSet<String>()
+        for (flag in PolicyFlag.entries) {
+            allTargets.addAll(setsByKey[flag.key].orEmpty())
+        }
+        val invalid = LinkedHashMap<String, Set<PolicyFlag>>()
+        for (target in allTargets) {
+            val current = EnumSet.noneOf(PolicyFlag::class.java)
+            for (flag in PolicyFlag.entries) {
+                if (target in setsByKey[flag.key].orEmpty()) current.add(flag)
+            }
+            if (!isValid(current)) {
+                invalid[target] = current
+            }
+        }
+        return invalid
     }
 }
 

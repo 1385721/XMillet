@@ -81,6 +81,8 @@ data class AppFreezeStatsData(
     val protectedCount: Int = 0,
     val killBlockedCount: Int = 0,
     val topRawReasons: List<Pair<String, Int>> = emptyList(),
+    val jitterCount: Int = 0,
+    val topJitterReason: String = "",
 ) {
     val backgroundWakeCount: Int
         get() = wakeByCategory.entries.sumOf { if (it.key.isBackground) it.value else 0 }
@@ -130,6 +132,7 @@ data class FreezeStatsSnapshotData(
     val recent: List<StatsRecentEventData>,
     val memoryBytes: Long = 0,
     val sourceNote: String? = null,
+    val dozeSummary: DozeSummaryData = DozeSummaryData(),
 ) {
     val backgroundWakeCount: Int
         get() = wakeByCategory.entries.sumOf { if (it.key.isBackground) it.value else 0 }
@@ -202,7 +205,7 @@ object FreezeReasonClassifier {
         val trimmed = reason.trim()
         if (trimmed in ALLOWED_THAW_EXACT_REASONS) return true
         return isSyncBinderThawReason(trimmed) ||
-            trimmed.equals("broadcast", ignoreCase = true) ||
+            trimmed.startsWith("broadcast", ignoreCase = true) ||
             trimmed.startsWith("Signal ", ignoreCase = true) ||
             trimmed.startsWith("Activity Start", ignoreCase = true) ||
             trimmed.contains("toFront", ignoreCase = true) ||

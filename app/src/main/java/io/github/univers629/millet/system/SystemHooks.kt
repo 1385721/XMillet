@@ -72,6 +72,10 @@ object SystemHooks {
                     if (changedKey == PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST) {
                         SystemState.syncCloudFrozenWhiteListToListAppsManager(snapshot.blockCloudFrozenWhitelist)
                     }
+                    if (changedKey == "*") {
+                        SystemState.syncDualAppSupportToAurogon(snapshot.freezeDualApp)
+                        SystemState.syncCloudFrozenWhiteListToListAppsManager(snapshot.blockCloudFrozenWhitelist)
+                    }
                 }
 
                 PrefGroup.DOZE_FLAGS -> BroadcastAndDozeHooks.onDozeConfigChanged()
@@ -82,7 +86,8 @@ object SystemHooks {
                         PrefsKeys.FORCE_FREEZE_SET,
                         PrefsKeys.WHITE_APP_SET,
                         PrefsKeys.BLOCK_THAW_SET,
-                        PrefsKeys.IGNORE_NETWORK_WAKE_SET -> SystemState.syncMessageAppsToAurogon()
+                        PrefsKeys.IGNORE_NETWORK_WAKE_SET,
+                        "*" -> SystemState.syncMessageAppsToAurogon()
                     }
                     if (changedKey == PrefsKeys.WHITE_APP_SET) {
                         // 白名单变化后把条目同步进系统免冻结名单，避免 millet 内核侧再次冻结它们
@@ -141,6 +146,8 @@ object SystemHooks {
         BroadcastAndDozeHooks.buildS13DeviceIdleMotionLockedHook(),
         BroadcastAndDozeHooks.buildS14DeviceIdleMoveToStateHook(),
         BroadcastAndDozeHooks.buildS34DeviceIdleUpcomingAlarmHook(),
+        BroadcastAndDozeHooks.buildS38DeviceIdleBecomeActiveHook(),
+        BroadcastAndDozeHooks.buildS39DeviceIdleStepStateHook(),
         FreezeGateHooks.buildS2GreezeLifecycleReadyHook(),
         FreezeGateHooks.buildWakeLockHook(),
         FreezeGateHooks.buildSystemProcessManagerKillHook()
@@ -180,6 +187,9 @@ object SystemHooks {
 
         if (PrefReader.systemPrefs.blockCloudFrozenWhitelist) {
             SystemState.syncCloudFrozenWhiteListToListAppsManager(block = true, classLoader = classLoader)
+        }
+        if (SystemState.isGreezeReady) {
+            SystemState.syncMessageAppsToAurogon()
         }
 
         Logger.alwaysWarn("Hook 安装结果[系统侧]: ${HookInstallRegistry.summary()}")

@@ -1,12 +1,9 @@
 package io.github.univers629.millet.ui.screen
-import io.github.univers629.millet.ui.util.MilletTopAppBar
+import top.yukonga.miuix.kmp.glass.GlassIconButton
 import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
-import io.github.univers629.millet.ui.util.BarIconButton
 
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,14 +13,10 @@ import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -40,7 +33,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -48,10 +40,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Apps
-import androidx.compose.material.icons.rounded.Widgets
-import io.github.univers629.millet.ui.component.XMilletIcons
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -62,12 +50,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -78,7 +63,6 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -86,7 +70,6 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
@@ -106,14 +89,12 @@ import io.github.univers629.millet.core.LsposedHelper
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.effect.BgEffectBackground
 import io.github.univers629.millet.ui.component.effect.GlowBackground
-import io.github.univers629.millet.ui.component.effect.GlowPainter
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
 import kotlin.math.hypot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -125,7 +106,6 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurBlendMode
@@ -134,8 +114,11 @@ import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.icon.glass.GridView
+import top.yukonga.miuix.kmp.icon.glass.Widget
 import top.yukonga.miuix.kmp.icon.basic.Check
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
@@ -362,21 +345,20 @@ fun OobeScreenMiuix(
                 ) {
                     Scaffold(
                         topBar = {
+                            // 权限向导顶栏：普通 Miuix IconButton，不使用圆形液态玻璃底
                             MilletSmallTopAppBar(
                                 title = "",
                                 color = Color.Transparent,
                                 titleColor = colorScheme.onSurface,
                                 navigationIcon = {
-                                    BarIconButton(
-                                        onClick = {
-                                            currentStep = OobeStep.Startup
-                                        },
-                                        modifier = Modifier.padding(start = 12.dp)
+                                    IconButton(
+                                        onClick = { currentStep = OobeStep.Startup },
                                     ) {
                                         Icon(
-                                            imageVector = MiuixIcons.Back,
+                                            imageVector = MiuixIcons.Glass.Back,
                                             contentDescription = "返回欢迎页",
-                                            tint = colorScheme.onSurface
+                                            tint = colorScheme.onSurface,
+                                            modifier = Modifier.size(28.dp),
                                         )
                                     }
                                 },
@@ -424,7 +406,7 @@ fun OobeScreenMiuix(
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
                                             Icon(
-                                                imageVector = XMilletIcons.AppPolicy,
+                                                imageVector = MiuixIcons.Glass.SecurityStatus,
                                                 contentDescription = null,
                                                 modifier = Modifier.size(72.dp),
                                                 tint = colorScheme.primary
@@ -469,7 +451,7 @@ fun OobeScreenMiuix(
                                             BasicComponent(
                                                 startAction = {
                                                     Icon(
-                                                        imageVector = Icons.Rounded.Widgets,
+                                                        imageVector = MiuixIcons.Glass.Widget,
                                                         contentDescription = null,
                                                         modifier = Modifier
                                                             .padding(end = 8.dp)
@@ -507,7 +489,7 @@ fun OobeScreenMiuix(
                                             BasicComponent(
                                                 startAction = {
                                                     Icon(
-                                                        imageVector = Icons.Rounded.Apps,
+                                                        imageVector = MiuixIcons.Glass.GridView,
                                                         contentDescription = null,
                                                         modifier = Modifier
                                                             .padding(end = 8.dp)
@@ -675,17 +657,19 @@ private fun OobeStartupContent(
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (isPreview) {
-                IconButton(
+                GlassIconButton(
                     onClick = onBack,
+                    backdrop = backdrop,
                     modifier = Modifier
                         .statusBarsPadding()
                         .padding(start = 12.dp, top = 8.dp)
                         .align(Alignment.TopStart)
                 ) {
                     Icon(
-                        imageVector = MiuixIcons.Back,
+                        imageVector = MiuixIcons.Glass.Back,
                         contentDescription = "返回",
-                        tint = Color.White
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
             }

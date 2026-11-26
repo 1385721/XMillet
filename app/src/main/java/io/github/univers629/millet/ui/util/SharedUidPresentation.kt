@@ -1,11 +1,14 @@
 package io.github.univers629.millet.ui.util
 
-import android.content.pm.ApplicationInfo
+import androidx.compose.runtime.Immutable
+import io.github.univers629.millet.ui.model.AppIconSource
 
+@Immutable
 data class StatsPackageMember(
     val packageName: String,
     val label: String,
-    val applicationInfo: ApplicationInfo? = null,
+    val iconSource: AppIconSource? = null,
+    val isSystem: Boolean = false,
 )
 
 internal fun sortedStatsMemberPackages(packageNames: List<String>?): List<String> =

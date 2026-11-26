@@ -3,16 +3,13 @@ package io.github.univers629.millet.ui.component.effect
 import android.content.Context
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
-import android.os.Build
 import android.util.Log
-import androidx.annotation.RequiresApi
 import io.github.univers629.millet.R
 
 /**
  * HyperCeiler 同款光效 Shader 画笔（GlowPainter）
  * 承载 OKLab 颜色空间混合、Simplex 噪声底色流光与开场扩散光圈效果。
  */
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 class GlowPainter(context: Context) {
 
     companion object {

@@ -1,13 +1,10 @@
 package io.github.univers629.millet.ui.screen
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -38,23 +35,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AcUnit
-import androidx.compose.material.icons.rounded.BatteryChargingFull
-import androidx.compose.material.icons.rounded.Block
-import androidx.compose.material.icons.rounded.NotificationsActive
-import androidx.compose.material.icons.rounded.PlayCircleOutline
-import androidx.compose.material.icons.rounded.SignalWifiOff
-import androidx.compose.material.icons.rounded.SyncDisabled
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -66,29 +51,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.univers629.millet.core.AppUidUtils
-import io.github.univers629.millet.core.BatteryPolicyHelper
 import io.github.univers629.millet.core.FreezeModeLabels
-import io.github.univers629.millet.core.PrefReader
-import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.core.RootHelper
-import io.github.univers629.millet.core.SystemBatteryOptimizationHelper
-import io.github.univers629.millet.ipc.PowerKeeperBinderClient
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
-import io.github.univers629.millet.ui.component.XMilletIcons
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import io.github.univers629.millet.ui.vm.AndroidAppProfileSystemBridge
+import io.github.univers629.millet.ui.vm.AppProfileUiState
+import io.github.univers629.millet.ui.vm.AppProfileViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -98,11 +77,17 @@ import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.icon.glass.Battery100
+import top.yukonga.miuix.kmp.icon.glass.Blocklist
+import top.yukonga.miuix.kmp.icon.glass.CoolingFan
+import top.yukonga.miuix.kmp.icon.glass.NoNetwork
+import top.yukonga.miuix.kmp.icon.glass.NotificationsStatusBar
+import top.yukonga.miuix.kmp.icon.glass.PlayCircleFill
+import top.yukonga.miuix.kmp.icon.glass.Back
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
@@ -110,147 +95,84 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
-/** 单应用策略详情页，展示进程快照与七个应用级策略集合。 */
+/**
+ * 单应用策略详情页入口：连接按 `(packageName, uid)` 作用域化的 [AppProfileViewModel] 与纯展示 [AppProfileContent]。
+ */
 @Composable
-fun AppProfileScreenMiuix(
-    app: InstalledAppUiModel,
+fun AppProfileRoute(
+    packageName: String,
+    uid: Int,
     onBack: () -> Unit,
-    onPolicyChanged: () -> Unit,
 ) {
     val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val prefs = remember { PrefReader.openUiPrefs(context) }
+    val container = remember(context) { context.appUiContainer }
+    val vm: AppProfileViewModel = viewModel(key = "$packageName:$uid") {
+        AppProfileViewModel(
+            packageName = packageName,
+            uid = uid,
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+            bridge = AndroidAppProfileSystemBridge(container.appContext),
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(vm) {
+        vm.toastEvents.collect { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    AppProfileContent(
+        uiState = uiState,
+        onBack = onBack,
+        onRefreshProcesses = vm::refreshProcesses,
+        onSetWhiteList = vm::setWhiteList,
+        onSetMessageApp = vm::setMessageApp,
+        onSetNotFreezeWhenHasFgs = vm::setNotFreezeWhenHasFgs,
+        onSetForceFreeze = vm::setForceFreeze,
+        onSetBlockThaw = vm::setBlockThaw,
+        onSetForbidSyncBinder = vm::setForbidSyncBinder,
+        onSetIgnoreNetworkWake = vm::setIgnoreNetworkWake,
+    )
+}
+
+@Composable
+fun AppProfileContent(
+    uiState: AppProfileUiState,
+    onBack: () -> Unit,
+    onRefreshProcesses: () -> Unit,
+    onSetWhiteList: (Boolean) -> Unit,
+    onSetMessageApp: (Boolean) -> Unit,
+    onSetNotFreezeWhenHasFgs: (Boolean) -> Unit,
+    onSetForceFreeze: (Boolean) -> Unit,
+    onSetBlockThaw: (Boolean) -> Unit,
+    onSetForbidSyncBinder: (Boolean) -> Unit,
+    onSetIgnoreNetworkWake: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
-    val policyTarget = AppUidUtils.encodeQueryTarget(app.packageName, app.uid)
-    val isDualApp = AppUidUtils.isDualAppUid(app.uid)
-    val processCacheKey = "${app.packageName}:${app.uid}"
-    val pageToken = remember(app.packageName, app.uid) { Any() }
-    val currentPageToken by rememberUpdatedState(pageToken)
-    var isPageActive by remember(pageToken) { mutableStateOf(true) }
-    DisposableEffect(pageToken) {
-        onDispose { isPageActive = false }
-    }
-    var appProcesses by remember(app.packageName, app.uid) {
-        mutableStateOf(AppProcessSnapshotCache.get(processCacheKey).orEmpty())
-    }
-    var isScanningProcesses by remember(app.packageName, app.uid) { mutableStateOf(false) }
-    var processSnapshotUnavailable by remember(app.packageName, app.uid) { mutableStateOf(false) }
-    var hasScannedProcesses by remember(app.packageName, app.uid) {
-        mutableStateOf(AppProcessSnapshotCache.get(processCacheKey) != null)
-    }
-
-    suspend fun scanProcesses() {
-        if (isScanningProcesses || !isPageActive || currentPageToken !== pageToken) return
-        val targetUid = app.uid
-        isScanningProcesses = true
-        try {
-            val snapshot = withContext(Dispatchers.IO) {
-                PowerKeeperBinderClient.queryProcessSnapshot()
-            }
-            if (!isPageActive || currentPageToken !== pageToken) return
-            if (snapshot == null) {
-                processSnapshotUnavailable = true
-                hasScannedProcesses = true
-                return
-            }
-            val list = withContext(Dispatchers.IO) {
-                RootHelper.sortProcessEntries(snapshot.entries.filter { it.uid == targetUid })
-            }
-            if (!isPageActive || currentPageToken !== pageToken) return
-            appProcesses = list
-            AppProcessSnapshotCache.put(processCacheKey, list)
-            processSnapshotUnavailable = false
-            hasScannedProcesses = true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            if (isPageActive && currentPageToken === pageToken) {
-                processSnapshotUnavailable = true
-                hasScannedProcesses = true
-            }
-        } finally {
-            isScanningProcesses = false
-        }
-    }
-
-    val refreshProcesses: () -> Unit = {
-        coroutineScope.launch { scanProcesses() }
-    }
-
-    LaunchedEffect(app.packageName, app.uid) {
-        // 等转场动画放完再扫描：AnimatedContent 的进场动画是 360ms（MainActivity:517），
-        // 扫描结果若在动画中途落地，「正在扫描」的小占位会被撑成 N 行进程，
-        // 整页重排会落在动画帧上，造成卡顿。
-        delay(PROCESS_SCAN_DELAY_MS)
-        scanProcesses()
-    }
-
-    var inWhite by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.WHITE_APP_SET), app.packageName, app.uid))
-    }
-    var inMessage by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.MESSAGE_APP_SET), app.packageName, app.uid))
-    }
-    var inForceFreeze by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.FORCE_FREEZE_SET), app.packageName, app.uid))
-    }
-    var inBlockThaw by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.BLOCK_THAW_SET), app.packageName, app.uid))
-    }
-    var inForbidSync by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.FORBID_SYNC_BINDER_SET), app.packageName, app.uid))
-    }
-    var inNotFreezeFgs by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET), app.packageName, app.uid))
-    }
-    var inIgnoreNetworkWake by remember(app.packageName, app.uid) {
-        mutableStateOf(AppUidUtils.containsPolicyTarget(PrefReader.readUiStringSet(prefs, PrefsKeys.IGNORE_NETWORK_WAKE_SET), app.packageName, app.uid))
-    }
-    // 系统省电策略按包名读取，不作为模块名单的成员判定。
-    var systemUnrestricted by remember(app.packageName, app.uid) { mutableStateOf(false) }
-
-    // 系统省电策略的只读回显：不提供绑定/初始化按钮，进页面自动读系统真值。
-    var systemPolicyLabel by remember(app.packageName, app.uid) { mutableStateOf("读取中…") }
-
-    suspend fun refreshSystemPolicy() {
-        val (unrestricted, label) = withContext(Dispatchers.IO) {
-            val value = BatteryPolicyHelper.isPackageNoRestrict(context, app.packageName)
-            value to readSystemPolicyLabel(context, app.packageName, value)
-        }
-        if (!isPageActive || currentPageToken !== pageToken) return
-        systemUnrestricted = unrestricted
-        systemPolicyLabel = label
-        // 开关只跟随模块名单；系统侧是否「无限制」由上方提示条单独展示，
-        // 避免系统名单没清干净时把开关顶回开启状态，让用户以为点不动。
-    }
-    LaunchedEffect(app.packageName, app.uid) {
-        refreshSystemPolicy()
-    }
-
-    fun buildMembershipSet(key: String, add: Boolean): Set<String> {
-        val currentSet = PrefReader.readUiStringSet(prefs, key)
-        if (add) currentSet.add(policyTarget) else currentSet.remove(policyTarget)
-        return currentSet
-    }
-
-    fun updateMemberships(vararg changes: Pair<String, Boolean>) {
-        if (changes.isEmpty()) return
-        val updates = LinkedHashMap<String, Set<String>>(changes.size)
-        for ((key, add) in changes) {
-            updates[key] = buildMembershipSet(key, add)
-        }
-        PrefReader.putStringSetsAndNotify(prefs, updates, changes.first().first)
-        onPolicyChanged()
-    }
-
-    fun updateMembership(key: String, add: Boolean) {
-        updateMemberships(key to add)
-    }
+    val app = uiState.app
+    val isDualApp = uiState.isDualApp
+    val appProcesses = uiState.appProcesses
+    val isScanningProcesses = uiState.isScanningProcesses
+    val processSnapshotUnavailable = uiState.processSnapshotUnavailable
+    val hasScannedProcesses = uiState.hasScannedProcesses
+    val inWhite = uiState.inWhite
+    val inMessage = uiState.inMessage
+    val inForceFreeze = uiState.inForceFreeze
+    val inBlockThaw = uiState.inBlockThaw
+    val inForbidSync = uiState.inForbidSync
+    val inNotFreezeFgs = uiState.inNotFreezeFgs
+    val inIgnoreNetworkWake = uiState.inIgnoreNetworkWake
+    val systemUnrestricted = uiState.systemUnrestricted
+    val systemPolicyLabel = uiState.systemPolicyLabel
+    val refreshProcesses = onRefreshProcesses
 
     Scaffold(
         topBar = {
@@ -262,10 +184,12 @@ fun AppProfileScreenMiuix(
                         BarIconButton(onClick = onBack) {
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
-                                modifier = Modifier.graphicsLayer {
-                                    if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                },
-                                imageVector = MiuixIcons.Back,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                imageVector = MiuixIcons.Glass.Back,
                                 contentDescription = "返回",
                                 tint = colorScheme.onBackground
                             )
@@ -274,15 +198,11 @@ fun AppProfileScreenMiuix(
                     actions = {
                         val showTopPopup = remember { mutableStateOf(false) }
                         BarIconButton(
+                            icon = MiuixIcons.Glass.MoreCircle,
+                            contentDescription = "更多操作",
                             onClick = { showTopPopup.value = true },
-                            holdDownState = showTopPopup.value
-                        ) {
-                            Icon(
-                                imageVector = MiuixIcons.MoreCircle,
-                                tint = colorScheme.onSurface,
-                                contentDescription = "更多操作"
-                            )
-                        }
+                            holdDownState = showTopPopup.value,
+                        )
                         GlassOverlayListPopup(
                             show = showTopPopup.value,
                             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -354,7 +274,7 @@ fun AppProfileScreenMiuix(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             AppIconImage(
-                                applicationInfo = app.applicationInfo,
+                                iconSource = app.iconSource,
                                 label = app.appName,
                                 modifier = Modifier.size(64.dp)
                             )
@@ -674,7 +594,7 @@ fun AppProfileScreenMiuix(
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = XMilletIcons.AppPolicy,
+                                    imageVector = MiuixIcons.Glass.SecurityStatus,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -689,65 +609,12 @@ fun AppProfileScreenMiuix(
                                 "永不冻结此应用（开启后自动关闭消息应用与强制冻结，并同步设为系统省电策略无限制）"
                             },
                             checked = inWhite,
-                            onCheckedChange = { checked ->
-                                inWhite = checked
-                                if (checked) {
-                                    inMessage = false
-                                    inForceFreeze = false
-                                    inBlockThaw = false
-                                    inForbidSync = false
-                                    inIgnoreNetworkWake = false
-                                    inNotFreezeFgs = false
-                                    updateMemberships(
-                                        PrefsKeys.WHITE_APP_SET to true,
-                                        PrefsKeys.MESSAGE_APP_SET to false,
-                                        PrefsKeys.FORCE_FREEZE_SET to false,
-                                        PrefsKeys.BLOCK_THAW_SET to false,
-                                        PrefsKeys.FORBID_SYNC_BINDER_SET to false,
-                                        PrefsKeys.IGNORE_NETWORK_WAKE_SET to false,
-                                        PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false
-                                    )
-
-                                    if (!isDualApp) {
-                                        // 主用户保留系统省电策略同步动作。
-                                        coroutineScope.launch {
-                                            val ok = SystemBatteryOptimizationHelper.setAppIgnoringBatteryOptimization(context, app.packageName)
-                                            refreshSystemPolicy()
-                                            if (!ok) {
-                                                inWhite = false
-                                                updateMembership(PrefsKeys.WHITE_APP_SET, false)
-                                                Toast.makeText(
-                                                    context,
-                                                    "系统省电策略写入失败：需要模块在线或 Root 授权",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    updateMembership(PrefsKeys.WHITE_APP_SET, false)
-                                    if (!isDualApp) {
-                                        coroutineScope.launch {
-                                            val ok = SystemBatteryOptimizationHelper.restoreAppBatteryOptimizationToDefault(context, app.packageName)
-                                            refreshSystemPolicy()
-                                            if (!ok) {
-                                                inWhite = true
-                                                updateMembership(PrefsKeys.WHITE_APP_SET, true)
-                                                Toast.makeText(
-                                                    context,
-                                                    "恢复系统省电策略失败：需要模块在线或 Root 授权",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            onCheckedChange = onSetWhiteList
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.NotificationsActive,
+                                    imageVector = MiuixIcons.Glass.NotificationsStatusBar,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -758,28 +625,12 @@ fun AppProfileScreenMiuix(
                             title = "设为消息应用",
                             summary = "允许收到网络推送包后短暂解冻处理消息（与免冻结白名单、忽略网络唤醒互斥）",
                             checked = inMessage,
-                            onCheckedChange = { checked ->
-                                inMessage = checked
-                                if (checked) {
-                                    val changes = mutableListOf(PrefsKeys.MESSAGE_APP_SET to true)
-                                    if (inWhite) {
-                                        inWhite = false
-                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
-                                    }
-                                    if (inIgnoreNetworkWake) {
-                                        inIgnoreNetworkWake = false
-                                        changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
-                                    }
-                                    updateMemberships(*changes.toTypedArray())
-                                } else {
-                                    updateMembership(PrefsKeys.MESSAGE_APP_SET, false)
-                                }
-                            }
+                            onCheckedChange = onSetMessageApp
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.PlayCircleOutline,
+                                    imageVector = MiuixIcons.Glass.PlayCircleFill,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -790,29 +641,7 @@ fun AppProfileScreenMiuix(
                             title = "存在前台服务时不冻结",
                             summary = "当 Aurogon 检测到活跃 ForegroundService 时阻止冻结（与免冻结白名单、强制冻结互斥）",
                             checked = inNotFreezeFgs,
-                            onCheckedChange = { checked ->
-                                inNotFreezeFgs = checked
-                                if (checked) {
-                                    val changes = mutableListOf(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to true)
-                                    if (inWhite) {
-                                        inWhite = false
-                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
-                                    }
-                                    if (inForceFreeze) {
-                                        inForceFreeze = false
-                                        inBlockThaw = false
-                                        inForbidSync = false
-                                        inIgnoreNetworkWake = false
-                                        changes.add(PrefsKeys.FORCE_FREEZE_SET to false)
-                                        changes.add(PrefsKeys.BLOCK_THAW_SET to false)
-                                        changes.add(PrefsKeys.FORBID_SYNC_BINDER_SET to false)
-                                        changes.add(PrefsKeys.IGNORE_NETWORK_WAKE_SET to false)
-                                    }
-                                    updateMemberships(*changes.toTypedArray())
-                                } else {
-                                    updateMembership(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET, false)
-                                }
-                            }
+                            onCheckedChange = onSetNotFreezeWhenHasFgs
                         )
                     }
 
@@ -827,7 +656,7 @@ fun AppProfileScreenMiuix(
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.AcUnit,
+                                    imageVector = MiuixIcons.Glass.CoolingFan,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -838,31 +667,7 @@ fun AppProfileScreenMiuix(
                             title = "强制冻结",
                             summary = "向官方链路请求冻结并限制已适配的后台豁免（与免冻结白名单、前台服务不冻结互斥）",
                             checked = inForceFreeze,
-                            onCheckedChange = { checked ->
-                                inForceFreeze = checked
-                                if (checked) {
-                                    val changes = mutableListOf(PrefsKeys.FORCE_FREEZE_SET to true)
-                                    if (inWhite) {
-                                        inWhite = false
-                                        changes.add(PrefsKeys.WHITE_APP_SET to false)
-                                    }
-                                    if (inNotFreezeFgs) {
-                                        inNotFreezeFgs = false
-                                        changes.add(PrefsKeys.NOT_FREEZE_WHEN_HAS_FGS_SET to false)
-                                    }
-                                    updateMemberships(*changes.toTypedArray())
-                                } else {
-                                    inBlockThaw = false
-                                    inForbidSync = false
-                                    inIgnoreNetworkWake = false
-                                    updateMemberships(
-                                        PrefsKeys.FORCE_FREEZE_SET to false,
-                                        PrefsKeys.BLOCK_THAW_SET to false,
-                                        PrefsKeys.FORBID_SYNC_BINDER_SET to false,
-                                        PrefsKeys.IGNORE_NETWORK_WAKE_SET to false
-                                    )
-                                }
-                            }
+                            onCheckedChange = onSetForceFreeze
                         )
                         AnimatedVisibility(
                             visible = inForceFreeze,
@@ -873,7 +678,7 @@ fun AppProfileScreenMiuix(
                                 SwitchPreference(
                                     startAction = {
                                         Icon(
-                                            imageVector = Icons.Rounded.Block,
+                                            imageVector = MiuixIcons.Glass.Blocklist,
                                             contentDescription = null,
                                             modifier = Modifier
                                         .padding(end = 8.dp)
@@ -884,15 +689,12 @@ fun AppProfileScreenMiuix(
                                     title = "禁止后台解冻",
                                     summary = "仅放行 Activity 启动与切换前台解冻，强力压制其他后台唤醒",
                                     checked = inBlockThaw,
-                                    onCheckedChange = { checked ->
-                                        inBlockThaw = checked
-                                        updateMembership(PrefsKeys.BLOCK_THAW_SET, checked)
-                                    }
+                                    onCheckedChange = onSetBlockThaw
                                 )
                                 SwitchPreference(
                                     startAction = {
                                         Icon(
-                                            imageVector = Icons.Rounded.SyncDisabled,
+                                            imageVector = MiuixIcons.Glass.NoNetwork,
                                             contentDescription = null,
                                             modifier = Modifier
                                         .padding(end = 8.dp)
@@ -903,15 +705,12 @@ fun AppProfileScreenMiuix(
                                     title = "阻止同步 Binder 唤醒",
                                     summary = "拦截 Sync Binder / Check Binder 与 MilletHandler what=13 唤醒",
                                     checked = inForbidSync,
-                                    onCheckedChange = { checked ->
-                                        inForbidSync = checked
-                                        updateMembership(PrefsKeys.FORBID_SYNC_BINDER_SET, checked)
-                                    }
+                                    onCheckedChange = onSetForbidSyncBinder
                                 )
                                 SwitchPreference(
                                     startAction = {
                                         Icon(
-                                            imageVector = Icons.Rounded.SignalWifiOff,
+                                            imageVector = MiuixIcons.Glass.NoNetwork,
                                             contentDescription = null,
                                             modifier = Modifier
                                         .padding(end = 8.dp)
@@ -922,18 +721,7 @@ fun AppProfileScreenMiuix(
                                     title = "忽略网络唤醒",
                                     summary = "不再因推送、网络变化唤醒该应用，冻结会一直保持到手动打开（与设为消息应用互斥；代价是消息延迟送达）",
                                     checked = inIgnoreNetworkWake,
-                                    onCheckedChange = { checked ->
-                                        inIgnoreNetworkWake = checked
-                                        if (checked && inMessage) {
-                                            inMessage = false
-                                            updateMemberships(
-                                                PrefsKeys.IGNORE_NETWORK_WAKE_SET to true,
-                                                PrefsKeys.MESSAGE_APP_SET to false
-                                            )
-                                        } else {
-                                            updateMembership(PrefsKeys.IGNORE_NETWORK_WAKE_SET, checked)
-                                        }
-                                    }
+                                    onCheckedChange = onSetIgnoreNetworkWake
                                 )
                             }
                         }
@@ -952,7 +740,7 @@ fun AppProfileScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.BatteryChargingFull,
+                                    imageVector = MiuixIcons.Glass.Battery100,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -987,41 +775,5 @@ fun AppProfileScreenMiuix(
                 }
             }
         }
-    }
-}
-
-/** 把系统省电策略翻译成一句话，供只读行展示。 */
-private fun readSystemPolicyLabel(context: Context, packageName: String, noRestrict: Boolean): String = when {
-    noRestrict -> "无限制（系统包名级记录）"
-    context.getSystemService(PowerManager::class.java)
-        ?.isIgnoringBatteryOptimizations(packageName) == true -> "已忽略电池优化（AOSP 白名单）"
-    else -> "未记录为无限制或忽略电池优化"
-}
-
-/**
- * 进程扫描的启动延迟。
- *
- * 取 460ms：AnimatedContent 的进场动画为 360ms，加上 60ms 的起步延迟（见 MainActivity:514-517），
- * 留出约 40ms 余量，确保扫描落点稳定在动画结束之后。
- */
-private const val PROCESS_SCAN_DELAY_MS = 460L
-
-/** 按包名与 UID 缓存最近一次成功快照，不做持久化。 */
-private object AppProcessSnapshotCache {
-    private const val MAX_ENTRIES = 8
-
-    private val entries =
-        object : LinkedHashMap<String, List<RootHelper.ProcessRawEntry>>(16, 0.75f, true) {
-            override fun removeEldestEntry(
-                eldest: MutableMap.MutableEntry<String, List<RootHelper.ProcessRawEntry>>?
-            ): Boolean = size > MAX_ENTRIES
-        }
-
-    @Synchronized
-    fun get(cacheKey: String): List<RootHelper.ProcessRawEntry>? = entries[cacheKey]
-
-    @Synchronized
-    fun put(cacheKey: String, processes: List<RootHelper.ProcessRawEntry>) {
-        entries[cacheKey] = processes
     }
 }

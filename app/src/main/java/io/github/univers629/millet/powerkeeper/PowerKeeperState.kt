@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo
 import io.github.univers629.millet.core.UidPackageCache
 import io.github.univers629.millet.core.ActiveImeTracker
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.HookDecisions
 import io.github.univers629.millet.core.XReflect
 import io.github.univers629.millet.core.Logger
 import io.github.univers629.millet.core.PrefReader
@@ -596,6 +597,59 @@ object PowerKeeperState {
                         add(device)
                     }
                     XReflect.setStaticObjectField(configClass, "ENABLE_DOUBLE_APP", updated)
+                }
+            }
+        }
+    }
+
+    @Volatile
+    private var originalFirstScreenOffDelayMs: Int? = null
+
+    @Volatile
+    private var originalBrightDelayMs: Int? = null
+
+    /**
+     * OS1/OS2 息屏 62s 延迟由 `MilletConfig.firstScreenOffDelayTime`（默认 62,000ms）与
+     * `BrightController.DELAY_TIME` 静态字段驱动；开启后可逆地将其钳位至 5,000ms，关闭时恢复原值。
+     */
+    fun syncFastScreenOffFreeze(enabled: Boolean = true, context: Context? = applicationContext) {
+        val loader = appClassLoader
+            ?: milletPolicyInstance?.javaClass?.classLoader
+            ?: powerKeeperManagerInstance?.javaClass?.classLoader
+            ?: brightScenarioInstance?.javaClass?.classLoader
+            ?: context?.classLoader
+            ?: return
+
+        val configClass = XReflect.findClassIfExists("com.miui.powerkeeper.millet.MilletConfig", loader)
+        if (configClass != null && RomCapabilities.hasField(configClass, "firstScreenOffDelayTime")) {
+            runCatching {
+                val field = XReflect.findField(configClass, "firstScreenOffDelayTime")
+                val current = field.getInt(null)
+                if (originalFirstScreenOffDelayMs == null) {
+                    originalFirstScreenOffDelayMs = current
+                }
+                val base = originalFirstScreenOffDelayMs ?: current
+                val target = HookDecisions.clampScreenOffFreezeDelayMs(base, enabled)
+                if (current != target) {
+                    field.setInt(null, target)
+                    Logger.alwaysInfo("已同步 MilletConfig.firstScreenOffDelayTime: ${current}ms -> ${target}ms")
+                }
+            }
+        }
+
+        val brightClass = XReflect.findClassIfExists("com.miui.powerkeeper.millet.bright.BrightController", loader)
+        if (brightClass != null && RomCapabilities.hasField(brightClass, "DELAY_TIME")) {
+            runCatching {
+                val field = XReflect.findField(brightClass, "DELAY_TIME")
+                val current = field.getInt(null)
+                if (originalBrightDelayMs == null) {
+                    originalBrightDelayMs = current
+                }
+                val base = originalBrightDelayMs ?: current
+                val target = HookDecisions.clampScreenOffFreezeDelayMs(base, enabled)
+                if (current != target && base > 0) {
+                    field.setInt(null, target)
+                    Logger.alwaysInfo("已同步 BrightController.DELAY_TIME: ${current}ms -> ${target}ms")
                 }
             }
         }

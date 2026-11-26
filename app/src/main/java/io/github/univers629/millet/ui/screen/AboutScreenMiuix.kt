@@ -1,22 +1,16 @@
 package io.github.univers629.millet.ui.screen
-import top.yukonga.miuix.kmp.glass.GlassDialog
-import top.yukonga.miuix.kmp.glass.GlassBottomSheet
-import io.github.univers629.millet.ui.util.PopupBackdropHolder
-import io.github.univers629.millet.ui.util.MilletTopAppBar
+import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.widget.Toast
 import io.github.univers629.millet.BuildConfig
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,7 +29,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -46,15 +39,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Android
-import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.Policy
-import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -85,7 +70,6 @@ import io.github.univers629.millet.R
 import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.effect.BgEffectBackground
-import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.AboutPhoneUtils
 import io.github.univers629.millet.ui.util.milletMiuixBlurEffect
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
@@ -94,11 +78,9 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
@@ -108,7 +90,13 @@ import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Document
+import top.yukonga.miuix.kmp.icon.glass.HtmlViewer
+import top.yukonga.miuix.kmp.icon.glass.MemoryFunction
+import top.yukonga.miuix.kmp.icon.glass.MyDevice
+import top.yukonga.miuix.kmp.icon.glass.Phone
+import top.yukonga.miuix.kmp.icon.glass.SecurityStatus
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -116,7 +104,6 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
-import top.yukonga.miuix.kmp.window.WindowDialog
 
 /**
  * 关于主界面（对齐 InstallerX-Revived / HyperCeiler / HyperOS 规范）：
@@ -224,15 +211,10 @@ fun AboutScreenMiuix(
                 defaultWindowInsetsPadding = false,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -425,7 +407,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Smartphone,
+                                    imageVector = MiuixIcons.Glass.Phone,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -439,7 +421,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Android,
+                                    imageVector = MiuixIcons.Glass.MyDevice,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -453,7 +435,7 @@ fun AboutScreenMiuix(
                         BasicComponent(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Memory,
+                                    imageVector = MiuixIcons.Glass.MemoryFunction,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -496,7 +478,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Description,
+                                    imageVector = MiuixIcons.Glass.Document,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -511,7 +493,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Code,
+                                    imageVector = MiuixIcons.Glass.HtmlViewer,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -526,7 +508,7 @@ fun AboutScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Policy,
+                                    imageVector = MiuixIcons.Glass.SecurityStatus,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -614,15 +596,10 @@ fun AboutKnowledgeScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -710,15 +687,10 @@ fun AboutRepoScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -750,7 +722,7 @@ fun AboutRepoScreenMiuix(
                         summary = repoUrl,
                         startAction = {
                             Icon(
-                                imageVector = Icons.Rounded.Code,
+                                imageVector = MiuixIcons.Glass.HtmlViewer,
                                 contentDescription = null,
                                 modifier = Modifier.padding(end = 8.dp),
                                 tint = colorScheme.onSurface
@@ -825,15 +797,28 @@ fun AboutRepoScreenMiuix(
     }
 
     val activeResId = previewDonateResId
-    GlassDialog(backdrop = PopupBackdropHolder.current, 
+    OverlayDialog(
         show = activeResId != null,
         modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top)),
-        title = "感谢支持",
         onDismissRequest = { previewDonateResId = null },
         content = {
             DialogBackHandler { previewDonateResId = null }
             val dismissState = LocalDismissState.current
-            if (activeResId != null) {
+            if (activeResId != null) ProgressiveDialogLayout(
+                title = "感谢支持",
+                footerPadding = PaddingValues(top = 18.dp),
+                footer = {
+                    TextButton(
+                        text = "关闭",
+                        onClick = {
+                            previewDonateResId = null
+                            dismissState?.invoke()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.textButtonColorsPrimary()
+                    )
+                },
+            ) {
                 Box(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center
@@ -845,17 +830,6 @@ fun AboutRepoScreenMiuix(
                         modifier = Modifier.size(260.dp)
                     )
                 }
-                TextButton(
-                    text = "关闭",
-                    onClick = {
-                        previewDonateResId = null
-                        dismissState?.invoke()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 18.dp),
-                    colors = ButtonDefaults.textButtonColorsPrimary()
-                )
             }
         }
     )
@@ -972,15 +946,10 @@ fun AboutLicensesScreenMiuix(
                 scrollBehavior = topAppBarScrollBehavior,
                 navigationIcon = {
                     BarIconButton(
+                        icon = MiuixIcons.Glass.Back,
+                        contentDescription = "返回",
                         onClick = onBack,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = "返回",
-                            tint = colorScheme.onSurface
-                        )
-                    }
+                    )
                 },
             )
         },
@@ -1006,7 +975,7 @@ fun AboutLicensesScreenMiuix(
                     BasicComponent(
                         startAction = {
                             Icon(
-                                imageVector = Icons.Rounded.Policy,
+                                imageVector = MiuixIcons.Glass.SecurityStatus,
                                 contentDescription = null,
                                 modifier = Modifier.padding(end = 8.dp),
                                 tint = colorScheme.onSurface,

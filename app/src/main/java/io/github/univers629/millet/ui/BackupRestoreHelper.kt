@@ -2,6 +2,7 @@ package io.github.univers629.millet.ui
 
 import android.content.Context
 import io.github.univers629.millet.core.AppUidUtils
+import io.github.univers629.millet.core.PolicyRules
 import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
@@ -132,9 +133,14 @@ object BackupRestoreHelper {
         require(booleans.isNotEmpty() || sets.isNotEmpty() || strings.isNotEmpty()) { "Empty backup" }
 
         val sp = PrefReader.openUiPrefs(context)
-        val white = sets[PrefsKeys.WHITE_APP_SET] ?: PrefReader.readUiStringSet(sp, PrefsKeys.WHITE_APP_SET)
-        val force = sets[PrefsKeys.FORCE_FREEZE_SET] ?: PrefReader.readUiStringSet(sp, PrefsKeys.FORCE_FREEZE_SET)
-        require(white.none { it in force }) { "Conflicting whiteAppSet and forceFreezeSet targets" }
+        val mergedSetsByKey = LinkedHashMap<String, Set<String>>(STRING_SET_KEYS.size)
+        for (key in STRING_SET_KEYS) {
+            mergedSetsByKey[key] = sets[key] ?: PrefReader.readUiStringSet(sp, key)
+        }
+        val invalidTargets = PolicyRules.findInvalidTargets(mergedSetsByKey)
+        require(invalidTargets.isEmpty()) {
+            "Conflicting policy target memberships: ${invalidTargets.keys.joinToString(",")}"
+        }
 
         PrefReader.editAllAndNotify(sp, clearFirst = false) {
             for ((key, value) in booleans) putBoolean(key, value)

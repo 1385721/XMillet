@@ -1,9 +1,7 @@
 package io.github.univers629.millet.ui.component.effect
 
-import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Spacer
@@ -33,7 +31,7 @@ fun BgEffectBackground(
     content: @Composable (BoxScope.() -> Unit),
 ) {
     val shaderSupported = remember { isRuntimeShaderSupported() }
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !shaderSupported) {
+    if (!shaderSupported) {
         Box(modifier = modifier, content = content)
         return
     }

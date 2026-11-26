@@ -1,6 +1,5 @@
 package io.github.univers629.millet.ui.component
 
-import android.content.pm.ApplicationInfo
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -10,8 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -29,36 +26,36 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.univers629.millet.ui.model.AppIconSource
 import io.github.univers629.millet.ui.util.AppIconCache
 import io.github.univers629.millet.ui.util.StatsPackageMember
 import io.github.univers629.millet.ui.util.canStackStatsMemberIcons
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.GridView
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
-private data class StatsIconKey(val uid: Int, val packageName: String, val sourceDir: String?)
-
 @Composable
 fun StatsAppIcon(
-    applicationInfo: ApplicationInfo?,
+    iconSource: AppIconSource?,
     members: List<StatsPackageMember>,
     label: String,
     modifier: Modifier = Modifier,
 ) {
     val shared = members.size > 1
-    val infos = when {
-        !shared -> listOfNotNull(applicationInfo)
-        members.size == 2 -> members.map { it.applicationInfo }
+    val sources = when {
+        !shared -> listOfNotNull(iconSource)
+        members.size == 2 -> members.map { it.iconSource }
         else -> emptyList()
     }
-    val keys = infos.map { it?.let { info -> StatsIconKey(info.uid, info.packageName, info.sourceDir) } }
     val context = LocalContext.current
     val sizePx = with(LocalDensity.current) { 48.dp.roundToPx() }
-    var icons by remember(keys, sizePx) {
-        mutableStateOf(infos.map { it?.let { info -> AppIconCache.getCached(info, sizePx) } })
+    var icons by remember(sources, sizePx) {
+        mutableStateOf(sources.map { it?.let { src -> AppIconCache.getCached(src, sizePx) } })
     }
-    LaunchedEffect(keys, sizePx) {
-        icons = infos.map { it?.let { info -> AppIconCache.loadIcon(context, info, sizePx) } }
+    LaunchedEffect(sources, sizePx) {
+        icons = sources.map { it?.let { src -> AppIconCache.loadIcon(context, src, sizePx) } }
     }
 
     BoxWithConstraints(
@@ -109,7 +106,7 @@ fun StatsAppIcon(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Apps,
+                        imageVector = MiuixIcons.Glass.GridView,
                         contentDescription = null,
                         tint = colorScheme.onSecondaryContainer,
                         modifier = Modifier.fillMaxSize().padding(extent * 0.18f),

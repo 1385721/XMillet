@@ -2,9 +2,9 @@ package io.github.univers629.millet.ui.util
 
 import io.github.univers629.millet.core.StatsWindow
 
-internal data class StatsQueryScope(val window: StatsWindow, val isSample: Boolean)
+data class StatsQueryScope(val window: StatsWindow, val isSample: Boolean)
 
-internal data class StatsDetailSelection(val uid: Int, val scope: StatsQueryScope)
+data class StatsDetailSelection(val uid: Int, val scope: StatsQueryScope)
 
 /** Prevents a superseded query from publishing into the current window. */
 internal class StatsRefreshGate {

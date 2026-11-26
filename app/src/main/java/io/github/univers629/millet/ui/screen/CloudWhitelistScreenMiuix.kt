@@ -1,5 +1,6 @@
 package io.github.univers629.millet.ui.screen
 
+import io.github.univers629.millet.ui.util.BarIconButton
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -27,28 +28,28 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.univers629.millet.core.CloudListCodec
-import io.github.univers629.millet.core.PrefReader
-import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.isInDarkTheme
+import io.github.univers629.millet.ui.vm.CloudWhitelistViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.TabRowDefaults
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
-import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.icon.glass.Refresh
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
+import top.yukonga.miuix.kmp.glass.GlassSegmentedTabRow
 
 /** PowerKeeper 云端配置库的三条白名单分类。 */
 private enum class CloudWhitelistTab(
@@ -80,31 +81,50 @@ private enum class CloudWhitelistTab(
 }
 
 /**
- * 官方云白名单子页面：展示 PowerKeeper 读取的三条云端名单（dozeWhiteList / frozenNewWhiteList / launchRestrict），
- * 并提供「云免冻」与「云墓碑白」总开关以屏蔽或恢复官方云端白名单（云启动放行保持只读）。
- *
- * 云名单由 PowerKeeper 进程在开机或模块重载后异步上报，晚于首屏到达属于正常现象，
- * 未读取到时展示等待提示并允许手动刷新，不发起任何网络请求。
+ * 官方云白名单子页面入口：连接 [CloudWhitelistViewModel] 与纯展示 [CloudWhitelistContent]。
  */
 @Composable
-fun CloudWhitelistScreenMiuix(
+fun CloudWhitelistRoute(
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: CloudWhitelistViewModel = viewModel {
+        CloudWhitelistViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    CloudWhitelistContent(
+        cloudLists = uiState.cloudLists,
+        apps = uiState.apps,
+        blockCloudDoze = uiState.blockCloudDoze,
+        blockCloudFrozen = uiState.blockCloudFrozen,
+        isRefreshing = uiState.isRefreshing,
+        onUpdateCloudDozeEnabled = vm::setCloudDozeEnabled,
+        onUpdateCloudFrozenEnabled = vm::setCloudFrozenEnabled,
+        onRefresh = vm::refresh,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+    )
+}
+
+@Composable
+private fun CloudWhitelistContent(
     cloudLists: CloudListCodec.CloudLists?,
     apps: List<InstalledAppUiModel>,
+    blockCloudDoze: Boolean,
+    blockCloudFrozen: Boolean,
     isRefreshing: Boolean,
+    onUpdateCloudDozeEnabled: (Boolean) -> Unit,
+    onUpdateCloudFrozenEnabled: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
     onOpenAppProfile: (InstalledAppUiModel) -> Unit,
-    configVersion: Int = 0,
-    onConfigChanged: () -> Unit = {},
 ) {
-    val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    var blockCloudDoze by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST))
-    }
-    var blockCloudFrozen by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST))
-    }
     val isDark = isInDarkTheme()
     val blockedBg = if (isDynamicColor) {
         colorScheme.tertiaryContainer
@@ -121,18 +141,8 @@ fun CloudWhitelistScreenMiuix(
         Color(0xFFB45309)
     }
 
-    val updateCloudDozeEnabled: (Boolean) -> Unit = { enabled ->
-        val nextBlock = !enabled
-        blockCloudDoze = nextBlock
-        PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_DOZE_WHITELIST, nextBlock)
-        onConfigChanged()
-    }
-    val updateCloudFrozenEnabled: (Boolean) -> Unit = { enabled ->
-        val nextBlock = !enabled
-        blockCloudFrozen = nextBlock
-        PrefReader.putBooleanAndNotify(prefs, PrefsKeys.BLOCK_CLOUD_FROZEN_WHITELIST, nextBlock)
-        onConfigChanged()
-    }
+    val updateCloudDozeEnabled = onUpdateCloudDozeEnabled
+    val updateCloudFrozenEnabled = onUpdateCloudFrozenEnabled
 
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -200,17 +210,30 @@ fun CloudWhitelistScreenMiuix(
     PolicySubPageScaffold(
         title = "官方云白名单",
         onBack = onBack,
-        actions = {
-            IconButton(
-                onClick = onRefresh,
-                enabled = !isRefreshing
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.Refresh,
-                    contentDescription = "刷新云端名单",
-                    tint = colorScheme.onSurface
+        bottomContent = if (effectiveLists != null) {
+            { tabBackdrop, underBar ->
+                GlassSegmentedTabRow(
+                    tabs = CloudWhitelistTab.entries.map { it.title },
+                    selectedIndex = selectedTabIndex,
+                    onSelect = { selectedTabIndex = it },
+                    backdrop = tabBackdrop,
+                    surfaceAlpha = if (underBar) 1f else 0f,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(top = 6.dp, bottom = 12.dp),
                 )
             }
+        } else {
+            null
+        },
+        actions = {
+            BarIconButton(
+                icon = MiuixIcons.Glass.Refresh,
+                contentDescription = "刷新云端名单",
+                onClick = onRefresh,
+                enabled = !isRefreshing,
+            )
         }
     ) {
         if (effectiveLists == null) {
@@ -284,26 +307,7 @@ fun CloudWhitelistScreenMiuix(
                 onQueryChange = { searchQuery = it },
                 placeholder = "搜索应用名称或包名..."
             )
-            Spacer(Modifier.height(8.dp))
-            TabRowWithContour(
-                tabs = CloudWhitelistTab.entries.map { it.title },
-                selectedTabIndex = selectedTabIndex,
-                onTabSelected = { selectedTabIndex = it },
-                colors = TabRowDefaults.tabRowColors(
-                    backgroundColor = colorScheme.surfaceContainer,
-                    contentColor = colorScheme.onSurfaceVariantSummary,
-                    selectedBackgroundColor = colorScheme.secondaryContainer,
-                    selectedContentColor = if (isDynamicColor) {
-                        colorScheme.onSecondaryContainer
-                    } else {
-                        colorScheme.onSurface
-                    },
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-            )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
         }
 
         // 2. 当前名单摘要、总开关与未安装切换

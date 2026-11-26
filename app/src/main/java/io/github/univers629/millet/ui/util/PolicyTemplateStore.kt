@@ -11,6 +11,7 @@ import io.github.univers629.millet.core.PolicyTemplate
 import io.github.univers629.millet.core.PolicyTemplateCodec
 import io.github.univers629.millet.core.PolicyTemplatePresets
 import io.github.univers629.millet.core.PrefReader
+import io.github.univers629.millet.core.PrefsSnapshot
 import io.github.univers629.millet.core.SystemBatteryOptimizationHelper
 import io.github.univers629.millet.ui.screen.InstalledAppUiModel
 import kotlinx.coroutines.CancellationException
@@ -113,6 +114,19 @@ class PolicyMembershipSnapshot(private val sets: Map<PolicyFlag, Set<String>>) {
         fun read(prefs: SharedPreferences): PolicyMembershipSnapshot =
             PolicyMembershipSnapshot(
                 PolicyFlag.entries.associateWith { PrefReader.readUiStringSet(prefs, it.key) }
+            )
+
+        fun fromSnapshot(snapshot: PrefsSnapshot): PolicyMembershipSnapshot =
+            PolicyMembershipSnapshot(
+                mapOf(
+                    PolicyFlag.WHITE to snapshot.whiteAppSet,
+                    PolicyFlag.MESSAGE to snapshot.messageAppSet,
+                    PolicyFlag.FORCE_FREEZE to snapshot.forceFreezeSet,
+                    PolicyFlag.BLOCK_THAW to snapshot.blockThawSet,
+                    PolicyFlag.FORBID_SYNC to snapshot.forbidSyncBinderSet,
+                    PolicyFlag.NOT_FREEZE_FGS to snapshot.notFreezeWhenHasFgsSet,
+                    PolicyFlag.IGNORE_NETWORK_WAKE to snapshot.ignoreNetworkWakeSet,
+                )
             )
     }
 }

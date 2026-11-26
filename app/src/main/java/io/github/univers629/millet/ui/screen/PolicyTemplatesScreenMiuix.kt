@@ -1,10 +1,8 @@
 package io.github.univers629.millet.ui.screen
 import io.github.univers629.millet.ui.util.GlassOverlayListPopup
-import top.yukonga.miuix.kmp.glass.GlassDialog
 import top.yukonga.miuix.kmp.glass.GlassBottomSheet
 import io.github.univers629.millet.ui.util.PopupBackdropHolder
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
 import io.github.univers629.millet.ui.util.BarIconButton
 
 import android.widget.Toast
@@ -49,14 +47,9 @@ import androidx.compose.foundation.text.input.maxLengthTrim
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -82,7 +75,6 @@ import io.github.univers629.millet.core.PolicyFlag
 import io.github.univers629.millet.core.PolicyRules
 import io.github.univers629.millet.core.PolicyTemplate
 import io.github.univers629.millet.core.PolicyTemplateCodec
-import io.github.univers629.millet.core.PrefReader
 import io.github.univers629.millet.ui.component.AppIconImage
 import io.github.univers629.millet.ui.component.DropdownItem
 import io.github.univers629.millet.ui.component.ListPopupDefaults
@@ -90,12 +82,16 @@ import io.github.univers629.millet.ui.component.MiuixConfirmDialog
 import io.github.univers629.millet.ui.component.StatusTagMiuix
 import io.github.univers629.millet.ui.component.WarningCard
 import io.github.univers629.millet.ui.component.WarningLevel
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.PolicyMembershipSnapshot
 import io.github.univers629.millet.ui.util.PolicyTemplateApplier
-import io.github.univers629.millet.ui.util.PolicyTemplateStore
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.PolicyTemplateDetailViewModel
+import io.github.univers629.millet.ui.vm.PolicyTemplatesViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -109,14 +105,15 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Layers
+import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.icon.basic.Check
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.Back
 import top.yukonga.miuix.kmp.icon.extended.Close
-import top.yukonga.miuix.kmp.icon.extended.MoreCircle
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.icon.glass.MoreCircle
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.LocalDismissState
@@ -124,6 +121,10 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.derivedStateOf
+import top.yukonga.miuix.kmp.blur.Backdrop
+import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 
 // ============================================================================================
 // 通用二级页骨架
@@ -139,9 +140,15 @@ internal fun PolicySubPageScaffold(
     title: String,
     onBack: () -> Unit,
     actions: @Composable RowScope.() -> Unit = {},
+    bottomContent: (@Composable (backdrop: Backdrop, contentUnderTopBar: Boolean) -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
+    val subPageListState = rememberLazyListState()
+    val fallbackTabBackdrop = rememberLayerBackdrop()
+    val contentUnderTopBar by remember(subPageListState) {
+        derivedStateOf { subPageListState.canScrollBackward }
+    }
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
@@ -157,17 +164,22 @@ internal fun PolicySubPageScaffold(
                         BarIconButton(onClick = onBack) {
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
-                                modifier = Modifier.graphicsLayer {
-                                    if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                },
-                                imageVector = MiuixIcons.Back,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                imageVector = MiuixIcons.Glass.Back,
                                 contentDescription = "返回",
                                 tint = colorScheme.onBackground
                             )
                         }
                     },
                     actions = actions,
-                    scrollBehavior = scrollBehavior
+                    scrollBehavior = scrollBehavior,
+                    bottomContent = {
+                        bottomContent?.invoke(backdrop ?: fallbackTabBackdrop, blurActive && contentUnderTopBar)
+                    },
                 )
             }
         },
@@ -175,6 +187,7 @@ internal fun PolicySubPageScaffold(
     ) { innerPadding ->
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             LazyColumn(
+                state = subPageListState,
                 modifier = Modifier
                     .fillMaxHeight()
                     .padding(top = 12.dp)
@@ -218,7 +231,7 @@ internal fun PolicyAppRowCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             AppIconImage(
-                applicationInfo = app.applicationInfo,
+                iconSource = app.iconSource,
                 label = app.appName,
                 modifier = Modifier
                     .padding(end = 12.dp)
@@ -293,39 +306,59 @@ private fun applyResultMessage(
 // ============================================================================================
 
 /**
- * 策略模板总览：预设与自定义模板列表，可新建自定义模板。
- *
- * @param templateVersion 自定义模板变化后宿主递增，用于重新读取模板
- * @param onTemplatesChanged 自定义模板增删改后回调，宿主据此递增 [templateVersion]
+ * 策略模板总览页入口：连接 [PolicyTemplatesViewModel] 与纯展示 [PolicyTemplatesContent]。
  */
 @Composable
-fun PolicyTemplatesScreenMiuix(
-    apps: List<InstalledAppUiModel>,
-    templateVersion: Int,
+fun PolicyTemplatesRoute(
     onBack: () -> Unit,
     onOpenTemplate: (String) -> Unit,
-    onTemplatesChanged: () -> Unit,
-    policyVersion: Int = 0,
 ) {
     val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    val templates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
-    val summary = remember(apps, templates, policyVersion) { buildPolicyHubSummary(prefs, apps, templates) }
+    val container = remember(context) { context.appUiContainer }
+    val vm: PolicyTemplatesViewModel = viewModel {
+        PolicyTemplatesViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    PolicyTemplatesContent(
+        templates = uiState.templates,
+        usageByTemplate = uiState.usageByTemplate,
+        onBack = onBack,
+        onOpenTemplate = onOpenTemplate,
+        onSaveNewTemplate = { name, flags ->
+            val saved = vm.createCustomTemplate(name, flags)
+            if (saved != null) {
+                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
+                onOpenTemplate(saved.id)
+            } else {
+                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
+            }
+        },
+    )
+}
+
+@Composable
+fun PolicyTemplatesContent(
+    templates: List<PolicyTemplate>,
+    usageByTemplate: Map<String, Int>,
+    onBack: () -> Unit,
+    onOpenTemplate: (String) -> Unit,
+    onSaveNewTemplate: (name: String, flags: Set<PolicyFlag>) -> Unit,
+) {
     var showEditor by remember { mutableStateOf(false) }
 
     PolicySubPageScaffold(
         title = "策略模板",
         onBack = onBack,
         actions = {
-            IconButton(
-                onClick = { showEditor = true }
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = "新建自定义模板",
-                    tint = colorScheme.onSurface
-                )
-            }
+            BarIconButton(
+                icon = MiuixIcons.Glass.Add,
+                contentDescription = "新建自定义模板",
+                onClick = { showEditor = true },
+            )
         }
     ) {
         item(key = "intro") {
@@ -350,7 +383,7 @@ fun PolicyTemplatesScreenMiuix(
                 templates.filter { it.builtIn }.forEach { template ->
                     TemplateArrowRow(
                         template = template,
-                        usage = summary.usageByTemplate[template.id] ?: 0,
+                        usage = usageByTemplate[template.id] ?: 0,
                         onClick = { onOpenTemplate(template.id) }
                     )
                 }
@@ -368,14 +401,14 @@ fun PolicyTemplatesScreenMiuix(
                 templates.filterNot { it.builtIn }.forEach { template ->
                     TemplateArrowRow(
                         template = template,
-                        usage = summary.usageByTemplate[template.id] ?: 0,
+                        usage = usageByTemplate[template.id] ?: 0,
                         onClick = { onOpenTemplate(template.id) }
                     )
                 }
                 ArrowPreference(
                     startAction = {
                         Icon(
-                            imageVector = Icons.Rounded.Add,
+                            imageVector = MiuixIcons.Glass.Add,
                             contentDescription = null,
                             modifier = Modifier
                                 .padding(end = 8.dp)
@@ -398,14 +431,7 @@ fun PolicyTemplatesScreenMiuix(
         onDismiss = { showEditor = false },
         onSave = { name, flags ->
             showEditor = false
-            val saved = PolicyTemplateStore.saveCustom(prefs, null, name, flags)
-            if (saved != null) {
-                onTemplatesChanged()
-                Toast.makeText(context, "已创建模板「${saved.name}」", Toast.LENGTH_SHORT).show()
-                onOpenTemplate(saved.id)
-            } else {
-                Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
-            }
+            onSaveNewTemplate(name, flags)
         }
     )
 }
@@ -419,7 +445,7 @@ private fun TemplateArrowRow(
     ArrowPreference(
         startAction = {
             Icon(
-                imageVector = if (template.builtIn) Icons.Rounded.Layers else Icons.Rounded.Tune,
+                imageVector = if (template.builtIn) MiuixIcons.Glass.Layers else MiuixIcons.Glass.Tune,
                 contentDescription = null,
                 modifier = Modifier
                     .padding(end = 8.dp)
@@ -446,29 +472,53 @@ private fun TemplateArrowRow(
 // ============================================================================================
 
 /**
- * 模板详情：包含的策略、正在使用的应用，以及批量套用 / 移除。
- *
- * 「在用」= 应用当前七项状态与模板完全一致；状态直接读 prefs 快照，
- * 因为 `InstalledAppUiModel` 不含「忽略网络唤醒」。
+ * 策略模板详情页入口：连接按 `templateId` 作用域化的 [PolicyTemplateDetailViewModel]。
  */
 @Composable
-fun PolicyTemplateDetailScreenMiuix(
+fun PolicyTemplateDetailRoute(
     templateId: String,
-    apps: List<InstalledAppUiModel>,
-    templateVersion: Int,
     onBack: () -> Unit,
     onOpenAppProfile: (InstalledAppUiModel) -> Unit,
-    onPolicyChanged: () -> Unit,
-    onTemplatesChanged: () -> Unit,
-    policyVersion: Int = 0,
 ) {
     val context = LocalContext.current
-    val prefs = remember { PrefReader.openUiPrefs(context) }
-    // 写入后立刻重读快照，不必等宿主异步重建应用列表。
-    var localRevision by remember { mutableIntStateOf(0) }
-    val allTemplates = remember(templateVersion) { PolicyTemplateStore.loadAll(prefs) }
-    val template = remember(templateId, allTemplates) { allTemplates.firstOrNull { it.id == templateId } }
-    val snapshot = remember(apps, localRevision, policyVersion) { PolicyMembershipSnapshot.read(prefs) }
+    val container = remember(context) { context.appUiContainer }
+    val vm: PolicyTemplateDetailViewModel = viewModel(key = templateId) {
+        PolicyTemplateDetailViewModel(
+            templateId = templateId,
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    PolicyTemplateDetailContent(
+        template = uiState.template,
+        allTemplates = uiState.allTemplates,
+        apps = uiState.apps,
+        snapshot = uiState.snapshot,
+        users = uiState.users,
+        onBack = onBack,
+        onOpenAppProfile = onOpenAppProfile,
+        onApplyFlags = { targets, flags -> vm.applyTemplate(context, targets, flags) },
+        onSaveTemplate = vm::saveCustomTemplate,
+        onDeleteTemplate = vm::deleteCustomTemplate,
+    )
+}
+
+@Composable
+private fun PolicyTemplateDetailContent(
+    template: PolicyTemplate?,
+    allTemplates: List<PolicyTemplate>,
+    apps: List<InstalledAppUiModel>,
+    snapshot: PolicyMembershipSnapshot,
+    users: List<InstalledAppUiModel>,
+    onBack: () -> Unit,
+    onOpenAppProfile: (InstalledAppUiModel) -> Unit,
+    onApplyFlags: (List<InstalledAppUiModel>, Set<PolicyFlag>) -> PolicyTemplateApplier.Result,
+    onSaveTemplate: (name: String, flags: Set<PolicyFlag>) -> PolicyTemplate?,
+    onDeleteTemplate: () -> Unit,
+) {
+    val context = LocalContext.current
 
     if (template == null) {
         PolicySubPageScaffold(title = "策略模板", onBack = onBack) {
@@ -490,11 +540,6 @@ fun PolicyTemplateDetailScreenMiuix(
         return
     }
 
-    val users = remember(template, apps, snapshot) {
-        apps.filter { PolicyTemplateApplier.isTargetable(it) && template.matches(snapshot.flagsOf(it)) }
-            .sortedWith(compareBy<InstalledAppUiModel> { it.appName.lowercase() }.thenBy { it.isDualApp })
-    }
-
     var showPicker by remember { mutableStateOf(false) }
     var showEditor by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -507,8 +552,7 @@ fun PolicyTemplateDetailScreenMiuix(
         describeChanged: (Int) -> String,
     ) {
         if (targets.isEmpty()) return
-        val result = PolicyTemplateApplier.apply(context, targets, flags, onPolicyChanged)
-        localRevision++
+        val result = onApplyFlags(targets, flags)
         Toast.makeText(context, applyResultMessage(describeChanged, result), Toast.LENGTH_LONG).show()
     }
 
@@ -519,15 +563,11 @@ fun PolicyTemplateDetailScreenMiuix(
             if (!template.builtIn) {
                 val showTopPopup = remember { mutableStateOf(false) }
                 BarIconButton(
+                    icon = MiuixIcons.Glass.MoreCircle,
+                    contentDescription = "模板操作",
                     onClick = { showTopPopup.value = true },
-                    holdDownState = showTopPopup.value
-                ) {
-                    Icon(
-                        imageVector = MiuixIcons.MoreCircle,
-                        tint = colorScheme.onSurface,
-                        contentDescription = "模板操作"
-                    )
-                }
+                    holdDownState = showTopPopup.value,
+                )
                 GlassOverlayListPopup(
                     show = showTopPopup.value,
                     popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
@@ -574,7 +614,7 @@ fun PolicyTemplateDetailScreenMiuix(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = if (template.builtIn) Icons.Rounded.Layers else Icons.Rounded.Tune,
+                            imageVector = if (template.builtIn) MiuixIcons.Glass.Layers else MiuixIcons.Glass.Tune,
                             contentDescription = null,
                             tint = colorScheme.onSecondaryContainer,
                             modifier = Modifier.size(26.dp)
@@ -769,11 +809,10 @@ fun PolicyTemplateDetailScreenMiuix(
         onSave = { name, flags ->
             showEditor = false
             val previousUsers = users
-            val saved = PolicyTemplateStore.saveCustom(prefs, template.id, name, flags)
+            val saved = onSaveTemplate(name, flags)
             if (saved == null) {
                 Toast.makeText(context, "模板保存失败：名称或策略组合无效", Toast.LENGTH_SHORT).show()
             } else {
-                onTemplatesChanged()
                 if (saved.flags != template.flags && previousUsers.isNotEmpty()) {
                     // 组合变了：已套用旧组合的应用不会自动跟随，交给用户决定是否同步。
                     pendingResync = previousUsers to saved.flags
@@ -823,8 +862,7 @@ fun PolicyTemplateDetailScreenMiuix(
         confirmText = "删除",
         onConfirm = {
             showDeleteConfirm = false
-            PolicyTemplateStore.deleteCustom(prefs, template.id)
-            onTemplatesChanged()
+            onDeleteTemplate()
             onBack()
         },
         onDismiss = { showDeleteConfirm = false }
@@ -875,8 +913,9 @@ internal fun PolicyTemplateEditorSheet(
         show = show,
         title = if (initial == null) "新建自定义模板" else "编辑模板",
         insideMargin = DpSize(16.dp, 0.dp),
+        progressiveBlur = false,
         onDismissRequest = onDismiss,
-    ) {
+    ) { innerPadding ->
         val dismissState = LocalDismissState.current
         Column(
             modifier = Modifier
@@ -888,6 +927,7 @@ internal fun PolicyTemplateEditorSheet(
                     .fillMaxWidth()
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState())
+                    .padding(innerPadding)
             ) {
                 TemplateNameField(
                     value = name,
@@ -1074,12 +1114,14 @@ private fun PolicyAppPickerSheet(
         show = show,
         title = "套用「${template.name}」",
         insideMargin = DpSize(16.dp, 0.dp),
+        progressiveBlur = false,
         onDismissRequest = onDismiss,
-    ) {
+    ) { innerPadding ->
         val dismissState = LocalDismissState.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(innerPadding)
                 .padding(bottom = navBottomPadding + 16.dp)
         ) {
             MiuixCapsuleSearchBar(
@@ -1137,7 +1179,7 @@ private fun PolicyAppPickerSheet(
                         ) {
                             SelectionIndicator(checked = checked)
                             AppIconImage(
-                                applicationInfo = app.applicationInfo,
+                                iconSource = app.iconSource,
                                 label = app.appName,
                                 modifier = Modifier
                                     .padding(start = 12.dp, end = 12.dp)

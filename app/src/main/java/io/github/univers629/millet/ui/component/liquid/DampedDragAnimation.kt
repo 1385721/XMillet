@@ -74,7 +74,8 @@ class DampedDragAnimation(
     val scaleY: Float get() = scaleYAnimation.value
     val velocity: Float get() = velocityAnimation.value
 
-    val modifier: Modifier = Modifier.pointerInput(Unit) {
+    // 以当前实例为 key：tabsCount 变化重建实例时使 SuspendPointerInputElement 触发节点更新，避免手势协程继续绑定旧实例。
+    val modifier: Modifier = Modifier.pointerInput(this) {
         inspectDragGestures(
             onDragStart = { down ->
                 onDragStarted(down.position)

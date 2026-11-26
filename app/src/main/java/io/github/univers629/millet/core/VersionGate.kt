@@ -58,12 +58,14 @@ object VersionGate {
             val osName = miOsVersionName
             if (!osName.startsWith("OS", ignoreCase = true)) return null
             val major = osName.substring(2).substringBefore('.').toIntOrNull() ?: return null
+            // 已实测档位：OS1.0 / OS2.0 / OS3.0 / OS4.0（ref/rom/os1-ares … ref/rom/os4-dada）。
+            // 这里的 else 等价于原来的 `major >= 4 -> OS4` 加一条不可达的 `else -> null`：
+            // 前面的分支已覆盖所有 <= 3 的取值，剩下的必然是 >= 4，未来的 OS5+ 也统一按 OS4 处理。
             return when {
                 major <= 1 -> RomTier.OS1
                 major == 2 -> RomTier.OS2
                 major == 3 -> RomTier.OS3
-                major >= 4 -> RomTier.OS4
-                else -> null
+                else -> RomTier.OS4
             }
         }
 

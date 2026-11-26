@@ -1,17 +1,16 @@
 package io.github.univers629.millet.ui.screen
-import top.yukonga.miuix.kmp.glass.GlassDialog
-import top.yukonga.miuix.kmp.glass.GlassBottomSheet
-import io.github.univers629.millet.ui.util.PopupBackdropHolder
+import io.github.univers629.millet.ui.component.ProgressiveDialogLayout
+import io.github.univers629.millet.ui.component.FoldablePreferenceCard
+import io.github.univers629.millet.ui.component.FoldablePreferenceSection
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import io.github.univers629.millet.ui.util.MilletTopAppBar
-import io.github.univers629.millet.ui.util.MilletSmallTopAppBar
-import io.github.univers629.millet.ui.util.BarIconButton
 
-import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
 import io.github.univers629.millet.BuildConfig
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,20 +32,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.BatteryChargingFull
-import androidx.compose.material.icons.rounded.Bedtime
-import androidx.compose.material.icons.rounded.BugReport
-import androidx.compose.material.icons.rounded.CleaningServices
-import androidx.compose.material.icons.rounded.ColorLens
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.DarkMode
-import androidx.compose.material.icons.automirrored.rounded.DirectionsWalk
-import androidx.compose.material.icons.rounded.FastForward
-import androidx.compose.material.icons.rounded.LightMode
-import androidx.compose.material.icons.rounded.Save
-import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,7 +44,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -67,20 +51,22 @@ import androidx.core.content.FileProvider
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
-import io.github.univers629.millet.core.PrefReader
-import io.github.univers629.millet.core.PrefsDefaults
 import io.github.univers629.millet.core.PrefsKeys
 import io.github.univers629.millet.ui.BackupRestoreHelper
 import io.github.univers629.millet.ui.component.DialogBackHandler
 import io.github.univers629.millet.ui.component.MiuixConfirmDialog
-import io.github.univers629.millet.ui.component.TombStatsIcon
-import io.github.univers629.millet.ui.component.XMilletIcons
+import io.github.univers629.millet.ui.di.appUiContainer
 import io.github.univers629.millet.ui.theme.LocalEnableBlur
 import io.github.univers629.millet.ui.theme.UiThemeState
+import io.github.univers629.millet.ui.util.AppUpdateController
 import io.github.univers629.millet.ui.util.AppUpdateStatus
 import io.github.univers629.millet.ui.util.BlurredBar
 import io.github.univers629.millet.ui.util.BugreportHelper
 import io.github.univers629.millet.ui.util.rememberBlurBackdrop
+import io.github.univers629.millet.ui.vm.SettingsUiState
+import io.github.univers629.millet.ui.vm.SettingsViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -92,97 +78,154 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Widget
+import top.yukonga.miuix.kmp.icon.glass.Timer
+import top.yukonga.miuix.kmp.icon.glass.Send
+import top.yukonga.miuix.kmp.icon.glass.Report
+import top.yukonga.miuix.kmp.icon.glass.RecordingTape
+import top.yukonga.miuix.kmp.icon.glass.Prohibit
+import top.yukonga.miuix.kmp.icon.glass.Power
+import top.yukonga.miuix.kmp.icon.glass.MultiSplitScreen
+import top.yukonga.miuix.kmp.icon.glass.LockOutline
+import top.yukonga.miuix.kmp.icon.glass.JumpNext
+import top.yukonga.miuix.kmp.icon.glass.HapticIntensity
+import top.yukonga.miuix.kmp.icon.glass.AccessControl
+import top.yukonga.miuix.kmp.icon.glass.Battery100
+import top.yukonga.miuix.kmp.icon.glass.DisplayBrightness
+import top.yukonga.miuix.kmp.icon.glass.QuietMode
+import top.yukonga.miuix.kmp.icon.glass.Save
+import top.yukonga.miuix.kmp.icon.glass.Share
+import top.yukonga.miuix.kmp.icon.glass.Theme
+import top.yukonga.miuix.kmp.icon.glass.Update
 import top.yukonga.miuix.kmp.icon.extended.Backup
 import top.yukonga.miuix.kmp.icon.extended.Import
 import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.glass.Backup
+import top.yukonga.miuix.kmp.icon.glass.Download
+import top.yukonga.miuix.kmp.icon.glass.Import
+import top.yukonga.miuix.kmp.icon.glass.Log
+import top.yukonga.miuix.kmp.icon.glass.Reset
 import top.yukonga.miuix.kmp.icon.extended.Reset
-import top.yukonga.miuix.kmp.icon.extended.Show
-import top.yukonga.miuix.kmp.icon.extended.Tasks
-import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
-import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
-import top.yukonga.miuix.kmp.window.WindowDialog
+
+/**
+ * 设置页入口：连接 [SettingsViewModel] 与纯展示 [SettingsContent]。
+ */
+@Composable
+fun SettingsRoute(
+    themeState: UiThemeState,
+    bottomInnerPadding: Dp,
+    onOpenAppearance: () -> Unit,
+    onOpenOobe: () -> Unit,
+    onOpenAbout: () -> Unit,
+) {
+    val context = LocalContext.current
+    val container = remember(context) { context.appUiContainer }
+    val vm: SettingsViewModel = viewModel {
+        SettingsViewModel(
+            policyRepo = container.policyRepository,
+            runtimeRepo = container.runtimeAndAppsRepository,
+        )
+    }
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
+
+    SettingsContent(
+        uiState = uiState,
+        themeState = themeState,
+        bottomInnerPadding = bottomInnerPadding,
+        onSetBooleanPref = vm::setBooleanPref,
+        onSetDetailedLogging = vm::setDetailedLogging,
+        onSetLogLevel = { level, syncIsLog -> vm.setLogLevel(level, syncIsLog) },
+        onImportBackupJson = { json -> vm.importBackupJson(context, json) },
+        onResetToDefaults = { vm.resetToDefaults(context) },
+        onCheckForUpdates = {
+            AppUpdateController.checkManually(
+                context = context,
+                currentVersionCode = BuildConfig.VERSION_CODE,
+                currentVersionName = BuildConfig.VERSION_NAME,
+            )
+        },
+        onOpenAppearance = onOpenAppearance,
+        onOpenOobe = onOpenOobe,
+        onOpenAbout = onOpenAbout,
+    )
+}
 
 @Composable
-fun SettingsScreenMiuix(
+fun SettingsContent(
+    uiState: SettingsUiState,
     themeState: UiThemeState,
-    configVersion: Int = 0,
     bottomInnerPadding: Dp,
-    updateStatus: AppUpdateStatus = AppUpdateStatus.Idle,
-    availableUpdateVersion: String? = null,
+    onSetBooleanPref: (String, Boolean) -> Unit,
+    onSetDetailedLogging: (Boolean) -> Unit,
+    onSetLogLevel: (String, Boolean) -> Unit,
+    onImportBackupJson: (String) -> Unit,
+    onResetToDefaults: () -> Unit,
     onCheckForUpdates: () -> Unit = {},
     onOpenAppearance: () -> Unit = {},
     onOpenOobe: () -> Unit = {},
     onOpenAbout: () -> Unit,
-    onConfigImportedOrReset: () -> Unit,
 ) {
     val context = LocalContext.current
-    val sp = remember { PrefReader.openUiPrefs(context) }
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
-    var disableKill by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_KILL))
-    }
-    var disableCharge by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_CHARGE))
-    }
-    var disableScreenOnThaw by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_SCREEN_ON_THAW))
-    }
-    var blockPowerSaveWhitelist by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS))
-    }
-    var freezeDualApp by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.FREEZE_DUAL_APP))
-    }
-    var isLog by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.IS_LOG))
-    }
+    val prefs = uiState.prefs
+    val disableKill = prefs.disableKill
+    val disableCharge = prefs.disableCharge
+    val disableScreenOnThaw = prefs.disableScreenOnThaw
+    val blockPowerSaveWhitelist = prefs.blockAddPowerSaveWhitelistApps
+    val freezeDualApp = prefs.freezeDualApp
+    val isLog = prefs.isLog
     // 日志等级：off/error/warn/info/debug，与「开启详细运行日志」开关联动。
-    var logLevel by remember(configVersion) {
-        mutableStateOf(sp.getString(PrefsKeys.LOG_LEVEL, PrefsDefaults.LOG_LEVEL) ?: PrefsDefaults.LOG_LEVEL)
-    }
-    var simplifyLog by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SIMPLIFY_LOG))
-    }
-
-    var enableDoze by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.ENABLE_DOZE))
-    }
-    var skipStateCheck by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.SKIP_STATE_CHECK))
-    }
-    var disableMotionListener by remember(configVersion) {
-        mutableStateOf(PrefReader.readUiBoolean(sp, PrefsKeys.DISABLE_MOTION_LISTENER))
-    }
+    val logLevel = prefs.logLevel
+    val simplifyLog = prefs.simplifyLog
+    val enableDoze = prefs.enableDoze
+    val skipStateCheck = prefs.skipStateCheck
+    val disableMotionListener = prefs.disableMotionListener
+    val updateStatus = uiState.updateStatus
+    val availableUpdateVersion = uiState.availableUpdateVersion
 
     var showRebootNotice by remember { mutableStateOf(false) }
-
-    val aliasDefault = remember {
-        ComponentName(context.packageName, "${context.packageName}.ui.MainActivityAlias")
-    }
-    var showLauncherIcon by remember {
-        val stateDefault = context.packageManager.getComponentEnabledSetting(aliasDefault)
-        mutableStateOf(stateDefault != PackageManager.COMPONENT_ENABLED_STATE_DISABLED)
-    }
 
     var showResetConfirmDialog by remember { mutableStateOf(false) }
     var showSendLogDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
+    var showConfigMenu by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
+    val configScope = rememberCoroutineScope()
+    val createBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isLoading = true
+            configScope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val json = BackupRestoreHelper.exportToJson(context)
+                        context.contentResolver.openOutputStream(uri)?.use { output ->
+                            output.write(json.toByteArray(Charsets.UTF_8))
+                        } ?: error("无法写入目标文件")
+                    }
+                    Toast.makeText(context, "配置备份已保存", Toast.LENGTH_SHORT).show()
+                } catch (t: Throwable) {
+                    Toast.makeText(context, "保存失败：${t.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    isLoading = false
+                }
+            }
+        }
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -193,8 +236,7 @@ fun SettingsScreenMiuix(
                     input.bufferedReader(Charsets.UTF_8).readText()
                 }.orEmpty()
                 if (json.isNotBlank()) {
-                    BackupRestoreHelper.importFromJson(context, json)
-                    onConfigImportedOrReset()
+                    onImportBackupJson(json)
                     Toast.makeText(context, "配置导入并同步成功", Toast.LENGTH_SHORT).show()
                 }
             }.onFailure { e ->
@@ -224,8 +266,7 @@ fun SettingsScreenMiuix(
             dismissText = "取消",
             onConfirm = {
                 showResetConfirmDialog = false
-                BackupRestoreHelper.resetToDefaults(context)
-                onConfigImportedOrReset()
+                onResetToDefaults()
                 Toast.makeText(context, "已恢复出厂默认配置", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showResetConfirmDialog = false }
@@ -271,7 +312,7 @@ fun SettingsScreenMiuix(
                         GlassDropdownPreference(backdrop = backdrop, 
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.DarkMode,
+                                    imageVector = MiuixIcons.Glass.Theme,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -288,7 +329,7 @@ fun SettingsScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.ColorLens,
+                                    imageVector = MiuixIcons.Glass.Widget,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -300,63 +341,24 @@ fun SettingsScreenMiuix(
                             summary = "悬浮底栏、玻璃材质和动态取色",
                             onClick = onOpenAppearance
                         )
-
-                        SwitchPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = TombStatsIcon,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "墓碑统计",
-                            summary = "在底栏显示墓碑统计页：冻结、唤醒与拦截次数",
-                            checked = themeState.showTombStatsTab,
-                            onCheckedChange = { themeState.updateShowTombStatsTab(it) }
-                        )
-
-                        SwitchPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Show,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "显示桌面启动图标",
-                            summary = "关闭后可从 LSPosed 管理器的模块设置中打开 XMillet",
-                            checked = showLauncherIcon,
-                            onCheckedChange = { visible ->
-                                showLauncherIcon = visible
-                                context.packageManager.setComponentEnabledSetting(
-                                    aliasDefault,
-                                    if (visible) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                                    else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                    PackageManager.DONT_KILL_APP
-                                )
-                            }
-                        )
                     }
 
-                    SmallTitle(
-                        text = "Millet 墓碑冻结全局策略"
-                    )
+                    SmallTitle(text = "全局策略")
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp)
                             .padding(bottom = 12.dp)
                     ) {
+                        FoldablePreferenceSection(
+                            title = "Millet 墓碑冻结全局策略",
+                            summary = "已开启 ${listOf(disableKill, disableCharge, disableScreenOnThaw, blockPowerSaveWhitelist, freezeDualApp).count { it }}/5 项",
+                            icon = MiuixIcons.Glass.AccessControl,
+                        ) {
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.CleaningServices,
+                                    imageVector = MiuixIcons.Glass.Battery100,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -367,15 +369,12 @@ fun SettingsScreenMiuix(
                             title = "禁止息屏与夜间清理后台",
                             summary = "拦截 PowerCheckerController 与 PowerStateMachine自动杀后台",
                             checked = disableKill,
-                            onCheckedChange = {
-                                disableKill = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_KILL, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_KILL, it) }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.BatteryChargingFull,
+                                    imageVector = MiuixIcons.Glass.Power,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -386,15 +385,12 @@ fun SettingsScreenMiuix(
                             title = "禁止插电时全量解冻",
                             summary = "拦截 MilletBrightHandler what=16 与 Greezer 的插电解冻",
                             checked = disableCharge,
-                            onCheckedChange = {
-                                disableCharge = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_CHARGE, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_CHARGE, it) }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.LightMode,
+                                    imageVector = MiuixIcons.Glass.DisplayBrightness,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -405,15 +401,12 @@ fun SettingsScreenMiuix(
                             title = "亮屏时保持冻结",
                             summary = "屏幕亮起时，不让系统批量解冻后台应用。此项不控制手机进入深度睡眠",
                             checked = disableScreenOnThaw,
-                            onCheckedChange = {
-                                disableScreenOnThaw = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_SCREEN_ON_THAW, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_SCREEN_ON_THAW, it) }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = XMilletIcons.AppPolicy,
+                                    imageVector = MiuixIcons.Glass.Prohibit,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -425,18 +418,13 @@ fun SettingsScreenMiuix(
                             summary = "拦截电量与性能后台自动增删省电白名单（保留你在系统设置里的手动修改）",
                             checked = blockPowerSaveWhitelist,
                             onCheckedChange = {
-                                blockPowerSaveWhitelist = it
-                                PrefReader.putBooleanAndNotify(
-                                    sp,
-                                    PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS,
-                                    it
-                                )
+                                onSetBooleanPref(PrefsKeys.BLOCK_ADD_POWER_SAVE_WHITELIST_APPS, it)
                             }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.ContentCopy,
+                                    imageVector = MiuixIcons.Glass.MultiSplitScreen,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -447,28 +435,18 @@ fun SettingsScreenMiuix(
                             title = "控制双开应用冻结",
                             summary = "接管双开空间（用户 999）的冻结，应用策略单独设置；原生包名级名单仍可能共享",
                             checked = freezeDualApp,
-                            onCheckedChange = {
-                                freezeDualApp = it
-                                PrefReader.putBooleanAndNotify(
-                                    sp,
-                                    PrefsKeys.FREEZE_DUAL_APP,
-                                    it
-                                )
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.FREEZE_DUAL_APP, it) }
                         )
-                    }
-
-                    SmallTitle(text = "Doze 深度睡眠策略")
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp)
-                    ) {
+                        }
+                        FoldablePreferenceSection(
+                            title = "Doze 深度睡眠策略",
+                            summary = "已开启 ${listOf(enableDoze, skipStateCheck, disableMotionListener).count { it }}/3 项",
+                            icon = MiuixIcons.Glass.QuietMode,
+                        ) {
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Bedtime,
+                                    imageVector = MiuixIcons.Glass.Timer,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -479,15 +457,12 @@ fun SettingsScreenMiuix(
                             title = "启用 Doze 省电控制增强",
                             summary = "息屏且未充电时，约 10 秒后尝试进入深度睡眠。亮屏或充电时，退出本模块开启的强制睡眠",
                             checked = enableDoze,
-                            onCheckedChange = {
-                                enableDoze = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.ENABLE_DOZE, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.ENABLE_DOZE, it) }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.FastForward,
+                                    imageVector = MiuixIcons.Glass.JumpNext,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -498,15 +473,12 @@ fun SettingsScreenMiuix(
                             title = "跳过 Doze 中间传感检查",
                             summary = "当状态进入IDLE_PENDING(2)时直接跃迁至 IDLE_MAINTENANCE(6)",
                             checked = skipStateCheck,
-                            onCheckedChange = {
-                                skipStateCheck = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.SKIP_STATE_CHECK, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.SKIP_STATE_CHECK, it) }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.DirectionsWalk,
+                                    imageVector = MiuixIcons.Glass.HapticIntensity,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -517,24 +489,21 @@ fun SettingsScreenMiuix(
                             title = "屏蔽 Doze 移动传感器唤醒",
                             summary = "DeviceIdleController#motionLocked，移动手机不退出深度睡眠",
                             checked = disableMotionListener,
-                            onCheckedChange = {
-                                disableMotionListener = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.DISABLE_MOTION_LISTENER, it)
-                            }
+                            onCheckedChange = { onSetBooleanPref(PrefsKeys.DISABLE_MOTION_LISTENER, it) }
                         )
+                        }
                     }
 
                     SmallTitle(text = "日志与电量诊断")
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp)
+                    FoldablePreferenceCard(
+                        title = "运行日志与诊断",
+                        summary = "已开启 ${listOf(isLog, simplifyLog).count { it }}/2 项",
+                        icon = MiuixIcons.Glass.Log,
                     ) {
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.BugReport,
+                                    imageVector = MiuixIcons.Glass.Report,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -546,24 +515,16 @@ fun SettingsScreenMiuix(
                             summary = "记录运行拦截、电量统计与 Doze 日志（输出到 Xposed / Logcat，不写文件）",
                             checked = isLog,
                             onCheckedChange = { enabled ->
-                                isLog = enabled
-                                // 关闭时切到 OFF，开启时恢复默认等级，保持开关与等级一致。
-                                val level = if (enabled) PrefsDefaults.LOG_LEVEL else "off"
-                                logLevel = level
-                                PrefReader.editAllAndNotify(sp) {
-                                    putBoolean(PrefsKeys.IS_LOG, enabled)
-                                    putBoolean(PrefsKeys.LOG_TO_LOCAL, enabled)
-                                    putBoolean(PrefsKeys.BATTERY_CHANGE_OBSERVE, enabled)
-                                    putBoolean(PrefsKeys.DOZE_LOG, enabled)
-                                    putString(PrefsKeys.LOG_LEVEL, level)
-                                    putString(PrefsKeys.LOG_TYPE, PrefsDefaults.LOG_TYPE)
-                                }
+                                onSetDetailedLogging(enabled)
+                                // fork：关闭时把等级切到 OFF（开启时由上游恢复默认等级），保持开关与等级一致。
+                                if (!enabled) onSetLogLevel("off", true)
                             }
                         )
-                        OverlayDropdownPreference(
+                        GlassDropdownPreference(
+                            backdrop = backdrop,
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.BugReport,
+                                    imageVector = MiuixIcons.Glass.Log,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -581,7 +542,7 @@ fun SettingsScreenMiuix(
                                 "info", "i", "verbose", "v" -> 3
                                 else -> 4
                             },
-                            onSelectedIndexChange = { index ->
+                            onSelectedIndexChange = { index: Int ->
                                 val level = when (index) {
                                     0 -> "off"
                                     1 -> "error"
@@ -590,19 +551,13 @@ fun SettingsScreenMiuix(
                                     else -> "debug"
                                 }
                                 // 选「关闭」时同步关闭 isLog，避免 hook 侧门控与等级不一致。
-                                val enabled = index != 0
-                                logLevel = level
-                                isLog = enabled
-                                PrefReader.editAllAndNotify(sp) {
-                                    putString(PrefsKeys.LOG_LEVEL, level)
-                                    putBoolean(PrefsKeys.IS_LOG, enabled)
-                                }
+                                onSetLogLevel(level, true)
                             }
                         )
                         SwitchPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = MiuixIcons.Tune,
+                                    imageVector = MiuixIcons.Glass.RecordingTape,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -614,15 +569,14 @@ fun SettingsScreenMiuix(
                             summary = "跟踪单进程冻结并输出墓碑日志(F)/(T)，需重启生效",
                             checked = simplifyLog,
                             onCheckedChange = {
-                                simplifyLog = it
-                                PrefReader.putBooleanAndNotify(sp, PrefsKeys.SIMPLIFY_LOG, it)
+                                onSetBooleanPref(PrefsKeys.SIMPLIFY_LOG, it)
                                 showRebootNotice = true
                             }
                         )
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Share,
+                                    imageVector = MiuixIcons.Glass.Send,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -636,64 +590,6 @@ fun SettingsScreenMiuix(
                         )
                     }
 
-                    SmallTitle(text = "配置备份与恢复")
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp)
-                    ) {
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Backup,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "备份配置",
-                            summary = "将全部 ${PrefsKeys.ALL_KEYS.size} 项配置与名单导出或分享为 JSON",
-                            onClick = { showBackupDialog = true }
-                        )
-
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Import,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "恢复配置",
-                            summary = "选择已保存的 JSON 文件恢复策略并实时通知系统生效",
-                            onClick = {
-                                importLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
-                            }
-                        )
-
-                        ArrowPreference(
-                            startAction = {
-                                Icon(
-                                    imageVector = MiuixIcons.Reset,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .padding(end = 8.dp)
-                                        .size(24.dp),
-                                    tint = colorScheme.onBackground
-                                )
-                            },
-                            title = "恢复默认配置",
-                            summary = "清空所有自定义应用集合并恢复初始推荐开关",
-                            onClick = { showResetConfirmDialog = true }
-                        )
-                    }
-
                     SmallTitle(text = "关于")
                     Card(
                         modifier = Modifier
@@ -704,7 +600,22 @@ fun SettingsScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = MiuixIcons.Tasks,
+                                    imageVector = MiuixIcons.Glass.Backup,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(24.dp),
+                                    tint = colorScheme.onBackground
+                                )
+                            },
+                            title = "配置与备份",
+                            summary = "备份、恢复、分享、导出或恢复默认配置",
+                            onClick = { showConfigMenu = true }
+                        )
+                        ArrowPreference(
+                            startAction = {
+                                Icon(
+                                    imageVector = MiuixIcons.Glass.LockOutline,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -730,7 +641,7 @@ fun SettingsScreenMiuix(
                         ArrowPreference(
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.SystemUpdate,
+                                    imageVector = MiuixIcons.Glass.Update,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
@@ -763,6 +674,53 @@ fun SettingsScreenMiuix(
                 }
             }
 
+            ConfigActionsDialog(
+                show = showConfigMenu,
+                onDismissRequest = { showConfigMenu = false },
+                onBackup = { createBackupLauncher.launch(BugreportHelper.buildBackupFileName()) },
+                onRestore = { importLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
+                onShare = {
+                    configScope.launch {
+                        isLoading = true
+                        try {
+                            val file = withContext(Dispatchers.IO) {
+                                BugreportHelper.createBackupCacheFile(context)
+                            }
+                            val uri = FileProvider.getUriForFile(
+                                context,
+                                "${BuildConfig.APPLICATION_ID}.fileprovider",
+                                file
+                            )
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                setDataAndType(uri, "application/json")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "分享配置备份"))
+                        } catch (t: Throwable) {
+                            Toast.makeText(context, "分享失败：${t.message}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            isLoading = false
+                        }
+                    }
+                },
+                onExport = {
+                    configScope.launch {
+                        isLoading = true
+                        try {
+                            val name = withContext(Dispatchers.IO) {
+                                exportBackupToDownloads(context)
+                            }
+                            Toast.makeText(context, "已导出到下载目录：$name", Toast.LENGTH_SHORT).show()
+                        } catch (t: Throwable) {
+                            Toast.makeText(context, "导出失败：${t.message}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            isLoading = false
+                        }
+                    }
+                },
+                onReset = { showResetConfirmDialog = true },
+            )
             SendLogDialog(
                 show = showSendLogDialog,
                 onDismissRequest = { showSendLogDialog = false },
@@ -779,7 +737,7 @@ fun SettingsScreenMiuix(
 
 @Composable
 private fun LoadingDialogMiuix(show: Boolean) {
-    GlassDialog(backdrop = PopupBackdropHolder.current, 
+    OverlayDialog(
         show = show,
         onDismissRequest = { },
         content = {
@@ -906,26 +864,28 @@ private fun SaveShareActionDialog(
         }
     }
 
-    GlassDialog(backdrop = PopupBackdropHolder.current, 
+    OverlayDialog(
         show = show,
         onDismissRequest = onDismissRequest,
         insideMargin = DpSize(0.dp, 0.dp),
         content = {
-            Text(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 24.dp, bottom = 12.dp),
-                text = title,
-                fontSize = MiuixTheme.textStyles.title4.fontSize,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                color = colorScheme.onSurface
-            )
+            ProgressiveDialogLayout(
+                title = title,
+                headerPadding = PaddingValues(top = 24.dp, bottom = 12.dp),
+                footerPadding = PaddingValues(top = 12.dp, bottom = 24.dp, start = 24.dp, end = 24.dp),
+                footer = {
+                    TextButton(
+                        text = "取消",
+                        onClick = onDismissRequest,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+            ) {
             ArrowPreference(
                 title = saveTitle,
                 startAction = {
                     Icon(
-                        imageVector = Icons.Rounded.Save,
+                        imageVector = MiuixIcons.Glass.Save,
                         contentDescription = null,
                         modifier = Modifier.padding(end = 16.dp),
                         tint = colorScheme.onSurface
@@ -941,7 +901,7 @@ private fun SaveShareActionDialog(
                 title = shareTitle,
                 startAction = {
                     Icon(
-                        imageVector = Icons.Rounded.Share,
+                        imageVector = MiuixIcons.Glass.Share,
                         contentDescription = null,
                         modifier = Modifier.padding(end = 16.dp),
                         tint = colorScheme.onSurface
@@ -977,14 +937,99 @@ private fun SaveShareActionDialog(
                 },
                 insideMargin = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
             )
-            TextButton(
-                text = "取消",
-                onClick = onDismissRequest,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp, bottom = 24.dp)
-                    .padding(horizontal = 24.dp)
-            )
+            }
         }
     )
+}
+
+@Composable
+private fun ConfigActionsDialog(
+    show: Boolean,
+    onDismissRequest: () -> Unit,
+    onBackup: () -> Unit,
+    onRestore: () -> Unit,
+    onShare: () -> Unit,
+    onExport: () -> Unit,
+    onReset: () -> Unit,
+) {
+    OverlayDialog(
+        show = show,
+        onDismissRequest = onDismissRequest,
+        insideMargin = DpSize(0.dp, 0.dp),
+        content = {
+            ProgressiveDialogLayout(
+                title = "配置与备份",
+                maxBodyHeight = 420.dp,
+                headerPadding = PaddingValues(top = 24.dp, bottom = 12.dp),
+                footerPadding = PaddingValues(top = 12.dp, bottom = 24.dp, start = 24.dp, end = 24.dp),
+                footer = {
+                    TextButton(
+                        text = "取消",
+                        onClick = onDismissRequest,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+            ) {
+                ConfigActionRow("备份配置", MiuixIcons.Glass.Backup) {
+                    onDismissRequest()
+                    onBackup()
+                }
+                ConfigActionRow("恢复配置", MiuixIcons.Glass.Import) {
+                    onDismissRequest()
+                    onRestore()
+                }
+                ConfigActionRow("分享备份", MiuixIcons.Glass.Share) {
+                    onDismissRequest()
+                    onShare()
+                }
+                ConfigActionRow("导出到下载目录", MiuixIcons.Glass.Download) {
+                    onDismissRequest()
+                    onExport()
+                }
+                ConfigActionRow("恢复默认配置", MiuixIcons.Glass.Reset) {
+                    onDismissRequest()
+                    onReset()
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun ConfigActionRow(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+) {
+    ArrowPreference(
+        title = title,
+        startAction = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.padding(end = 16.dp).size(24.dp),
+                tint = colorScheme.onSurface,
+            )
+        },
+        onClick = onClick,
+        insideMargin = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+    )
+}
+
+/** 把配置 JSON 写入系统下载目录，返回文件名；失败抛异常。 */
+private fun exportBackupToDownloads(context: Context): String {
+    val fileName = BugreportHelper.buildBackupFileName()
+    val json = BackupRestoreHelper.exportToJson(context)
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+        put(MediaStore.Downloads.MIME_TYPE, "application/json")
+        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+    }
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        ?: error("无法创建下载文件")
+    resolver.openOutputStream(uri)?.use { output ->
+        output.write(json.toByteArray(Charsets.UTF_8))
+    } ?: error("无法写入下载文件")
+    return fileName
 }

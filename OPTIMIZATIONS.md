@@ -2,6 +2,8 @@
 
 本分支 `optimize/hotpath` 聚焦**热路径性能**与**稳健性**优化，并在日志设置上做了功能性调整（新增 OFF 等级、去除落盘），改动集中在若干文件。
 
+> 版本对齐：已合并上游 v1.4.0（merge `7c292c7`）。以下「已实施改动」为 fork 相对上游的持续改动；涉及上游重构的部分（下拉控件/状态架构）已按 v1.4.0 同步更新。
+
 ## 已实施改动
 
 ### 优化 #1 — 日志等级解析缓存（`core/Logger.kt`）
@@ -24,6 +26,7 @@
 - `Level` 新增 `OFF("-", 5)`（优先级高于 ERROR），`fromConfig` 识别 `off`/`o`。
 - `emit()` 开头显式 `if (minLevel == OFF) return`——因 ERROR 有 `level != ERROR` 穿透逻辑，仅靠优先级无法拦截 ERROR，必须靠此门保证 OFF 时**含 alwaysWarn/error 在内完全不输出**。
 - 设置页日志卡片新增「日志等级」下拉（关闭/仅错误/警告/信息/调试）：选「关闭」同步写 `IS_LOG=false`，避免 hook 侧 `if (!prefs.isLog)` 门控与等级不一致；等级与开关双向联动。
+- **v1.4.0 适配上游 UI 重构**：上游把配置状态从局部 `remember(configVersion)` 改为 `PrefsSnapshot` 响应式流（`SettingsViewModel` / `PolicyRepository`），并把控件从 `OverlayDropdownPreference` + material `Icons` 全换成 `GlassDropdownPreference(backdrop=...)` + `MiuixIcons`。本 fork 下拉同步迁移：从 `uiState.prefs.logLevel` 读，经 `SettingsViewModel.setLogLevel` → `PolicyRepository.setLogLevel(level, syncIsLog)` 写入（`syncIsLog=true` 时连同 `IS_LOG` 一起写），图标用 `MiuixIcons.Glass.Log`。迁移前会报 `Unresolved reference: OverlayDropdownPreference / Icons` 编译失败。
 
 ### 优化 #4 — RootShell 哨兵随机化（`core/RootShell.kt`）
 - 原哨兵为固定前缀 + 可预测递增序号，命令输出理论上可伪造/撞车提前结束读取。
@@ -33,12 +36,18 @@
 - 注释里写死的「51 条以上」已与 README 的点位数漂移，改为「随版本持续增长」。
 
 ## 未实施（评估后放弃 / 留待后续）
-- **UI 大文件拆分**（`TombStatsScreenMiuix.kt` 100KB 等）：纯可维护性，风险/收益比低，本轮不动。
+- **UI 大文件拆分**：fork 曾认为风险/收益比低而不动；上游 v1.4.0 已自行实施（新增 `ui/screen/tombstats/TombStatsSections.kt`，`TombStatsScreenMiuix.kt` 瘦身为壳），本 fork 随 merge 继承，无需自己做。
 - **`PrefReader` 增量重载改名**：语义问题不影响正确性，本轮不动。
-- **`PrefsSnapshot` 加 `logLevelEnum` 字段**：会把改动扩散到数据结构，`Logger` 内部缓存已达同等效果，放弃。
+- **`PrefsSnapshot` 加 `logLevelEnum` 字段**：上游 v1.4.0 的 `PrefsSnapshot` 已有字符串 `logLevel`（经 `PrefsSchema.normalizeLogLevel` 规范化），fork 只需读它并在 `Logger` 内部缓存解析结果，无需再加 enum 字段扩散数据结构。
 
-## 构建状态
-- 上游要求 Gradle 9.3.1（`gradle-wrapper.properties`），本机需下载该发行版后用 `./gradlew :app:compileDebugKotlin` 验证。
+## 构建状态（v1.4.0，2026-11-26）
+- 上游要求 **Gradle 9.8.0 + AGP 9.5.2 + JDK 21**（`gradle-wrapper.properties` / `build.gradle.kts`），并因 miuix 0.9.5-rc01 元数据要求 `compileSdk=37` + `compileSdkMinor=2`（SDK Platform 37.2）。旧 9.3.1 不够用。
+- 本机验证命令：
+  ```bash
+  ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon --console=plain   # 32 套 / 168/168
+  ./gradlew :app:assembleRelease --no-daemon --console=plain                              # 出 fork 签名包
+  ```
+- 官方 Gradle 源下载可能卡死，可用腾讯云镜像 `https://mirrors.cloud.tencent.com/gradle/gradle-9.8.0-bin.zip`（151,611,662 B）放入 wrapper 缓存。
 
 ## 来源与许可
 - 上游：https://github.com/univers629/XMillet （GPL-3.0）

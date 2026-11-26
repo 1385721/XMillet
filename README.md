@@ -31,7 +31,7 @@
 
 - **支持范围**：Android 13+（minSdk 33），实机适配 HyperOS 1.0 / 2.0 / 3.0 / 4.0（Android 13 ~ 17）
 - **LSPosed 作用域**：仅需勾选「系统框架 (`system`)」与「电量与性能 (`com.miui.powerkeeper`)」
-- **交互设计**：基于 [Miuix](https://github.com/compose-miuix-ui/miuix)（`0.9.5-beta03`）构建，支持液态玻璃悬浮底栏、玻璃顶栏、渐进式模糊、实时毛玻璃模糊、动态取色（Monet）、首次引导（OOBE）与桌面图标隐藏
+- **交互设计**：基于 [Miuix](https://github.com/compose-miuix-ui/miuix)（`0.9.5-rc01`）构建，支持液态玻璃悬浮底栏、玻璃顶栏、渐进式模糊、实时毛玻璃模糊、动态取色（Monet）、首次引导（OOBE）与桌面图标隐藏
 
 ## 界面预览
 
